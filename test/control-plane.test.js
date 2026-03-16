@@ -267,6 +267,29 @@ test("task preview can turn a plain-language request into a human plan", async (
   }
 });
 
+test("task preview keeps explicit URLs clean when Chinese punctuation follows the link", async () => {
+  const dataDir = await createTempDir();
+  const server = await startAgentServer({ dataDir });
+
+  try {
+    const response = await fetch(`${server.baseUrl}/tasks/preview`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        goal: "打开 https://example.com，点击 More information，然后截图",
+        preferredSurface: "browser"
+      })
+    });
+    const payload = await response.json();
+
+    assert.equal(payload.preview.taskSpec.inputs.startUrl, "https://example.com");
+    assert.equal(payload.preview.plan[0].params.url, "https://example.com");
+    assert.equal(payload.preview.plan[1].params.targetQuery, "More information");
+  } finally {
+    await server.close();
+  }
+});
+
 test("running tasks can be paused and resumed through the control API", async () => {
   const dataDir = await createTempDir();
   const server = await startAgentServer({ dataDir });

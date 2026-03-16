@@ -3,12 +3,12 @@ function cleanupMatch(value) {
 }
 
 function detectUrl(goal) {
-  const direct = goal?.match(/https?:\/\/\S+/iu)?.[0];
+  const direct = goal?.match(/https?:\/\/[^\s，。；;：:“”"'<>]+/iu)?.[0];
   if (direct) {
     return cleanupMatch(direct);
   }
 
-  const bare = goal?.match(/\b(?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/[^\s，。]*)?/iu)?.[0];
+  const bare = goal?.match(/\b(?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/[^\s，。；;：:“”"'<>]*)?/iu)?.[0];
   if (!bare) {
     return null;
   }
