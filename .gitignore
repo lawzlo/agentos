@@ -1,0 +1,4 @@
+node_modules
+.agentos
+.DS_Store
+coverage

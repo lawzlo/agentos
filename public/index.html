@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AgentOS</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Autonomous Personal Agent OS</p>
+          <h1>让你的电脑自己把事做完</h1>
+          <p class="lede">
+            输入目标，系统会自动拆解、定位并执行浏览器和桌面任务。你看到的是执行结果，不是操作脚本。
+          </p>
+        </div>
+        <div class="status-row">
+          <span id="healthBadge" class="badge">Checking</span>
+          <span id="socketBadge" class="badge badge-muted">Socket offline</span>
+          <span id="connectorBadge" class="badge badge-muted">Connector idle</span>
+        </div>
+      </header>
+
+      <main class="layout">
+        <section class="command-stage">
+          <article class="panel command-card">
+            <div class="panel-head">
+              <h2>下达任务</h2>
+              <p>默认按目标自动执行。下面的补充信息只在你想提高成功率时填写。</p>
+            </div>
+
+            <form id="taskForm" class="task-form">
+              <label class="command-field">
+                <span>这次要让系统完成什么</span>
+                <textarea
+                  id="goalInput"
+                  name="goal"
+                  rows="3"
+                  placeholder="比如：打开 example.com，点击 More information，然后截图给我"
+                  required
+                ></textarea>
+              </label>
+
+              <div class="quick-grid">
+                <button type="button" class="example-card" data-example="browser">
+                  <strong>自动网页任务</strong>
+                  <span>打开网页、定位目标、执行动作并返回结果</span>
+                </button>
+                <button type="button" class="example-card" data-example="desktop">
+                  <strong>自动桌面任务</strong>
+                  <span>打开本地 App、完成输入或点击，再保存证据</span>
+                </button>
+                <button type="button" class="example-card" data-example="message">
+                  <strong>自动发送消息</strong>
+                  <span>给目标会话发送内容，并等待状态完成</span>
+                </button>
+              </div>
+
+              <section class="context-card">
+                <div class="context-head">
+                  <h3>补充上下文</h3>
+                  <p>这些不是必须项，只是帮助系统更稳定地自动规划。</p>
+                </div>
+
+                <div class="context-grid">
+                  <label>
+                    <span>在哪工作</span>
+                    <input id="urlInput" name="startUrl" placeholder="网站地址，例如 https://example.com" />
+                  </label>
+                  <label>
+                    <span>或打开哪个 App</span>
+                    <input id="appInput" name="desktopApp" placeholder="例如 TextEdit / Notes / WeChat" />
+                  </label>
+                  <label>
+                    <span>要点哪里</span>
+                    <input id="clickTargetInput" name="clickTarget" placeholder="例如 More information / 发送 / Submit" />
+                  </label>
+                  <label>
+                    <span>把文字输到哪里</span>
+                    <input id="typeTargetInput" name="typeTarget" placeholder="例如 搜索框 / name / message" />
+                  </label>
+                  <label>
+                    <span>要输入什么</span>
+                    <input id="typeTextInput" name="typeText" placeholder="例如 Hello from AgentOS" />
+                  </label>
+                  <label>
+                    <span>等到什么出现</span>
+                    <input id="waitTextInput" name="waitText" placeholder="例如 Success / 已发送 / 已完成" />
+                  </label>
+                  <label>
+                    <span>等到哪个网址</span>
+                    <input id="waitUrlInput" name="waitUrl" placeholder="例如 iana.org / dashboard / next" />
+                  </label>
+                  <label>
+                    <span>截图名字</span>
+                    <input id="captureInput" name="captureLabel" placeholder="例如 after-navigation" />
+                  </label>
+                </div>
+              </section>
+
+              <section class="context-card teach-card">
+                <div class="context-head">
+                  <h3>Teach Mode</h3>
+                  <p>你做一次，系统记一次。任务成功后会把这条流程保存成可复用技能。</p>
+                </div>
+
+                <div class="teach-grid">
+                  <label class="teach-toggle">
+                    <input id="teachModeInput" name="teachMode" type="checkbox" />
+                    <div>
+                      <strong>记住这次流程</strong>
+                      <span>适合重复任务。下次可以直接复用，不用重新描述整条路径。</span>
+                    </div>
+                  </label>
+                  <label>
+                    <span>这条技能叫什么</span>
+                    <input id="teachSkillNameInput" name="teachSkillName" placeholder="例如 example-open-and-capture" />
+                  </label>
+                </div>
+              </section>
+
+              <div class="action-row">
+                <button type="button" id="previewButton" class="ghost-button">生成计划</button>
+                <button type="submit" id="runButton">立即执行</button>
+              </div>
+
+              <details class="advanced-panel">
+                <summary>高级选项</summary>
+
+                <div class="context-grid">
+                  <label>
+                    <span>工作面</span>
+                    <select id="surfaceInput" name="preferredSurface">
+                      <option value="auto">让系统判断</option>
+                      <option value="browser">browser</option>
+                      <option value="desktop">desktop</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>执行模式</span>
+                    <select id="modeInput" name="executionMode">
+                      <option value="planned">planned</option>
+                      <option value="autonomous">autonomous</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>最大步数</span>
+                    <input id="maxStepsInput" name="maxSteps" type="number" min="1" max="25" value="8" />
+                  </label>
+                  <label>
+                    <span>工作区</span>
+                    <input id="workspaceInput" name="workspaceName" placeholder="personal-main" />
+                  </label>
+                  <label>
+                    <span>技能名</span>
+                    <input id="skillInput" name="skillName" placeholder="可选，直接指定已保存 skill" />
+                  </label>
+                </div>
+
+                <label>
+                  <span>Direct Steps JSON</span>
+                  <textarea
+                    id="stepsInput"
+                    name="steps"
+                    rows="9"
+                    spellcheck="false"
+                    placeholder='[{"label":"Open page","surface":"browser","action":"goto","params":{"url":"https://example.com"}}]'
+                  ></textarea>
+                </label>
+              </details>
+            </form>
+          </article>
+
+          <aside class="panel preview-card">
+            <div class="preview-head">
+              <div>
+                <p class="eyebrow">Automatic Execution Plan</p>
+                <h2>将要自动完成</h2>
+              </div>
+              <div id="previewBadges" class="preview-badges"></div>
+            </div>
+
+            <p id="previewSummary" class="preview-summary">
+              输入目标后，这里会显示系统将自动执行的结果路径。
+            </p>
+
+            <ol id="previewList" class="preview-list">
+              <li class="empty-state">还没有可预览的计划。</li>
+            </ol>
+          </aside>
+        </section>
+
+        <section class="dashboard">
+          <div class="left-rail">
+            <article class="panel live-panel">
+              <div class="panel-head">
+                <h2>正在执行</h2>
+                <p>这里显示系统当前正在自动完成的工作。</p>
+              </div>
+              <div id="liveList" class="live-list">
+                <p class="empty-state">当前没有运行中的任务。</p>
+              </div>
+            </article>
+
+            <article class="panel skills-panel">
+              <div class="panel-head">
+                <h2>已经学会</h2>
+                <p>这里放系统学会的可复用流程。点一次就能拿来直接用。</p>
+              </div>
+              <div id="skillList" class="skill-list">
+                <p class="empty-state">还没有学会新的技能。</p>
+              </div>
+            </article>
+          </div>
+
+          <article class="panel history-panel">
+            <div class="panel-head">
+              <h2>最近工作</h2>
+              <p>默认只看结果摘要，原始 trace 和细节都收进详情里。</p>
+            </div>
+            <div id="taskList" class="task-list"></div>
+          </article>
+        </section>
+      </main>
+    </div>
+
+    <template id="taskTemplate">
+      <article class="task-card">
+        <div class="task-meta">
+          <div>
+            <h3 class="task-goal"></h3>
+            <p class="task-brief"></p>
+            <p class="task-id"></p>
+          </div>
+          <span class="task-status"></span>
+        </div>
+        <div class="task-body">
+          <div class="task-trace"></div>
+          <div class="task-actions"></div>
+          <details class="task-details">
+            <summary>查看原始结果</summary>
+            <pre class="task-result"></pre>
+          </details>
+        </div>
+      </article>
+    </template>
+
+    <template id="liveTemplate">
+      <article class="live-card">
+        <div>
+          <h3 class="live-goal"></h3>
+          <p class="live-status"></p>
+        </div>
+        <p class="live-event"></p>
+        <div class="live-controls"></div>
+      </article>
+    </template>
+
+    <template id="skillTemplate">
+      <article class="skill-card">
+        <div class="skill-meta">
+          <div>
+            <h3 class="skill-name"></h3>
+            <p class="skill-brief"></p>
+          </div>
+          <span class="skill-surface"></span>
+        </div>
+        <div class="skill-actions">
+          <button type="button" class="ghost-button skill-use">直接复用</button>
+        </div>
+      </article>
+    </template>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
