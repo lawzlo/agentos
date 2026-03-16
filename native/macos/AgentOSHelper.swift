@@ -2,6 +2,7 @@ import AppKit
 import CoreGraphics
 import Foundation
 import Vision
+import ApplicationServices
 
 enum HelperError: Error {
     case invalidArguments(String)
@@ -199,6 +200,55 @@ func frontmostApp() -> [String: Any] {
     ]
 }
 
+func permissionsStatus() -> [String: Any] {
+    return [
+        "accessibility": AXIsProcessTrusted(),
+        "screenRecording": CGPreflightScreenCaptureAccess()
+    ]
+}
+
+func listWindows() -> [[String: Any]] {
+    guard let entries = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
+        return []
+    }
+
+    return entries.compactMap { entry in
+        let ownerName = entry[kCGWindowOwnerName as String] as? String ?? ""
+        let windowName = entry[kCGWindowName as String] as? String ?? ""
+        let layer = entry[kCGWindowLayer as String] as? Int ?? 0
+        let alpha = entry[kCGWindowAlpha as String] as? Double ?? 1
+
+        guard !ownerName.isEmpty, layer == 0, alpha > 0 else {
+            return nil
+        }
+
+        let bounds: CGRect
+        if let boundsDict = entry[kCGWindowBounds as String] as? NSDictionary,
+           let resolvedBounds = CGRect(dictionaryRepresentation: boundsDict) {
+            bounds = resolvedBounds
+        } else {
+            bounds = .zero
+        }
+
+        return [
+            "windowNumber": entry[kCGWindowNumber as String] as? Int ?? 0,
+            "ownerName": ownerName,
+            "windowName": windowName,
+            "ownerPID": entry[kCGWindowOwnerPID as String] as? Int ?? 0,
+            "layer": layer,
+            "alpha": alpha,
+            "bounds": [
+                "x": bounds.origin.x,
+                "y": bounds.origin.y,
+                "width": bounds.width,
+                "height": bounds.height,
+                "centerX": bounds.midX,
+                "centerY": bounds.midY
+            ]
+        ]
+    }
+}
+
 let arguments = CommandLine.arguments
 
 do {
@@ -209,6 +259,10 @@ do {
     switch arguments[1] {
     case "frontmost-app":
         Json.printObject(frontmostApp())
+    case "permissions-status":
+        Json.printObject(permissionsStatus())
+    case "list-windows":
+        Json.printObject(["windows": listWindows()])
     case "capture-screen":
         guard arguments.count >= 3 else {
             throw HelperError.invalidArguments("capture-screen requires a destination path.")

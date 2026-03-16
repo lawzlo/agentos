@@ -59,22 +59,32 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
   async observe({ task, workspace, traceId, label = "desktop-observe", recentActions = [] }) {
     const bridge = this.#requireBridge();
     const capture = await this.capture({ task, workspace, traceId, label });
-    const [frontmostApp, ocr] = await Promise.all([
+    const [frontmostApp, ocr, windows, permissions] = await Promise.all([
       bridge.getFrontmostApp(),
-      bridge.ocrImage(capture.path)
+      bridge.ocrImage(capture.path),
+      typeof bridge.listWindows === "function"
+        ? bridge.listWindows().catch(() => ({ windows: [] }))
+        : { windows: [] },
+      typeof bridge.getPermissionsStatus === "function"
+        ? bridge.getPermissionsStatus().catch(() => null)
+        : null
     ]);
     const ocrBlocks = normalizeOcrBlocks(ocr.observations ?? [], "desktop");
 
     return createWorldState({
       surface: "desktop",
       workspaceId: workspace.id,
-      appContext: frontmostApp,
+      appContext: {
+        ...frontmostApp,
+        windows: windows.windows ?? [],
+        permissions
+      },
       capture,
       ocrBlocks,
       interactionCandidates: this.#createCandidates(ocrBlocks),
       visibleText: ocrBlocks.map((block) => block.text).join("\n").slice(0, 4000),
       recentActions: summarizeRecentActions(recentActions),
-      summary: `${frontmostApp.appName} with ${ocrBlocks.length} OCR observations`
+      summary: `${frontmostApp.appName} with ${ocrBlocks.length} OCR observations across ${(windows.windows ?? []).length} windows`
     });
   }
 
@@ -230,5 +240,11 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
     }
 
     return { ok: true, details };
+  }
+
+  async shutdown() {
+    if (typeof this.bridge?.shutdown === "function") {
+      await this.bridge.shutdown();
+    }
   }
 }

@@ -9,10 +9,17 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "test": "node --test"
+    "test": "node --test",
+    "build:ts": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "native:build": "cargo build --manifest-path rust/agentos-native/Cargo.toml --release"
   },
   "dependencies": {
     "playwright-core": "^1.54.2",
     "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.6.0",
+    "typescript": "^5.9.3"
   }
 }

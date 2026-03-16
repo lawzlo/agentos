@@ -32,6 +32,40 @@ npm install
 
 The daemon listens on `http://localhost:3017` by default. The web console remains available there, but the primary product entry is the CLI.
 
+## TypeScript and Rust split
+
+AgentOS is still runtime-first in Node.js, but the migration path is now explicit:
+
+- `TypeScript` is the boundary layer for shared schemas and IPC contracts under [`src/types/`](./src/types)
+- `Rust` is the native/runtime-heavy layer under [`rust/agentos-native`](./rust/agentos-native)
+- `JavaScript` continues to own orchestration, Playwright browser control, tasks, skills, and watches for now
+- The macOS native path now covers capture, frontmost app, OCR, text search, window listing, and permission status through the Rust sidecar plus native helper
+- The Windows bridge now covers capture, frontmost app, window listing, text input, key input, mouse input, and OCR/text lookup through PowerShell-native automation
+
+Run type checking for the new typed boundary:
+
+```bash
+npm run typecheck
+```
+
+Build the first migrated `.ts` runtime modules back into `src/*.js`:
+
+```bash
+npm run build:ts
+```
+
+Build the Rust sidecar:
+
+```bash
+npm run native:build
+```
+
+Notes:
+
+- Building the Rust sidecar requires `cargo` to be installed locally.
+- If the Rust sidecar is unavailable, the macOS bridge falls back to the existing JS/Swift helper path.
+- You can point AgentOS at a prebuilt sidecar with `AGENTOS_NATIVE_SIDECAR=/path/to/agentos-native`.
+
 ## CLI-first usage
 
 Start or inspect the daemon:
@@ -83,6 +117,8 @@ Teach a completed task into a reusable watch profile:
 - Browser automation expects a Chrome-compatible executable. Set `AGENTOS_BROWSER_EXECUTABLE` if auto-detection fails.
 - The browser runs headless by default. Set `AGENTOS_HEADLESS=false` to watch the managed browser.
 - Desktop automation on macOS uses `screencapture`, `open`, and `osascript`, which may require Accessibility and Screen Recording permissions.
+- Desktop automation on Windows now uses native PowerShell and Win32 APIs for screen capture, visible-window discovery, input injection, and OCR-based text lookup.
+- Desktop observation now also captures on-screen window metadata and local permission status when the macOS native path is available.
 - Desktop steps can now use `clickAt`, `moveMouse`, `scroll`, `clickText`, `ocrScreen`, and `waitForText`.
 - Browser and desktop tasks can now use `clickTarget`, `focusTarget`, `typeIntoTarget`, `waitForTarget`, and `extractFromTarget` with `targetQuery`.
 - Model planning is optional. If `MODEL_BASE_URL`, `MODEL_API_KEY`, and `MODEL_NAME` are set, the planner will call an OpenAI-compatible chat completions API; otherwise it falls back to explicit `steps` or heuristic browser plans.
