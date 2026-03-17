@@ -410,6 +410,27 @@ ALLOW_UNSIGNED_PACKAGE=1 npm run package:macos
 npm run package:windows
 ```
 
+GitHub Release automation:
+
+- The workflow lives at [.github/workflows/release.yml](./.github/workflows/release.yml).
+- On `release.published`, GitHub Actions now builds:
+  - a signed macOS `.pkg`
+  - a signed Windows `.msi`
+- The workflow then uploads both installers directly to the GitHub Release, not just as transient workflow artifacts.
+- You can also trigger it manually through `workflow_dispatch`.
+
+Required GitHub secrets for signed builds:
+
+- `AGENTOS_MACOS_SIGN_IDENTITY`
+- `AGENTOS_WINDOWS_SIGN_PFX_BASE64`
+- `AGENTOS_WINDOWS_SIGN_PFX_PASSWORD`
+
+Manual publishing options:
+
+- `publish_to_release=true`: create or update a GitHub Release and attach the installers
+- `release_tag`: optional tag override, otherwise the workflow uses `v<package.json version>`
+- `release_name`: optional release title override
+
 ## License
 
 MIT. See [LICENSE](./LICENSE).

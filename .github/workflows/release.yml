@@ -2,19 +2,40 @@ name: Release
 
 on:
   workflow_dispatch:
+    inputs:
+      publish_to_release:
+        description: Upload artifacts to a GitHub Release
+        required: false
+        default: "false"
+      release_tag:
+        description: Tag to create or update when publishing manually
+        required: false
+        default: ""
+      release_name:
+        description: Release name override for manual publishing
+        required: false
+        default: ""
   release:
     types:
       - published
 
+permissions:
+  contents: write
+
+env:
+  NODE_VERSION: "22"
+
 jobs:
   macos:
     runs-on: macos-latest
+    outputs:
+      package_name: ${{ steps.package_meta.outputs.package_name }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: ${{ env.NODE_VERSION }}
           cache: npm
 
       - uses: dtolnay/rust-toolchain@stable
@@ -27,6 +48,16 @@ jobs:
           AGENTOS_MACOS_SIGN_IDENTITY: ${{ secrets.AGENTOS_MACOS_SIGN_IDENTITY }}
         run: npm run package:macos
 
+      - name: Capture package metadata
+        id: package_meta
+        run: |
+          PACKAGE_PATH="$(find release/artifacts -maxdepth 1 -name '*.pkg' | sort | tail -n 1)"
+          if [ -z "$PACKAGE_PATH" ]; then
+            echo "No macOS package produced." >&2
+            exit 1
+          fi
+          echo "package_name=$(basename "$PACKAGE_PATH")" >> "$GITHUB_OUTPUT"
+
       - uses: actions/upload-artifact@v4
         with:
           name: agentos-macos
@@ -34,12 +65,14 @@ jobs:
 
   windows:
     runs-on: windows-latest
+    outputs:
+      package_name: ${{ steps.package_meta.outputs.package_name }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: ${{ env.NODE_VERSION }}
           cache: npm
 
       - uses: dtolnay/rust-toolchain@stable
@@ -57,7 +90,72 @@ jobs:
           AGENTOS_WINDOWS_SIGN_PFX_PASSWORD: ${{ secrets.AGENTOS_WINDOWS_SIGN_PFX_PASSWORD }}
         run: npm run package:windows
 
+      - name: Capture package metadata
+        id: package_meta
+        shell: pwsh
+        run: |
+          $package = Get-ChildItem release/artifacts/*.msi | Sort-Object Name | Select-Object -Last 1
+          if (-not $package) {
+            Write-Error "No Windows MSI produced."
+            exit 1
+          }
+          "package_name=$($package.Name)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
       - uses: actions/upload-artifact@v4
         with:
           name: agentos-windows
           path: release/artifacts/*.msi
+
+  publish:
+    runs-on: ubuntu-latest
+    needs:
+      - macos
+      - windows
+    if: github.event_name == 'release' || inputs.publish_to_release == 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve release metadata
+        id: release_meta
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.release_tag }}
+          INPUT_NAME: ${{ inputs.release_name }}
+        run: |
+          PACKAGE_VERSION="$(node -p "require('./package.json').version")"
+          if [ "$EVENT_NAME" = "release" ]; then
+            TAG_NAME="$EVENT_TAG"
+          elif [ -n "$INPUT_TAG" ]; then
+            TAG_NAME="$INPUT_TAG"
+          else
+            TAG_NAME="v$PACKAGE_VERSION"
+          fi
+          if [ -n "$INPUT_NAME" ]; then
+            RELEASE_NAME="$INPUT_NAME"
+          else
+            RELEASE_NAME="AgentOS $PACKAGE_VERSION"
+          fi
+          echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
+          echo "release_name=$RELEASE_NAME" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: agentos-macos
+          path: release-assets/macos
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: agentos-windows
+          path: release-assets/windows
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release_meta.outputs.tag_name }}
+          name: ${{ steps.release_meta.outputs.release_name }}
+          files: |
+            release-assets/macos/*.pkg
+            release-assets/windows/*.msi
+          fail_on_unmatched_files: true
+          generate_release_notes: true

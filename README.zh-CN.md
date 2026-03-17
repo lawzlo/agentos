@@ -409,6 +409,27 @@ ALLOW_UNSIGNED_PACKAGE=1 npm run package:macos
 npm run package:windows
 ```
 
+GitHub Release 自动发布：
+
+- workflow 在 [.github/workflows/release.yml](./.github/workflows/release.yml)
+- 当触发 `release.published` 时，GitHub Actions 现在会自动构建：
+  - 已签名的 macOS `.pkg`
+  - 已签名的 Windows `.msi`
+- 构建完成后会直接上传到 GitHub Release，不只是保存在 Actions artifact 里
+- 也可以通过 `workflow_dispatch` 手动触发
+
+签名构建需要的 GitHub secrets：
+
+- `AGENTOS_MACOS_SIGN_IDENTITY`
+- `AGENTOS_WINDOWS_SIGN_PFX_BASE64`
+- `AGENTOS_WINDOWS_SIGN_PFX_PASSWORD`
+
+手动触发时可用参数：
+
+- `publish_to_release=true`：创建或更新 GitHub Release，并挂上安装包
+- `release_tag`：可选，覆盖默认 tag；不填时使用 `v<package.json version>`
+- `release_name`：可选，覆盖默认 release 标题
+
 ## License
 
 MIT，见 [LICENSE](./LICENSE)。
