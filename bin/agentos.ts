@@ -9,7 +9,8 @@ import {
   commandLogs,
   commandPs,
   commandRun,
-  commandTeachStep
+  commandTeachStep,
+  commandVersion
 } from "./commands/task-command.js";
 import { commandWatch } from "./commands/watch-command.js";
 import { commandDrafts } from "./commands/drafts-command.js";
@@ -18,9 +19,10 @@ import { commandSkills } from "./commands/skills-command.js";
 import { boolOption, parseArgs, print } from "./cli-utils.js";
 
 function helpText() {
-  return `agentos daemon start|stop|status|logs|install|uninstall
+  return `agentos daemon start|stop|status|logs|restart|install|uninstall
 agentos run "<goal>" [--surface browser|desktop] [--workspace name] [--skill name] [--input key=value] [--wait]
-agentos doctor
+agentos doctor [--bundle]
+agentos version
 agentos ps [--limit 20]
 agentos inspect <task-id>
 agentos logs <task-id>
@@ -35,7 +37,9 @@ agentos skills ls|inspect|run`;
 }
 
 async function main() {
-  const [command, subcommand, ...rest] = process.argv.slice(2);
+  const [command, rawSubcommand, ...restArgs] = process.argv.slice(2);
+  const subcommand = rawSubcommand?.startsWith("--") ? undefined : rawSubcommand;
+  const rest = rawSubcommand?.startsWith("--") ? [rawSubcommand, ...restArgs] : restArgs;
   const { positionals, options } = parseArgs(rest);
   const sharedOptions: Record<string, any> = {
     ...options,
@@ -62,6 +66,11 @@ async function main() {
 
   if (command === "doctor") {
     await commandDoctor(sharedOptions);
+    return;
+  }
+
+  if (command === "version") {
+    await commandVersion(sharedOptions);
     return;
   }
 

@@ -7,7 +7,11 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { resolveConfig } from "../src/config.js";
-import { daemonLogPath, readDaemonRuntime } from "../src/daemon-state.js";
+import {
+  daemonLogPath,
+  readDaemonRuntime,
+  rotateDaemonLogs
+} from "../src/daemon-state.js";
 
 export const config = resolveConfig();
 export const distBinDir = path.dirname(fileURLToPath(import.meta.url));
@@ -186,6 +190,7 @@ export async function daemonStart(options: Record<string, any>) {
   } catch {}
 
   await fsp.mkdir(config.daemonDir, { recursive: true });
+  await rotateDaemonLogs(config.daemonDir);
   const logPath = daemonLogPath(config.daemonDir);
 
   if (boolOption(options.foreground)) {
@@ -228,6 +233,23 @@ export async function daemonStop(options: Record<string, any>) {
 
   process.kill(Number(runtime.state.pid), "SIGTERM");
   print(options.json ? { stopped: true, pid: Number(runtime.state.pid) } : "Stopping AgentOS daemon.", options);
+}
+
+export async function daemonRestart(options: Record<string, any>) {
+  const runtime = await readDaemonRuntime(config.daemonDir);
+  if (runtime.running && runtime.state?.pid) {
+    process.kill(Number(runtime.state.pid), "SIGTERM");
+    const started = Date.now();
+    while (Date.now() - started < Number(options.timeout ?? 10000)) {
+      const current = await readDaemonRuntime(config.daemonDir);
+      if (!current.running) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+  }
+
+  await daemonStart(options);
 }
 
 export async function daemonLogs(options: Record<string, any>) {

@@ -78,6 +78,8 @@ Start or inspect the daemon:
 node dist/bin/agentos.js daemon start
 node dist/bin/agentos.js daemon status
 node dist/bin/agentos.js doctor
+node dist/bin/agentos.js doctor --bundle
+node dist/bin/agentos.js version
 ```
 
 Run a one-off task:
@@ -125,6 +127,14 @@ node dist/bin/agentos.js drafts ls
 node dist/bin/agentos.js drafts approve <draft-id>
 ```
 
+Restart the daemon or prepare release artifacts:
+
+```bash
+node dist/bin/agentos.js daemon restart
+npm run package:release -- --platform darwin
+ALLOW_UNSIGNED_PACKAGE=1 npm run package:macos
+```
+
 ## Runtime notes
 
 - AgentOS stores all local state under `.agentos/`.
@@ -143,8 +153,11 @@ node dist/bin/agentos.js drafts approve <draft-id>
 - Teach Mode can save a successful run into a reusable skill either during task submission with `saveSkillAs` or later through `POST /skills/from-task`.
 - Standing tasks are stored as watch rules. The runtime currently ships bundled live packs for `slack-desktop`, `wechat-desktop`, `generic-mail-desktop`, and `generic-desktop`.
 - Live packs now expose pack metadata through `/packs`, and `agentos doctor` summarizes degraded watches and pending drafts.
+- `agentos doctor --bundle` writes a local diagnostic bundle under `.agentos/daemon/bundles/`.
+- `agentos version` and `GET /version` expose the runtime, native protocol, store schema, and install layout contract versions.
 - Conservative automation is now built in: Slack and WeChat can auto-send low-risk replies, while mail and high-risk actions default to pending drafts for approval.
 - JSON files dropped into `.agentos/inbox/` are ingested automatically. Task-shaped JSON creates a task; `{ "kind": "event", ... }` creates an event.
+- Release automation now ships with GitHub Actions workflows plus staging scripts for signed macOS `.pkg` and Windows `.msi` builds.
 
 ## API
 
@@ -160,6 +173,8 @@ node dist/bin/agentos.js drafts approve <draft-id>
 - `POST /policy/evaluate`
 - `GET /connectors`
 - `GET /doctor`
+- `POST /doctor/bundle`
+- `GET /version`
 - `GET /packs`
 - `GET /watches`
 - `POST /watches`

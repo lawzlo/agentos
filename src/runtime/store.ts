@@ -12,7 +12,7 @@ import { TraceRepository } from "./repositories/trace-repository.js";
 import { VaultRepository } from "./repositories/vault-repository.js";
 import { WatchRepository } from "./repositories/watch-repository.js";
 import { WorkspaceRepository } from "./repositories/workspace-repository.js";
-import { initializeStoreSchema } from "./store-schema.js";
+import { getStoreSchemaVersion, initializeStoreSchema } from "./store-schema.js";
 
 export class ControlPlaneStore {
   db: any;
@@ -41,6 +41,10 @@ export class ControlPlaneStore {
     this.watches = new WatchRepository(this.db);
     this.drafts = new DraftRepository(this.db);
     this.vault = new VaultRepository(this.db);
+  }
+
+  getSchemaVersion() {
+    return getStoreSchemaVersion(this.db);
   }
 
   createTask(taskSpec: Record<string, any>) {

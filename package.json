@@ -13,7 +13,10 @@
     "test": "npm run build:ts && node scripts/run-tests.mjs",
     "build:ts": "node scripts/build-ts.mjs",
     "typecheck": "tsc --noEmit",
-    "native:build": "cargo build --manifest-path rust/agentos-native/Cargo.toml --release"
+    "native:build": "cargo build --manifest-path rust/agentos-native/Cargo.toml --release",
+    "package:release": "node scripts/package-release.mjs",
+    "package:macos": "node scripts/build-macos-pkg.mjs",
+    "package:windows": "node scripts/build-windows-msi.mjs"
   },
   "dependencies": {
     "playwright-core": "^1.54.2",

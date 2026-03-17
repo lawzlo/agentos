@@ -26,6 +26,8 @@ import { WatchService } from "./watch-service.js";
 import { DraftService } from "./draft-service.js";
 import { WatchExecutionService } from "./watch-execution-service.js";
 import { RuntimeSupervisor } from "./runtime-supervisor.js";
+import { createDiagnosticBundle } from "../diagnostics.js";
+import { getRuntimeVersionInfo } from "../version.js";
 
 export class ControlPlane {
   config: any;
@@ -344,8 +346,92 @@ export class ControlPlane {
     return this.draftService.reject(draftId, reason);
   }
 
-  doctor() {
-    return this.watchService.doctor();
+  getVersionInfo() {
+    return getRuntimeVersionInfo();
+  }
+
+  async #collectNativeDiagnostics() {
+    const desktopSurface = this.surfaceRegistry.get("desktop");
+    const bridge = desktopSurface?.bridge;
+    if (!bridge || typeof bridge.sidecarHealth !== "function") {
+      return {
+        available: false,
+        compatible: false,
+        reason: `Desktop automation is not available on ${process.platform}.`
+      };
+    }
+
+    try {
+      const health = await bridge.sidecarHealth();
+      const permissions =
+        typeof bridge.getPermissionsStatus === "function"
+          ? await bridge.getPermissionsStatus().catch(() => null)
+          : null;
+      const compatible =
+        Number(health.nativeProtocolVersion ?? -1) ===
+        this.getVersionInfo().nativeProtocolVersion;
+      return {
+        available: true,
+        compatible,
+        health,
+        permissions
+      };
+    } catch (error) {
+      return {
+        available: false,
+        compatible: false,
+        reason: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+
+  async doctor() {
+    const base = this.watchService.doctor();
+    const version = this.getVersionInfo();
+    const schemaVersion = this.store.getSchemaVersion();
+    const native = await this.#collectNativeDiagnostics();
+    const warnings = [...base.warnings];
+
+    if (schemaVersion !== version.storeSchemaVersion) {
+      warnings.push(
+        `Store schema version ${schemaVersion} does not match runtime expectation ${version.storeSchemaVersion}.`
+      );
+    }
+    if (!native.available && process.platform !== "linux") {
+      warnings.push(native.reason ?? "Native sidecar is not available.");
+    }
+    if (native.available && !native.compatible) {
+      warnings.push(
+        `Native sidecar protocol ${native.health?.nativeProtocolVersion ?? "unknown"} does not match runtime expectation ${version.nativeProtocolVersion}.`
+      );
+    }
+    if (native.permissions && Object.values(native.permissions).some((value) => value === false)) {
+      warnings.push("Desktop automation permissions are incomplete.");
+    }
+
+    return {
+      ...base,
+      ok:
+        warnings.length === 0 &&
+        schemaVersion === version.storeSchemaVersion &&
+        (process.platform === "linux" || native.available) &&
+        (!native.available || native.compatible),
+      warnings,
+      version,
+      store: {
+        schemaVersion,
+        compatible: schemaVersion === version.storeSchemaVersion
+      },
+      native
+    };
+  }
+
+  async createDoctorBundle(daemon: Record<string, any>) {
+    return createDiagnosticBundle({
+      controlPlane: this,
+      config: this.config,
+      daemon
+    });
   }
 
   evaluatePolicy(taskSpec) {

@@ -20,6 +20,8 @@ export type SidecarResponse<TResult = Record<string, unknown>> = SidecarSuccess<
 
 export interface SidecarHealthResult {
   platform: string;
+  appVersion: string;
+  nativeProtocolVersion: number;
   helperAvailable: boolean;
   methods: string[];
 }

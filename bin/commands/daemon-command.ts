@@ -1,6 +1,7 @@
 import {
   daemonInstall,
   daemonLogs,
+  daemonRestart,
   daemonStart,
   daemonStatus,
   daemonStop,
@@ -22,6 +23,10 @@ export async function handleDaemonCommand(subcommand: string | undefined, option
   }
   if (subcommand === "logs") {
     await daemonLogs(options);
+    return true;
+  }
+  if (subcommand === "restart") {
+    await daemonRestart(options);
     return true;
   }
   if (subcommand === "install") {

@@ -1,4 +1,24 @@
+import { STORE_SCHEMA_VERSION } from "../version.js";
+
+export function getStoreSchemaVersion(db: any): number {
+  const row = db.prepare("PRAGMA user_version").get() as
+    | { user_version?: number }
+    | number
+    | undefined;
+  if (typeof row === "number") {
+    return Number(row);
+  }
+  return Number(row?.user_version ?? 0);
+}
+
 export function initializeStoreSchema(db: any): void {
+  const currentVersion = getStoreSchemaVersion(db);
+  if (currentVersion > STORE_SCHEMA_VERSION) {
+    throw new Error(
+      `Unsupported AgentOS store schema version ${currentVersion}. This runtime supports up to ${STORE_SCHEMA_VERSION}.`
+    );
+  }
+
   db.exec(`
     PRAGMA journal_mode = WAL;
     CREATE TABLE IF NOT EXISTS tasks (
@@ -167,5 +187,6 @@ export function initializeStoreSchema(db: any): void {
     CREATE INDEX IF NOT EXISTS idx_skills_surface ON skills(surface_scope);
     CREATE INDEX IF NOT EXISTS idx_watch_rules_enabled ON watch_rules(enabled);
     CREATE INDEX IF NOT EXISTS idx_drafts_status ON drafts(status);
+    PRAGMA user_version = ${STORE_SCHEMA_VERSION};
   `);
 }

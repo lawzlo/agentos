@@ -1,6 +1,9 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
+const DEFAULT_LOG_MAX_BYTES = Number(process.env.AGENTOS_DAEMON_LOG_MAX_BYTES ?? 1024 * 1024);
+const DEFAULT_LOG_BACKUPS = Number(process.env.AGENTOS_DAEMON_LOG_BACKUPS ?? 5);
+
 export interface DaemonStateSnapshot {
   pid?: number;
   port?: number | string;
@@ -26,6 +29,13 @@ function stateFile(daemonDir: string): string {
 
 export function daemonLogPath(daemonDir: string): string {
   return path.join(daemonDir, "daemon.log");
+}
+
+export function daemonLogPaths(daemonDir: string, backups = DEFAULT_LOG_BACKUPS): string[] {
+  return [
+    daemonLogPath(daemonDir),
+    ...Array.from({ length: backups }, (_, index) => `${daemonLogPath(daemonDir)}.${index + 1}`)
+  ];
 }
 
 async function fileExists(filePath: string): Promise<boolean> {
@@ -83,6 +93,65 @@ export async function clearDaemonState(daemonDir: string): Promise<void> {
       (filePath) => fs.rm(filePath, { force: true }).catch(() => {})
     )
   );
+}
+
+export async function rotateDaemonLogs(
+  daemonDir: string,
+  {
+    maxBytes = DEFAULT_LOG_MAX_BYTES,
+    backups = DEFAULT_LOG_BACKUPS
+  }: {
+    maxBytes?: number;
+    backups?: number;
+  } = {}
+): Promise<void> {
+  const logPath = daemonLogPath(daemonDir);
+  try {
+    const stat = await fs.stat(logPath);
+    if (stat.size < maxBytes) {
+      return;
+    }
+  } catch {
+    return;
+  }
+
+  for (let index = backups; index >= 1; index -= 1) {
+    const current = `${logPath}.${index}`;
+    const next = `${logPath}.${index + 1}`;
+    if (index === backups) {
+      await fs.rm(current, { force: true }).catch(() => {});
+      continue;
+    }
+    await fs.rename(current, next).catch(() => {});
+  }
+
+  await fs.rename(logPath, `${logPath}.1`).catch(() => {});
+}
+
+export async function appendDaemonMarker(
+  daemonDir: string,
+  marker: string,
+  metadata: Record<string, unknown> = {}
+): Promise<void> {
+  await fs.mkdir(daemonDir, { recursive: true });
+  const line = JSON.stringify({
+    timestamp: new Date().toISOString(),
+    marker,
+    ...metadata
+  });
+  await fs.appendFile(daemonLogPath(daemonDir), `${line}\n`, "utf8");
+}
+
+export async function readDaemonLogTail(
+  daemonDir: string,
+  maxBytes = 64 * 1024
+): Promise<string> {
+  try {
+    const content = await fs.readFile(daemonLogPath(daemonDir), "utf8");
+    return content.slice(-maxBytes);
+  } catch {
+    return "";
+  }
 }
 
 export async function readDaemonRuntime(

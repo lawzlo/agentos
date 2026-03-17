@@ -33,8 +33,19 @@ export async function commandRun(positionals: string[], options: Record<string, 
 }
 
 export async function commandDoctor(options: Record<string, any>) {
+  if (boolOption(options.bundle)) {
+    const payload = await apiRequest("POST", "/doctor/bundle");
+    print(payload.bundle, options);
+    return;
+  }
+
   const payload = await apiRequest("GET", "/doctor");
   print(payload.doctor, options);
+}
+
+export async function commandVersion(options: Record<string, any>) {
+  const payload = await apiRequest("GET", "/version");
+  print(payload.version, options);
 }
 
 export async function commandPs(options: Record<string, any>) {

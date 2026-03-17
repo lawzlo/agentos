@@ -6,6 +6,8 @@ use std::io::{self, BufRead, Write};
 use std::os::raw::c_char;
 use std::process::Command;
 
+const NATIVE_PROTOCOL_VERSION: u32 = 1;
+
 #[cfg(target_os = "macos")]
 unsafe extern "C" {
     fn agentos_macos_permissions_status_json() -> *mut c_char;
@@ -104,6 +106,8 @@ fn handle_request(request: &Request) -> Result<Value, String> {
     match request.method.as_str() {
         "health" => Ok(json!({
             "platform": env::consts::OS,
+            "appVersion": env!("CARGO_PKG_VERSION"),
+            "nativeProtocolVersion": NATIVE_PROTOCOL_VERSION,
             "helperAvailable": matches!(env::consts::OS, "windows" | "macos"),
             "methods": [
                 "health",

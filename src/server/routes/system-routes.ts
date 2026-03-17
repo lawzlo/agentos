@@ -9,6 +9,13 @@ export async function handleSystemRoutes({
   activePort,
   startedAt
 }: Record<string, any>) {
+  const daemon = {
+    pid: process.pid,
+    port: activePort,
+    startedAt,
+    dataDir: config.dataDir
+  };
+
   if (req.method === "GET" && url.pathname === "/health") {
     json(res, 200, {
       ok: true,
@@ -22,14 +29,24 @@ export async function handleSystemRoutes({
   if (req.method === "GET" && url.pathname === "/doctor") {
     json(res, 200, {
       doctor: {
-        ...controlPlane.doctor(),
-        daemon: {
-          pid: process.pid,
-          port: activePort,
-          startedAt,
-          dataDir: config.dataDir
-        }
+        ...(await controlPlane.doctor()),
+        daemon
       }
+    });
+    return true;
+  }
+
+  if (req.method === "POST" && url.pathname === "/doctor/bundle") {
+    const bundle = await controlPlane.createDoctorBundle(daemon);
+    json(res, 200, {
+      bundle
+    });
+    return true;
+  }
+
+  if (req.method === "GET" && url.pathname === "/version") {
+    json(res, 200, {
+      version: controlPlane.getVersionInfo()
     });
     return true;
   }
@@ -39,10 +56,7 @@ export async function handleSystemRoutes({
     json(res, 200, {
       daemon: {
         running: true,
-        pid: process.pid,
-        port: activePort,
-        startedAt,
-        dataDir: config.dataDir,
+        ...daemon,
         connectorCount: controlPlane.listConnectors().length,
         watchCount: watches.length,
         enabledWatchCount: watches.filter((rule: Record<string, any>) => rule.enabled).length

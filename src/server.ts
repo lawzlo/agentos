@@ -6,7 +6,7 @@ import { WebSocketServer } from "ws";
 
 import { resolveConfig } from "./config.js";
 import { createControlPlane } from "./runtime/control-plane.js";
-import { clearDaemonState, writeDaemonState } from "./daemon-state.js";
+import { appendDaemonMarker, clearDaemonState, writeDaemonState } from "./daemon-state.js";
 import { dispatchApiRoute } from "./server/route-dispatcher.js";
 import { serveStatic } from "./server/http-utils.js";
 
@@ -74,13 +74,24 @@ export async function createServer(overrides = {}) {
             .then(async () => {
               activePort = typeof address === "object" && address ? address.port : config.port;
               startedAt = new Date().toISOString();
+              const version = controlPlane.getVersionInfo();
               await writeDaemonState(config.daemonDir, {
                 pid: process.pid,
                 port: activePort,
                 startedAt,
                 dataDir: config.dataDir,
                 platform: process.platform,
-                baseUrl: `http://127.0.0.1:${activePort}`
+                baseUrl: `http://127.0.0.1:${activePort}`,
+                appVersion: version.appVersion,
+                runtimeProtocolVersion: version.runtimeProtocolVersion,
+                nativeProtocolVersion: version.nativeProtocolVersion,
+                storeSchemaVersion: version.storeSchemaVersion,
+                installLayoutVersion: version.installLayoutVersion
+              });
+              await appendDaemonMarker(config.daemonDir, "daemon.started", {
+                pid: process.pid,
+                port: activePort,
+                appVersion: version.appVersion
               });
               resolve(activePort);
             })
@@ -93,6 +104,9 @@ export async function createServer(overrides = {}) {
       await new Promise<void>((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()));
       });
+      await appendDaemonMarker(config.daemonDir, "daemon.stopped", {
+        pid: process.pid
+      }).catch(() => {});
       await clearDaemonState(config.daemonDir);
       await controlPlane.shutdown();
     }
