@@ -3,7 +3,9 @@
   "compilerOptions": {
     "noEmit": false,
     "allowJs": false,
-    "checkJs": false
+    "checkJs": false,
+    "rootDir": ".",
+    "outDir": "dist"
   },
   "include": ["src/**/*.ts", "bin/**/*.ts", "public/**/*.ts", "test/**/*.ts"],
   "exclude": ["node_modules", ".agentos", "rust/**/target/**"]

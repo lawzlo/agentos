@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { WebSocketServer } from "ws";
 
@@ -60,7 +61,7 @@ async function serveStatic(publicDir, req, res) {
 export async function createServer(overrides = {}) {
   const config = resolveConfig(overrides);
   const controlPlane = createControlPlane(config);
-  const publicDir = path.join(process.cwd(), "public");
+  const publicDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../public");
   let startedAt = null;
   let activePort = config.port;
 

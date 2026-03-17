@@ -27,7 +27,8 @@ AgentOS is a local-first control plane for autonomous agents that operate browse
 
 ```bash
 npm install
-./bin/agentos.js daemon start
+npm run build:ts
+node dist/bin/agentos.js daemon start
 ```
 
 The daemon listens on `http://localhost:3017` by default. The web console remains available there, but the primary product entry is the CLI.
@@ -38,8 +39,8 @@ AgentOS is still runtime-first in Node.js, but the migration path is now explici
 
 - `TypeScript` is the boundary layer for shared schemas and IPC contracts under [`src/types/`](./src/types)
 - `Rust` is the native/runtime-heavy layer under [`rust/agentos-native`](./rust/agentos-native)
-- `JavaScript` continues to own orchestration, Playwright browser control, tasks, skills, and watches for now
-- The macOS native path now covers capture, frontmost app, OCR, text search, window listing, and permission status through the Rust sidecar plus native helper
+- `TypeScript` now owns the application/runtime source tree under `src/`, `bin/`, `public/`, and `test/`
+- The macOS native path now covers capture, frontmost app, OCR, text search, window listing, and permission status through the Rust sidecar and its embedded native bridge
 - The Windows bridge now covers capture, frontmost app, window listing, text input, key input, mouse input, and OCR/text lookup through PowerShell-native automation
 
 Run type checking for the new typed boundary:
@@ -48,7 +49,7 @@ Run type checking for the new typed boundary:
 npm run typecheck
 ```
 
-Build the first migrated `.ts` runtime modules back into `src/*.js`:
+Build the runtime into `dist/`:
 
 ```bash
 npm run build:ts
@@ -63,7 +64,7 @@ npm run native:build
 Notes:
 
 - Building the Rust sidecar requires `cargo` to be installed locally.
-- If the Rust sidecar is unavailable, the macOS bridge falls back to the existing JS/Swift helper path.
+- `dist/` is generated and should not be committed.
 - You can point AgentOS at a prebuilt sidecar with `AGENTOS_NATIVE_SIDECAR=/path/to/agentos-native`.
 
 ## CLI-first usage
@@ -71,43 +72,43 @@ Notes:
 Start or inspect the daemon:
 
 ```bash
-./bin/agentos.js daemon start
-./bin/agentos.js daemon status
+node dist/bin/agentos.js daemon start
+node dist/bin/agentos.js daemon status
 ```
 
 Run a one-off task:
 
 ```bash
-./bin/agentos.js run "打开 example.com，点击 More information，然后截图" --surface browser
+node dist/bin/agentos.js run "打开 example.com，点击 More information，然后截图" --surface browser
 ```
 
 List current tasks or inspect a trace:
 
 ```bash
-./bin/agentos.js ps
-./bin/agentos.js inspect <task-id>
-./bin/agentos.js logs <task-id>
+node dist/bin/agentos.js ps
+node dist/bin/agentos.js inspect <task-id>
+node dist/bin/agentos.js logs <task-id>
 ```
 
 Pause or take over a running task:
 
 ```bash
-./bin/agentos.js control <task-id> pause
-./bin/agentos.js control <task-id> request_takeover
-./bin/agentos.js control <task-id> return_to_agent --note "I fixed the window focus"
+node dist/bin/agentos.js control <task-id> pause
+node dist/bin/agentos.js control <task-id> request_takeover
+node dist/bin/agentos.js control <task-id> return_to_agent --note "I fixed the window focus"
 ```
 
 Create an always-on watch rule:
 
 ```bash
-./bin/agentos.js watch add "一直盯 Slack，有新消息就按我的风格回复" --skill slack-reply --workspace personal-main
-./bin/agentos.js watch ls
+node dist/bin/agentos.js watch add "一直盯 Slack，有新消息就按我的风格回复" --skill slack-reply --workspace personal-main
+node dist/bin/agentos.js watch ls
 ```
 
 Teach a completed task into a reusable watch profile:
 
 ```bash
-./bin/agentos.js watch teach <task-id> "一直盯这个收件箱，看到同类消息就按刚才的流程处理" --pack generic-mail-desktop --workspace personal-main
+node dist/bin/agentos.js watch teach <task-id> "一直盯这个收件箱，看到同类消息就按刚才的流程处理" --pack generic-mail-desktop --workspace personal-main
 ```
 
 ## Runtime notes

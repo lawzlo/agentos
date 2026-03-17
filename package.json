@@ -4,13 +4,13 @@
   "private": true,
   "type": "module",
   "bin": {
-    "agentos": "./bin/agentos.js"
+    "agentos": "./dist/bin/agentos.js"
   },
   "scripts": {
-    "start": "node src/index.js",
-    "dev": "node --watch src/index.js",
-    "test": "node --test",
-    "build:ts": "tsc -p tsconfig.build.json",
+    "start": "node dist/src/index.js",
+    "dev": "npm run build:ts && node dist/src/index.js",
+    "test": "npm run build:ts && node scripts/run-tests.mjs",
+    "build:ts": "node scripts/build-ts.mjs",
     "typecheck": "tsc --noEmit",
     "native:build": "cargo build --manifest-path rust/agentos-native/Cargo.toml --release"
   },

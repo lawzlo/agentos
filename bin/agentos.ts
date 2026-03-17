@@ -5,11 +5,15 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 import { resolveConfig } from "../src/config.js";
 import { daemonLogPath, readDaemonRuntime } from "../src/daemon-state.js";
 
 const config = resolveConfig();
+const distBinDir = path.dirname(fileURLToPath(import.meta.url));
+const distRoot = path.resolve(distBinDir, "..");
+const runtimeEntry = path.join(distRoot, "src/index.js");
 
 function toCamelCase(value) {
   return String(value)
@@ -177,7 +181,7 @@ async function daemonStart(options) {
   const logPath = daemonLogPath(config.daemonDir);
 
   if (boolOption(options.foreground)) {
-    const child = spawn(process.execPath, [path.join(process.cwd(), "src/index.js")], {
+    const child = spawn(process.execPath, [runtimeEntry], {
       cwd: process.cwd(),
       env: {
         ...process.env,
@@ -191,7 +195,7 @@ async function daemonStart(options) {
   }
 
   const out = fs.openSync(logPath, "a");
-  const child = spawn(process.execPath, [path.join(process.cwd(), "src/index.js")], {
+  const child = spawn(process.execPath, [runtimeEntry], {
     cwd: process.cwd(),
     env: {
       ...process.env,
@@ -240,7 +244,7 @@ async function daemonInstall(options) {
   <key>ProgramArguments</key>
   <array>
     <string>${process.execPath}</string>
-    <string>${path.join(process.cwd(), "src/index.js")}</string>
+    <string>${runtimeEntry}</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
@@ -274,7 +278,7 @@ async function daemonInstall(options) {
       options.json
         ? {
             installed: true,
-            command: `schtasks /Create /SC ONLOGON /TN AgentOS /TR "\\"${process.execPath}\\" \\"${path.join(process.cwd(), "src/index.js")}\\"" /F`
+            command: `schtasks /Create /SC ONLOGON /TN AgentOS /TR "\\"${process.execPath}\\" \\"${runtimeEntry}\\"" /F`
           }
         : "Windows auto-start is configured through Task Scheduler. Run the generated command manually on Windows.",
       options

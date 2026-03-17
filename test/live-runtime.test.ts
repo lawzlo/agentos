@@ -283,7 +283,7 @@ test("cli can inspect daemon state and manage watch rules", async () => {
       AGENTOS_DATA_DIR: dataDir
     };
 
-    const statusResult = await execFileAsync(process.execPath, ["bin/agentos.js", "daemon", "status", "--json"], {
+    const statusResult = await execFileAsync(process.execPath, ["dist/bin/agentos.js", "daemon", "status", "--json"], {
       cwd: process.cwd(),
       env
     });
@@ -293,7 +293,7 @@ test("cli can inspect daemon state and manage watch rules", async () => {
     const addResult = await execFileAsync(
       process.execPath,
       [
-        "bin/agentos.js",
+        "dist/bin/agentos.js",
         "watch",
         "add",
         "Always watch the CLI inbox and react",
@@ -315,7 +315,7 @@ test("cli can inspect daemon state and manage watch rules", async () => {
     const watch = JSON.parse(addResult.stdout);
     assert.equal(watch.livePack, "cli-live");
 
-    const listResult = await execFileAsync(process.execPath, ["bin/agentos.js", "watch", "ls", "--json"], {
+    const listResult = await execFileAsync(process.execPath, ["dist/bin/agentos.js", "watch", "ls", "--json"], {
       cwd: process.cwd(),
       env
     });
@@ -387,7 +387,7 @@ test("cli can teach a completed task into a watch rule", async () => {
     const teachResult = await execFileAsync(
       process.execPath,
       [
-        "bin/agentos.js",
+        "dist/bin/agentos.js",
         "watch",
         "teach",
         task.id,
