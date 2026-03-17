@@ -15,7 +15,14 @@ import type { ControlPlaneStore } from "./store.js";
 import type { TraceStore } from "./trace-store.js";
 import type { WatchScheduler } from "./watch-scheduler.js";
 import type { WorkspaceManager } from "./workspace-manager.js";
-import type { TaskRecord, TaskSnapshot, TaskSpec } from "../types/runtime-schema.js";
+import type {
+  AutonomyExecutionResult,
+  ExecutionStepResult,
+  TaskRecord,
+  TaskSnapshot,
+  TaskSpec,
+  VerificationSummary
+} from "../types/runtime-schema.js";
 
 interface RuntimeConnector {
   start(): Promise<void>;
@@ -29,9 +36,9 @@ interface RecoveryDecision {
 }
 
 type RuntimeResult = Record<string, unknown> & {
-  verification?: Record<string, unknown>;
+  verification?: VerificationSummary | AutonomyExecutionResult["verification"];
   outputs?: Record<string, unknown>;
-  steps?: unknown[];
+  steps?: ExecutionStepResult[];
   summary?: string | null;
   manualTeachSteps?: unknown[];
   manualCorrections?: unknown[];
@@ -373,7 +380,7 @@ export class RuntimeSupervisor {
               summary: execution.summary
             };
           } else {
-            const plan = await this.planner.plan(task, trace.id);
+            const plan = await this.planner.plan({ ...task, taskSpec }, trace.id);
             this.store.updateTask(taskId, { plan, status: "running" });
             this.store.updateTrace(trace.id, { plan });
 

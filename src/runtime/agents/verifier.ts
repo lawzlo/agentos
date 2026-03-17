@@ -1,15 +1,53 @@
 import { VerificationError } from "../errors.js";
+import type { SurfaceRegistry } from "../surface-registry.js";
+import type { TraceStore } from "../trace-store.js";
+import type {
+  ExecutionSummary,
+  RuntimeStep,
+  StepVerification,
+  TaskRecord,
+  VerificationCheck,
+  VerificationSummary,
+  WorkspaceRecord
+} from "../../types/runtime-schema.js";
+
+interface VerifierSurface {
+  verify(args: {
+    task: TaskRecord;
+    step: RuntimeStep;
+    workspace: WorkspaceRecord;
+    traceId: string;
+    expectation: Record<string, unknown>;
+  }): Promise<StepVerification>;
+}
+
+interface VerifierAgentOptions {
+  surfaceRegistry: SurfaceRegistry;
+  traceStore: TraceStore;
+}
 
 export class VerifierAgent {
-  surfaceRegistry: any;
-  traceStore: any;
-  constructor({ surfaceRegistry, traceStore }) {
+  surfaceRegistry: SurfaceRegistry;
+  traceStore: TraceStore;
+  constructor({ surfaceRegistry, traceStore }: VerifierAgentOptions) {
     this.surfaceRegistry = surfaceRegistry;
     this.traceStore = traceStore;
   }
 
-  async verify({ task, plan, execution, workspace, traceId }) {
-    const checks = [];
+  async verify({
+    task,
+    plan,
+    execution,
+    workspace,
+    traceId
+  }: {
+    task: TaskRecord;
+    plan: RuntimeStep[];
+    execution: ExecutionSummary;
+    workspace: WorkspaceRecord;
+    traceId: string;
+  }): Promise<VerificationSummary> {
+    const checks: VerificationCheck[] = [];
 
     for (const step of plan) {
       if (!step.expect) {
@@ -27,17 +65,20 @@ export class VerifierAgent {
           type: existing.ok ? "verification.passed" : "verification.failed",
           stepId: step.id,
           message: existing.ok ? `Accepted inline verification for ${step.label}` : `Inline verification failed for ${step.label}`,
-          payload: existing
+          payload: { ...existing }
         });
 
         if (!existing.ok) {
-          throw new VerificationError(`Verification failed for ${step.label}`, existing);
+          throw new VerificationError(`Verification failed for ${step.label}`, { ...existing });
         }
 
         continue;
       }
 
-      const surface = this.surfaceRegistry.get(step.surface);
+      const surface = this.surfaceRegistry.get<VerifierSurface>(step.surface);
+      if (!surface) {
+        throw new VerificationError(`Unknown verifier surface: ${step.surface}`, { stepId: step.id });
+      }
       const outcome = await surface.verify({
         task,
         step,
@@ -55,11 +96,11 @@ export class VerifierAgent {
         type: outcome.ok ? "verification.passed" : "verification.failed",
         stepId: step.id,
         message: outcome.ok ? `Verified ${step.label}` : `Verification failed for ${step.label}`,
-        payload: outcome
+        payload: { ...outcome }
       });
 
       if (!outcome.ok) {
-        throw new VerificationError(`Verification failed for ${step.label}`, outcome);
+        throw new VerificationError(`Verification failed for ${step.label}`, { ...outcome });
       }
     }
 

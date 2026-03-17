@@ -1,7 +1,33 @@
 import { createId } from "../id.js";
 import { PlanningError } from "../errors.js";
+import type { OpenAICompatibleModelClient } from "../model-client.js";
+import type { SkillRegistry } from "../skill-registry.js";
+import type { TraceStore } from "../trace-store.js";
+import type { PlanDerivation, PlanPreview, RuntimeStep, TaskSpec } from "../../types/runtime-schema.js";
 
-export function normalizeStep(step, index) {
+type SkillInputDefinition = { key: string; defaultValue: string };
+
+interface SkillTemplateLike {
+  actionTemplate?: RuntimeStep[];
+  metadata?: {
+    skillInputs?: SkillInputDefinition[];
+  };
+}
+
+interface PlannerTaskLike {
+  id: string;
+  goal: string;
+  preferredSurface: "auto" | "browser" | "desktop";
+  taskSpec: TaskSpec;
+}
+
+interface PlannerAgentOptions {
+  modelClient: OpenAICompatibleModelClient;
+  traceStore: TraceStore;
+  skillRegistry: SkillRegistry;
+}
+
+export function normalizeStep(step: Partial<RuntimeStep>, index: number): RuntimeStep {
   return {
     id: step.id ?? createId(`step${index + 1}`),
     label: step.label ?? `Step ${index + 1}`,
@@ -14,18 +40,19 @@ export function normalizeStep(step, index) {
   };
 }
 
-export function describeStep(step) {
+export function describeStep(step: RuntimeStep): string {
   const params = step.params ?? {};
+  const target = (params.target ?? null) as { text?: string } | null;
 
   switch (step.action) {
     case "goto":
       return `Open ${params.url}`;
     case "clickTarget":
-      return `Click "${params.targetQuery ?? params.target?.text ?? step.label}"`;
+      return `Click "${params.targetQuery ?? target?.text ?? step.label}"`;
     case "focusTarget":
-      return `Focus "${params.targetQuery ?? params.target?.text ?? step.label}"`;
+      return `Focus "${params.targetQuery ?? target?.text ?? step.label}"`;
     case "typeIntoTarget":
-      return `Type into "${params.targetQuery ?? params.target?.text ?? step.label}"`;
+      return `Type into "${params.targetQuery ?? target?.text ?? step.label}"`;
     case "waitFor":
       if (params.urlIncludes) {
         return `Wait for ${params.urlIncludes}`;
@@ -49,7 +76,11 @@ export function describeStep(step) {
   }
 }
 
-function materializeSkillValue(value, runtimeInputs = {}, skillInputs = []) {
+function materializeSkillValue(
+  value: unknown,
+  runtimeInputs: Record<string, unknown> = {},
+  skillInputs: SkillInputDefinition[] = []
+): unknown {
   if (typeof value === "string") {
     const match = value.match(/^\{\{([a-zA-Z0-9_]+)\}\}$/);
     if (!match) {
@@ -77,19 +108,19 @@ function materializeSkillValue(value, runtimeInputs = {}, skillInputs = []) {
   return value;
 }
 
-function materializeSkillSteps(skill, taskSpec = {}) {
-  const runtimeInputs = (taskSpec as Record<string, unknown>).inputs ?? {};
+function materializeSkillSteps(skill: SkillTemplateLike, taskSpec: TaskSpec = { goal: "" }) {
+  const runtimeInputs = taskSpec.inputs ?? {};
   const skillInputs = skill.metadata?.skillInputs ?? [];
 
   return (skill.actionTemplate ?? []).map((step) => ({
     ...step,
-    params: materializeSkillValue(step.params ?? {}, runtimeInputs, skillInputs),
-    expect: materializeSkillValue(step.expect ?? null, runtimeInputs, skillInputs)
+    params: materializeSkillValue(step.params ?? {}, runtimeInputs, skillInputs) as Record<string, unknown>,
+    expect: materializeSkillValue(step.expect ?? null, runtimeInputs, skillInputs) as Record<string, unknown> | null
   }));
 }
 
-function heuristicPlan(taskSpec) {
-  const steps = [];
+function heuristicPlan(taskSpec: TaskSpec): RuntimeStep[] {
+  const steps: RuntimeStep[] = [];
   const inputs = taskSpec.inputs ?? {};
   const actions = inputs.actions;
   const defaultSurface =
@@ -366,16 +397,16 @@ function heuristicPlan(taskSpec) {
 }
 
 export class PlannerAgent {
-  modelClient: any;
-  traceStore: any;
-  skillRegistry: any;
-  constructor({ modelClient, traceStore, skillRegistry }) {
+  modelClient: OpenAICompatibleModelClient;
+  traceStore: TraceStore;
+  skillRegistry: SkillRegistry;
+  constructor({ modelClient, traceStore, skillRegistry }: PlannerAgentOptions) {
     this.modelClient = modelClient;
     this.traceStore = traceStore;
     this.skillRegistry = skillRegistry;
   }
 
-  async #derivePlan(task) {
+  async #derivePlan(task: PlannerTaskLike): Promise<PlanDerivation> {
     const requestedSkill = task.taskSpec.skillName ? this.skillRegistry?.getSkill(task.taskSpec.skillName) : null;
     if (requestedSkill?.actionTemplate?.length) {
       return {
@@ -423,8 +454,8 @@ export class PlannerAgent {
     };
   }
 
-  async preview(taskSpec) {
-    const task = {
+  async preview(taskSpec: TaskSpec): Promise<PlanPreview> {
+    const task: PlannerTaskLike = {
       id: "preview",
       goal: taskSpec.goal,
       preferredSurface: taskSpec.preferredSurface ?? "auto",
@@ -445,7 +476,7 @@ export class PlannerAgent {
     };
   }
 
-  async plan(task, traceId) {
+  async plan(task: PlannerTaskLike, traceId: string): Promise<RuntimeStep[]> {
     const result = await this.#derivePlan(task);
     if (!result.steps.length) {
       throw new PlanningError(

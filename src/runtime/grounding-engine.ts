@@ -1,4 +1,15 @@
 import { GroundingError } from "./errors.js";
+import type { TraceStore } from "./trace-store.js";
+import type { GroundingResult, InteractionCandidate, WorldState } from "../types/runtime-schema.js";
+
+interface GroundingRequest {
+  taskId?: string;
+  traceId?: string | null;
+  action: string;
+  goal?: string | null;
+  targetQuery?: string | null;
+  worldState: WorldState;
+}
 
 function tokenize(value) {
   return String(value ?? "")
@@ -41,7 +52,7 @@ function textScore(query, candidateText) {
   return score;
 }
 
-function scoreCandidate(request, candidate) {
+function scoreCandidate(request: GroundingRequest, candidate: InteractionCandidate) {
   const targetQuery = request.targetQuery ?? request.goal ?? "";
   const hints = [
     candidate.text,
@@ -73,12 +84,12 @@ function scoreCandidate(request, candidate) {
 }
 
 export class GroundingEngine {
-  traceStore: any;
-  constructor({ traceStore = null } = {}) {
+  traceStore: TraceStore | null;
+  constructor({ traceStore = null }: { traceStore?: TraceStore | null } = {}) {
     this.traceStore = traceStore;
   }
 
-  ground(request) {
+  ground(request: GroundingRequest): GroundingResult {
     const candidates = request.worldState?.interactionCandidates ?? [];
     if (!candidates.length) {
       throw new GroundingError("No interaction candidates were available for grounding.", {
@@ -104,7 +115,7 @@ export class GroundingEngine {
     }
 
     const best = ranked[0];
-    const result = {
+    const result: GroundingResult = {
       targetId: best.candidate.id,
       resolutionMode: best.score >= 120 ? "exact_text" : "fuzzy_text",
       confidence: Math.min(0.99, best.score / 120),

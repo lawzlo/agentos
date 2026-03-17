@@ -1,25 +1,95 @@
 import { PolicyError, VerificationError } from "../errors.js";
+import type { PolicyEngine } from "../policy-engine.js";
+import type { SurfaceRegistry } from "../surface-registry.js";
+import type { TraceStore } from "../trace-store.js";
+import type { GroundingEngine } from "../grounding-engine.js";
+import type {
+  ExecutionStepResult,
+  ExecutionSummary,
+  RuntimeStep,
+  StepVerification,
+  TaskRecord,
+  TaskSpec,
+  WorldState,
+  WorkspaceRecord
+} from "../../types/runtime-schema.js";
 
 const TARGET_ACTIONS = new Set(["clickTarget", "focusTarget", "typeIntoTarget", "waitForTarget", "extractFromTarget"]);
 
+interface ControlGatePayload {
+  phase: string;
+  step?: RuntimeStep | null;
+  stepResults: ExecutionStepResult[];
+}
+
+interface ExecutableSurface {
+  observe(args: {
+    task: TaskRecord;
+    workspace: WorkspaceRecord;
+    traceId: string;
+    label: string;
+    recentActions: ExecutionStepResult[];
+  }): Promise<unknown>;
+  act(args: {
+    task: TaskRecord;
+    step: RuntimeStep;
+    workspace: WorkspaceRecord;
+    traceId: string;
+    outputs: Record<string, unknown>;
+  }): Promise<unknown>;
+  verify(args: {
+    task: TaskRecord;
+    step: RuntimeStep;
+    workspace: WorkspaceRecord;
+    traceId: string;
+    expectation: Record<string, unknown>;
+  }): Promise<StepVerification>;
+  checkpoint(args: {
+    task: TaskRecord;
+    step: RuntimeStep;
+    workspace: WorkspaceRecord;
+    traceId: string;
+    label: string;
+  }): Promise<Record<string, unknown> | null>;
+}
+
+interface OperatorAgentOptions {
+  surfaceRegistry: SurfaceRegistry;
+  traceStore: TraceStore;
+  policyEngine: PolicyEngine;
+  groundingEngine: GroundingEngine;
+}
+
 export class OperatorAgent {
-  surfaceRegistry: any;
-  traceStore: any;
-  policyEngine: any;
-  groundingEngine: any;
-  constructor({ surfaceRegistry, traceStore, policyEngine, groundingEngine }) {
+  surfaceRegistry: SurfaceRegistry;
+  traceStore: TraceStore;
+  policyEngine: PolicyEngine;
+  groundingEngine: GroundingEngine;
+  constructor({ surfaceRegistry, traceStore, policyEngine, groundingEngine }: OperatorAgentOptions) {
     this.surfaceRegistry = surfaceRegistry;
     this.traceStore = traceStore;
     this.policyEngine = policyEngine;
     this.groundingEngine = groundingEngine;
   }
 
-  async #resolveTarget({ task, step, workspace, traceId, stepResults }) {
+  async #resolveTarget({
+    task,
+    step,
+    workspace,
+    traceId,
+    stepResults
+  }: {
+    task: TaskRecord;
+    step: RuntimeStep;
+    workspace: WorkspaceRecord;
+    traceId: string;
+    stepResults: ExecutionStepResult[];
+  }): Promise<RuntimeStep> {
     if (!TARGET_ACTIONS.has(step.action) || step.params?.target) {
       return step;
     }
 
-    const surface = this.surfaceRegistry.get(step.surface);
+    const surface = this.surfaceRegistry.get<ExecutableSurface>(step.surface);
     const observation = await surface.observe({
       task,
       workspace,
@@ -28,20 +98,23 @@ export class OperatorAgent {
       recentActions: stepResults
     });
 
-    const targetQuery =
+    const taskSpec = task.taskSpec as TaskSpec;
+    const targetQuery = String(
       step.params?.targetQuery ??
-      step.params?.targetText ??
-      step.params?.field ??
-      step.params?.label ??
-      step.label;
+        step.params?.targetText ??
+        step.params?.field ??
+        step.params?.label ??
+        step.label ??
+        ""
+    );
 
     const grounded = this.groundingEngine.ground({
       taskId: task.id,
       traceId,
       action: step.action,
-      goal: task.taskSpec.goal,
+      goal: taskSpec.goal,
       targetQuery,
-      worldState: observation
+      worldState: observation as WorldState
     });
 
     this.traceStore.log({
@@ -69,9 +142,21 @@ export class OperatorAgent {
     };
   }
 
-  async execute({ task, plan, workspace, traceId, controlGate = null }) {
-    const outputs = {};
-    const stepResults = [];
+  async execute({
+    task,
+    plan,
+    workspace,
+    traceId,
+    controlGate = null
+  }: {
+    task: TaskRecord;
+    plan: RuntimeStep[];
+    workspace: WorkspaceRecord;
+    traceId: string;
+    controlGate?: ((payload: ControlGatePayload) => Promise<void>) | null;
+  }): Promise<ExecutionSummary> {
+    const outputs: Record<string, unknown> = {};
+    const stepResults: ExecutionStepResult[] = [];
 
     for (const rawStep of plan) {
       if (controlGate) {
@@ -89,7 +174,7 @@ export class OperatorAgent {
         traceId,
         stepResults
       });
-      const surface = this.surfaceRegistry.get(step.surface);
+      const surface = this.surfaceRegistry.get<ExecutableSurface>(step.surface);
       if (!surface) {
         throw new Error(`Unknown surface: ${step.surface}`);
       }
@@ -113,7 +198,7 @@ export class OperatorAgent {
       });
 
       const result = await surface.act({ task, step, workspace, traceId, outputs });
-      let verification = null;
+      let verification: StepVerification | null = null;
       if (step.expect) {
         verification = await surface.verify({
           task,
@@ -130,11 +215,11 @@ export class OperatorAgent {
           type: verification.ok ? "step.verified" : "step.verification_failed",
           stepId: step.id,
           message: verification.ok ? `Verified ${step.label} in-line` : `Inline verification failed for ${step.label}`,
-          payload: verification
+          payload: { ...verification }
         });
 
         if (!verification.ok) {
-          throw new VerificationError(`Verification failed for ${step.label}`, verification);
+          throw new VerificationError(`Verification failed for ${step.label}`, { ...verification });
         }
       }
       const checkpoint =

@@ -1,15 +1,24 @@
 export interface TaskSpec {
   goal: string;
+  doneCondition?: string;
   preferredSurface?: "auto" | "browser" | "desktop";
   workspaceName?: string | null;
   skillName?: string | null;
   executionMode?: "planned" | "autonomous";
   triggerSource?: string;
   priority?: "low" | "normal" | "high";
+  permissions?: {
+    allowAdvancedActions?: boolean;
+    allowShell?: boolean;
+    automationPolicy?: "allow" | "draft_only" | "confirm_required" | "blocked";
+    [key: string]: unknown;
+  };
   inputs?: Record<string, unknown>;
   steps?: RuntimeStep[];
   autonomy?: {
     maxSteps?: number;
+    enabled?: boolean;
+    surface?: "browser" | "desktop";
   };
   saveSkillAs?: string | null;
   saveWatchAs?: Record<string, unknown> | null;
@@ -297,6 +306,73 @@ export interface DraftRecord {
   updatedAt: string;
   approvedAt: string | null;
   rejectedAt: string | null;
+}
+
+export interface StepVerification {
+  ok: boolean;
+  details: Record<string, unknown>;
+}
+
+export interface ExecutionStepResult {
+  stepId: string;
+  label: string;
+  surface: string;
+  action: string;
+  result: unknown;
+  checkpoint: Record<string, unknown> | null;
+  verification: StepVerification | null;
+}
+
+export interface ExecutionSummary {
+  outputs: Record<string, unknown>;
+  stepResults: ExecutionStepResult[];
+}
+
+export interface VerificationCheck {
+  stepId: string;
+  ok: boolean;
+  details: Record<string, unknown>;
+}
+
+export interface VerificationSummary {
+  ok: boolean;
+  confidence: number;
+  checks: VerificationCheck[];
+  outputs: Record<string, unknown>;
+}
+
+export interface GroundingFallback {
+  targetId: string;
+  confidence: number;
+  target: InteractionCandidate;
+}
+
+export interface GroundingResult {
+  targetId: string;
+  resolutionMode: string;
+  confidence: number;
+  target: InteractionCandidate;
+  fallbacks: GroundingFallback[];
+}
+
+export interface PlanDerivation {
+  steps: RuntimeStep[];
+  source: string;
+  summary: string;
+  skillName?: string;
+}
+
+export interface PlanPreview extends PlanDerivation {
+  humanPlan: string[];
+}
+
+export interface AutonomyExecutionResult extends ExecutionSummary {
+  verification: {
+    ok: boolean;
+    confidence: number;
+    mode: "autonomous";
+  };
+  summary: string;
 }
 
 export interface LivePackInfo {

@@ -9,7 +9,7 @@ export class SurfaceRegistry {
     this.surfaces = new Map(Object.entries(surfaces));
   }
 
-  get<TSurface extends SurfaceAdapter = SurfaceAdapter>(name: string): TSurface | undefined {
+  get<TSurface = SurfaceAdapter>(name: string): TSurface | undefined {
     return this.surfaces.get(name) as TSurface | undefined;
   }
 

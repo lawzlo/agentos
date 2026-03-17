@@ -1,5 +1,20 @@
 import { PlanningError } from "../errors.js";
 import { normalizeStep } from "./planner.js";
+import type { GroundingEngine } from "../grounding-engine.js";
+import type { OpenAICompatibleModelClient } from "../model-client.js";
+import type { PolicyEngine } from "../policy-engine.js";
+import type { SurfaceRegistry } from "../surface-registry.js";
+import type { TraceStore } from "../trace-store.js";
+import type {
+  AutonomyExecutionResult,
+  ExecutionStepResult,
+  RuntimeStep,
+  StepVerification,
+  TaskRecord,
+  TaskSpec,
+  WorldState,
+  WorkspaceRecord
+} from "../../types/runtime-schema.js";
 
 const ALLOWED_ACTIONS = {
   browser: [
@@ -41,13 +56,66 @@ const ALLOWED_ACTIONS = {
 
 const TARGET_ACTIONS = new Set(["clickTarget", "focusTarget", "typeIntoTarget", "waitForTarget", "extractFromTarget"]);
 
+interface AutonomyDecision {
+  done: boolean;
+  reason: string;
+  summary?: string | null;
+  action?: RuntimeStep | null;
+}
+
+interface ControlGatePayload {
+  phase: string;
+  iteration?: number;
+  step?: RuntimeStep | null;
+  stepResults: ExecutionStepResult[];
+}
+
+interface AutonomySurface {
+  observe(args: {
+    task: TaskRecord;
+    workspace: WorkspaceRecord;
+    traceId: string;
+    label: string;
+    recentActions: ExecutionStepResult[];
+  }): Promise<WorldState>;
+  act(args: {
+    task: TaskRecord;
+    step: RuntimeStep;
+    workspace: WorkspaceRecord;
+    traceId: string;
+    outputs: Record<string, unknown>;
+  }): Promise<unknown>;
+  checkpoint(args: {
+    task: TaskRecord;
+    step: RuntimeStep;
+    workspace: WorkspaceRecord;
+    traceId: string;
+    label: string;
+  }): Promise<Record<string, unknown> | null>;
+  verify(args: {
+    task: TaskRecord;
+    step: RuntimeStep;
+    workspace: WorkspaceRecord;
+    traceId: string;
+    expectation: Record<string, unknown>;
+  }): Promise<StepVerification>;
+}
+
+interface AutonomyAgentOptions {
+  modelClient: OpenAICompatibleModelClient;
+  surfaceRegistry: SurfaceRegistry;
+  traceStore: TraceStore;
+  policyEngine: PolicyEngine;
+  groundingEngine: GroundingEngine;
+}
+
 export class AutonomyAgent {
-  modelClient: any;
-  surfaceRegistry: any;
-  traceStore: any;
-  policyEngine: any;
-  groundingEngine: any;
-  constructor({ modelClient, surfaceRegistry, traceStore, policyEngine, groundingEngine }) {
+  modelClient: OpenAICompatibleModelClient;
+  surfaceRegistry: SurfaceRegistry;
+  traceStore: TraceStore;
+  policyEngine: PolicyEngine;
+  groundingEngine: GroundingEngine;
+  constructor({ modelClient, surfaceRegistry, traceStore, policyEngine, groundingEngine }: AutonomyAgentOptions) {
     this.modelClient = modelClient;
     this.surfaceRegistry = surfaceRegistry;
     this.traceStore = traceStore;
@@ -55,22 +123,34 @@ export class AutonomyAgent {
     this.groundingEngine = groundingEngine;
   }
 
-  isEnabled(taskSpec) {
+  isEnabled(taskSpec: TaskSpec) {
     return taskSpec.executionMode === "autonomous" || taskSpec.autonomy?.enabled === true;
   }
 
-  async execute({ task, workspace, traceId, controlGate = null }) {
+  async execute({
+    task,
+    workspace,
+    traceId,
+    controlGate = null
+  }: {
+    task: TaskRecord;
+    workspace: WorkspaceRecord;
+    traceId: string;
+    controlGate?: ((payload: ControlGatePayload) => Promise<void>) | null;
+  }): Promise<AutonomyExecutionResult> {
     if (!this.modelClient.isConfigured()) {
       throw new PlanningError("Autonomous execution requires model configuration.");
     }
 
-    let activeSurface = task.preferredSurface === "auto"
-      ? task.taskSpec.autonomy?.surface ?? (task.taskSpec.inputs?.startUrl ? "browser" : "desktop")
+    const taskSpec = task.taskSpec as TaskSpec;
+    const autonomy = taskSpec.autonomy ?? {};
+    let activeSurface: "browser" | "desktop" = task.preferredSurface === "auto"
+      ? autonomy.surface ?? (taskSpec.inputs?.startUrl ? "browser" : "desktop")
       : task.preferredSurface;
 
-    const maxSteps = Number(task.taskSpec.autonomy?.maxSteps ?? 8);
-    const outputs = {};
-    const stepResults = [];
+    const maxSteps = Number(autonomy.maxSteps ?? 8);
+    const outputs: Record<string, unknown> = {};
+    const stepResults: ExecutionStepResult[] = [];
 
     for (let attempt = 0; attempt < maxSteps; attempt += 1) {
       if (controlGate) {
@@ -81,7 +161,7 @@ export class AutonomyAgent {
         });
       }
 
-      let surface = this.surfaceRegistry.get(activeSurface);
+      let surface = this.surfaceRegistry.get<AutonomySurface>(activeSurface);
       if (!surface) {
         throw new PlanningError(`Unknown autonomous surface: ${activeSurface}`);
       }
@@ -107,7 +187,7 @@ export class AutonomyAgent {
         }
       });
 
-      const decision = await this.modelClient.decideNextAction({
+      const decision = (await this.modelClient.decideNextAction({
         taskSpec: task.taskSpec,
         preferredSurface: activeSurface,
         observation,
@@ -118,7 +198,7 @@ export class AutonomyAgent {
           result: step.result
         })),
         allowedActions: ALLOWED_ACTIONS[activeSurface] ?? []
-      });
+      })) as AutonomyDecision;
 
       this.traceStore.log({
         traceId,
@@ -126,7 +206,7 @@ export class AutonomyAgent {
         role: "autonomy",
         type: "autonomy.decision",
         message: decision.reason,
-        payload: decision
+        payload: { ...decision }
       });
 
       if (decision.done) {
@@ -143,7 +223,7 @@ export class AutonomyAgent {
       }
 
       if (!decision.action) {
-        throw new PlanningError("Autonomy model returned done=false without an action.", decision);
+        throw new PlanningError("Autonomy model returned done=false without an action.", { ...decision });
       }
 
       const step = normalizeStep(decision.action, attempt);
@@ -162,7 +242,7 @@ export class AutonomyAgent {
 
       const previousSurface = activeSurface;
       activeSurface = step.surface;
-      const stepSurface = this.surfaceRegistry.get(step.surface);
+      const stepSurface = this.surfaceRegistry.get<AutonomySurface>(step.surface);
       if (!stepSurface) {
         throw new PlanningError(`Unknown autonomous step surface: ${step.surface}`);
       }
@@ -171,7 +251,7 @@ export class AutonomyAgent {
       if (TARGET_ACTIONS.has(step.action) && !step.params?.target) {
         let targetObservation = observation;
         if (step.surface !== previousSurface) {
-          surface = this.surfaceRegistry.get(step.surface);
+          surface = this.surfaceRegistry.get<AutonomySurface>(step.surface);
           targetObservation = await surface.observe({
             task,
             workspace,
@@ -181,18 +261,20 @@ export class AutonomyAgent {
           });
         }
 
-        const targetQuery =
+        const targetQuery = String(
           step.params?.targetQuery ??
-          step.params?.targetText ??
-          step.params?.field ??
-          step.params?.label ??
-          step.label;
+            step.params?.targetText ??
+            step.params?.field ??
+            step.params?.label ??
+            step.label ??
+            ""
+        );
 
         const grounded = this.groundingEngine.ground({
           taskId: task.id,
           traceId,
           action: step.action,
-          goal: task.taskSpec.goal,
+          goal: taskSpec.goal,
           targetQuery,
           worldState: targetObservation
         });
@@ -230,8 +312,9 @@ export class AutonomyAgent {
         outputs[executableStep.saveAs] = result;
       }
 
+      let verification: StepVerification | null = null;
       if (executableStep.expect) {
-        const verification = await stepSurface.verify({
+        verification = await stepSurface.verify({
           task,
           step: executableStep,
           workspace,
@@ -240,7 +323,7 @@ export class AutonomyAgent {
         });
 
         if (!verification.ok) {
-          throw new PlanningError(`Autonomous expectation failed for ${executableStep.label}`, verification);
+          throw new PlanningError(`Autonomous expectation failed for ${executableStep.label}`, { ...verification });
         }
       }
 
@@ -250,7 +333,8 @@ export class AutonomyAgent {
         surface: executableStep.surface,
         action: executableStep.action,
         result,
-        checkpoint
+        checkpoint,
+        verification
       });
 
       if (controlGate) {
