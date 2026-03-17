@@ -1,11 +1,21 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { promisify } from "node:util";
 
 import { ControlPlaneStore } from "../src/runtime/store.js";
 import type { ProposalRecord } from "../src/types/learning.js";
 import { createTempDir, startAgentServer, waitForTask } from "./helpers.js";
+
+const execFileAsync = promisify(execFile);
+
+interface LearningSourcePayload {
+  kind: string;
+  config: Record<string, unknown>;
+  state: Record<string, unknown>;
+}
 
 async function waitForValue<T>(loader: () => Promise<T>, predicate: (value: T) => boolean, timeoutMs = 10000): Promise<T> {
   const started = Date.now();
@@ -299,3 +309,125 @@ test("daily digests are idempotent and proposals survive daemon restarts", async
   }
 });
 
+test("learning sources expose roots, exclusions, and scan metadata", async () => {
+  const dataDir = await createTempDir();
+  const learnRoot = path.join(dataDir, "learn-root");
+  const excludedPath = path.join(learnRoot, "node_modules");
+  await fs.mkdir(excludedPath, { recursive: true });
+  const server = await startAgentServer({
+    dataDir,
+    learning: {
+      metadataRoots: [learnRoot],
+      contentRoots: [learnRoot],
+      excludedPaths: [excludedPath],
+      textExtensions: ["txt", "md"],
+      scanIntervalMs: 100,
+      maxFilesPerScan: 100,
+      maxDepth: 4
+    }
+  });
+
+  try {
+    const sourcesPayload = await waitForValue(
+      async () => fetchJson<{ sources: LearningSourcePayload[] }>(`${server.baseUrl}/learning/sources`),
+      (payload) => payload.sources.length >= 5
+    );
+
+    const metadataSource = sourcesPayload.sources.find((entry) => entry.kind === "filesystem-metadata");
+    const contentSource = sourcesPayload.sources.find((entry) => entry.kind === "filesystem-content");
+    assert.ok(metadataSource);
+    assert.ok(contentSource);
+    assert.deepEqual(metadataSource.config.roots, [learnRoot]);
+    assert.deepEqual(metadataSource.config.excludedPaths, [excludedPath]);
+    assert.deepEqual(contentSource.config.roots, [learnRoot]);
+    assert.deepEqual(contentSource.config.textExtensions, ["txt", "md"]);
+  } finally {
+    await server.close();
+  }
+});
+
+test("learning scans update source states and can be queried through the API", async () => {
+  const dataDir = await createTempDir();
+  const learnRoot = path.join(dataDir, "learn-root");
+  await fs.mkdir(learnRoot, { recursive: true });
+  const server = await startAgentServer({
+    dataDir,
+    learning: {
+      metadataRoots: [learnRoot],
+      contentRoots: [learnRoot],
+      excludedPaths: [],
+      scanIntervalMs: 100,
+      maxFilesPerScan: 100,
+      maxDepth: 4
+    }
+  });
+
+  try {
+    await fs.writeFile(path.join(learnRoot, "notes.txt"), "Learning scan state should be updated.", "utf8");
+
+    const payload = await waitForValue(
+      async () =>
+        fetchJson<{ sources: Array<{ kind: string; state: Record<string, unknown> }> }>(
+          `${server.baseUrl}/learning/sources`
+        ),
+      (response) => {
+        const metadataSource = response.sources.find((entry) => entry.kind === "filesystem-metadata");
+        const contentSource = response.sources.find((entry) => entry.kind === "filesystem-content");
+        return Boolean(
+          metadataSource?.state?.scannedCount &&
+            Number(metadataSource.state.scannedCount) >= 1 &&
+            contentSource?.state?.scannedCount &&
+            Number(contentSource.state.scannedCount) >= 1
+        );
+      }
+    );
+
+    const metadataState = payload.sources.find((entry) => entry.kind === "filesystem-metadata")?.state;
+    const contentState = payload.sources.find((entry) => entry.kind === "filesystem-content")?.state;
+    assert.equal(typeof metadataState?.scannedCount, "number");
+    assert.equal(typeof contentState?.scannedCount, "number");
+  } finally {
+    await server.close();
+  }
+});
+
+test("cli learn sources ls exposes filesystem learning source kinds", async () => {
+  const dataDir = await createTempDir();
+  const learnRoot = path.join(dataDir, "learn-root");
+  await fs.mkdir(learnRoot, { recursive: true });
+  const server = await startAgentServer({
+    dataDir,
+    learning: {
+      metadataRoots: [learnRoot],
+      contentRoots: [learnRoot],
+      excludedPaths: [],
+      scanIntervalMs: 100,
+      maxFilesPerScan: 100,
+      maxDepth: 4
+    }
+  });
+
+  try {
+    const env = {
+      ...process.env,
+      AGENTOS_BASE_URL: server.baseUrl,
+      AGENTOS_DATA_DIR: dataDir
+    };
+
+    const learnResult = await execFileAsync(
+      process.execPath,
+      ["dist/bin/agentos.js", "learn", "sources", "ls", "--json"],
+      {
+        cwd: process.cwd(),
+        env
+      }
+    );
+
+    const sources = JSON.parse(learnResult.stdout) as Array<{ kind: string }>;
+    assert.ok(sources.some((entry) => entry.kind === "filesystem-metadata"));
+    assert.ok(sources.some((entry) => entry.kind === "filesystem-content"));
+    assert.ok(sources.some((entry) => entry.kind === "watch-events"));
+  } finally {
+    await server.close();
+  }
+});

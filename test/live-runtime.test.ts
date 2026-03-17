@@ -1462,3 +1462,46 @@ test("cli can teach a completed task into a watch rule", async () => {
     await server.close();
   }
 });
+
+test("watch deletion removes the rule and subsequent lookups return 404", async () => {
+  const dataDir = await createTempDir();
+  const fakeLivePack = {
+    async detectNewItems() {
+      return null;
+    }
+  };
+  const server = await startAgentServer({
+    dataDir,
+    livePacks: {
+      "delete-live": fakeLivePack
+    }
+  });
+
+  try {
+    const createResponse = await fetch(`${server.baseUrl}/watches`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        goal: "Watch this dummy goal",
+        livePack: "delete-live",
+        preferredSurface: "desktop",
+        workspaceName: "delete-main",
+        pollIntervalMs: 50
+      })
+    });
+    const { watch } = await createResponse.json();
+
+    const deleteResponse = await fetch(`${server.baseUrl}/watches/${watch.id}`, {
+      method: "DELETE"
+    });
+    const deletePayload = await deleteResponse.json();
+    assert.equal(deletePayload.ok, true);
+
+    const getResponse = await fetch(`${server.baseUrl}/watches/${watch.id}`);
+    assert.equal(getResponse.status, 404);
+    const notFoundPayload = await getResponse.json();
+    assert.equal(notFoundPayload.error, "Watch rule not found");
+  } finally {
+    await server.close();
+  }
+});
