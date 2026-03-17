@@ -21,6 +21,7 @@ AgentOS is a local-first control plane for autonomous agents that operate browse
 - Named workspace profiles for persistent personal browser/app state across tasks
 - Local file inbox connector that turns dropped JSON files into tasks or events
 - Persistent watch rules for always-on standing tasks
+- Watch health, retry, and draft approval flow for conservative live automation
 - Encrypted local credential vault with per-secret metadata
 - Local ops console at `/` for trace/debug use
 - SQLite-backed tasks, events, traces, workspaces, memory, and artifacts
@@ -76,6 +77,7 @@ Start or inspect the daemon:
 ```bash
 node dist/bin/agentos.js daemon start
 node dist/bin/agentos.js daemon status
+node dist/bin/agentos.js doctor
 ```
 
 Run a one-off task:
@@ -105,12 +107,22 @@ Create an always-on watch rule:
 ```bash
 node dist/bin/agentos.js watch add "一直盯 Slack，有新消息就按我的风格回复" --skill slack-reply --workspace personal-main
 node dist/bin/agentos.js watch ls
+node dist/bin/agentos.js watch health <watch-id>
+node dist/bin/agentos.js watch retry <watch-id>
 ```
 
 Teach a completed task into a reusable watch profile:
 
 ```bash
 node dist/bin/agentos.js watch teach <task-id> "一直盯这个收件箱，看到同类消息就按刚才的流程处理" --pack generic-mail-desktop --workspace personal-main
+```
+
+Inspect live packs or approve pending drafts:
+
+```bash
+node dist/bin/agentos.js packs ls
+node dist/bin/agentos.js drafts ls
+node dist/bin/agentos.js drafts approve <draft-id>
 ```
 
 ## Runtime notes
@@ -130,6 +142,8 @@ node dist/bin/agentos.js watch teach <task-id> "一直盯这个收件箱，看�
 - Saved skills can be listed or installed through the local API and invoked with `skillName`.
 - Teach Mode can save a successful run into a reusable skill either during task submission with `saveSkillAs` or later through `POST /skills/from-task`.
 - Standing tasks are stored as watch rules. The runtime currently ships bundled live packs for `slack-desktop`, `wechat-desktop`, `generic-mail-desktop`, and `generic-desktop`.
+- Live packs now expose pack metadata through `/packs`, and `agentos doctor` summarizes degraded watches and pending drafts.
+- Conservative automation is now built in: Slack and WeChat can auto-send low-risk replies, while mail and high-risk actions default to pending drafts for approval.
 - JSON files dropped into `.agentos/inbox/` are ingested automatically. Task-shaped JSON creates a task; `{ "kind": "event", ... }` creates an event.
 
 ## API
@@ -145,13 +159,21 @@ node dist/bin/agentos.js watch teach <task-id> "一直盯这个收件箱，看�
 - `GET /traces/:id`
 - `POST /policy/evaluate`
 - `GET /connectors`
+- `GET /doctor`
+- `GET /packs`
 - `GET /watches`
 - `POST /watches`
 - `POST /watches/from-task`
 - `GET /watches/:id`
+- `GET /watches/:id/health`
 - `POST /watches/:id/enable`
 - `POST /watches/:id/disable`
+- `POST /watches/:id/retry`
 - `DELETE /watches/:id`
+- `GET /drafts`
+- `GET /drafts/:id`
+- `POST /drafts/:id/approve`
+- `POST /drafts/:id/reject`
 - `GET /skills`
 - `POST /skills/from-task`
 - `GET /skills/:name`

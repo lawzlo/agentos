@@ -119,4 +119,24 @@ export class OpenAICompatibleModelClient {
       temperature: 0
     });
   }
+
+  async draftReply(payload) {
+    return this.#requestJson({
+      schemaName: "agentos_live_reply",
+      schema: {
+        type: "object",
+        properties: {
+          replyText: { type: "string" },
+          confidence: { type: ["number", "null"] },
+          rationale: { type: ["string", "null"] }
+        },
+        required: ["replyText"],
+        additionalProperties: false
+      },
+      systemPrompt:
+        "You draft concise, low-risk replies for a personal local agent. Acknowledge the message, avoid making commitments you cannot verify, and prefer a short confirmation style.",
+      userPayload: payload,
+      temperature: 0.2
+    });
+  }
 }

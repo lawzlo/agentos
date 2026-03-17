@@ -1,4 +1,5 @@
-const HIGH_RISK_KEYWORDS = ["pay", "payment", "wire", "delete", "submit", "send", "sign"];
+const HIGH_RISK_KEYWORDS = ["pay", "payment", "wire", "delete", "submit", "send", "sign", "invoice", "合同", "付款", "删除", "提交", "发送", "签署"];
+const HIGH_RISK_AUTOMATION_KEYWORDS = ["pay", "payment", "wire", "delete", "invoice", "sign", "合同", "付款", "删除", "签署"];
 const BLOCKED_ACTIONS = new Set(["shell", "evaluate"]);
 
 export class PolicyEngine {
@@ -34,6 +35,128 @@ export class PolicyEngine {
       riskLevel: reasons.length ? "high" : "normal",
       requiresReview: false,
       reasons
+    };
+  }
+
+  evaluateAutomation({
+    taskSpec,
+    watchRule = null,
+    detection = null,
+    replyText = ""
+  }: {
+    taskSpec: Record<string, any>;
+    watchRule?: Record<string, any> | null;
+    detection?: Record<string, any> | null;
+    replyText?: string;
+  }) {
+    const livePack = String(watchRule?.livePack ?? "");
+    const configuredPolicy =
+      watchRule?.taskInputs?.automationPolicy ??
+      watchRule?.watchProfile?.metadata?.automationPolicy ??
+      taskSpec?.permissions?.automationPolicy ??
+      null;
+    const text = [
+      taskSpec?.goal,
+      taskSpec?.doneCondition,
+      detection?.summary,
+      ...(Array.isArray(detection?.context) ? detection.context : []),
+      replyText
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+    const reasons = HIGH_RISK_AUTOMATION_KEYWORDS.filter((keyword) => text.includes(keyword)).map(
+      (keyword) => `automation context contains high-risk keyword: ${keyword}`
+    );
+    const riskLevel = reasons.length ? "high" : "normal";
+    const inputs = taskSpec?.inputs ?? {};
+    const steps = Array.isArray(taskSpec?.steps) ? taskSpec.steps : [];
+    const stepLooksLikeSend = steps.some((step) => {
+      const text = String(step?.params?.targetQuery ?? step?.params?.target?.text ?? step?.label ?? "").toLowerCase();
+      return /(send|reply|submit|发送|回复|提交)/iu.test(text);
+    });
+    const hasOutboundSendIntent =
+      Boolean(replyText?.trim()) ||
+      Boolean(inputs.sendTarget) ||
+      stepLooksLikeSend;
+
+    if (configuredPolicy === "blocked") {
+      return {
+        policy: "blocked",
+        riskLevel,
+        reasons: reasons.length ? reasons : ["automationPolicy=blocked"],
+        action: "block"
+      };
+    }
+
+    if (configuredPolicy === "draft_only") {
+      return {
+        policy: "draft_only",
+        riskLevel,
+        reasons: reasons.length ? reasons : ["automationPolicy=draft_only"],
+        action: "draft"
+      };
+    }
+
+    if (configuredPolicy === "confirm_required") {
+      return {
+        policy: "confirm_required",
+        riskLevel,
+        reasons: reasons.length ? reasons : ["automationPolicy=confirm_required"],
+        action: "draft"
+      };
+    }
+
+    if (configuredPolicy === "allow") {
+      return {
+        policy: "allow",
+        riskLevel,
+        reasons,
+        action: "send"
+      };
+    }
+
+    if (!hasOutboundSendIntent) {
+      return {
+        policy: "allow",
+        riskLevel,
+        reasons,
+        action: "send"
+      };
+    }
+
+    if (livePack === "generic-mail-desktop") {
+      return {
+        policy: "confirm_required",
+        riskLevel,
+        reasons: reasons.length ? reasons : ["mail replies require approval by default"],
+        action: "draft"
+      };
+    }
+
+    if (riskLevel === "high") {
+      return {
+        policy: "confirm_required",
+        riskLevel,
+        reasons,
+        action: "draft"
+      };
+    }
+
+    if (["slack-desktop", "wechat-desktop"].includes(livePack)) {
+      return {
+        policy: "allow",
+        riskLevel,
+        reasons,
+        action: "send"
+      };
+    }
+
+    return {
+      policy: "draft_only",
+      riskLevel,
+      reasons: reasons.length ? reasons : ["generic live pack defaults to draft-only"],
+      action: "draft"
     };
   }
 }

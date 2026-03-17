@@ -120,7 +120,16 @@ function formatTask(task) {
 }
 
 function formatWatch(rule) {
-  return `${rule.id}  ${String(rule.status).padEnd(10)}  ${rule.livePack.padEnd(20)}  ${rule.goal}`;
+  const health = rule.health?.state ? String(rule.health.state).padEnd(9) : "n/a".padEnd(9);
+  return `${rule.id}  ${String(rule.status).padEnd(18)}  ${health}  ${rule.livePack.padEnd(20)}  ${rule.goal}`;
+}
+
+function formatPack(pack) {
+  return `${pack.name.padEnd(20)}  ${String(pack.family).padEnd(7)}  ${pack.surface.padEnd(7)}  ${pack.description}`;
+}
+
+function formatDraft(draft) {
+  return `${draft.id}  ${String(draft.status).padEnd(9)}  ${String(draft.livePack ?? "-").padEnd(20)}  ${draft.summary ?? "(no summary)"}`;
 }
 
 async function waitForTask(taskId, timeoutMs = 30000) {
@@ -472,9 +481,23 @@ async function commandWatch(subcommand, positionals, options) {
     return;
   }
 
+  if (subcommand === "health") {
+    const [watchId] = positionals;
+    const payload = await apiRequest("GET", `/watches/${watchId}/health`);
+    print(payload.health, options);
+    return;
+  }
+
   if (subcommand === "enable" || subcommand === "disable") {
     const [watchId] = positionals;
     const payload = await apiRequest("POST", `/watches/${watchId}/${subcommand}`);
+    print(payload.watch, options);
+    return;
+  }
+
+  if (subcommand === "retry") {
+    const [watchId] = positionals;
+    const payload = await apiRequest("POST", `/watches/${watchId}/retry`);
     print(payload.watch, options);
     return;
   }
@@ -487,6 +510,73 @@ async function commandWatch(subcommand, positionals, options) {
   }
 
   throw new Error(`Unsupported watch command: ${subcommand}`);
+}
+
+async function commandDrafts(subcommand, positionals, options) {
+  if (subcommand === "ls") {
+    const payload = await apiRequest("GET", `/drafts?limit=${Number(options.limit ?? 20)}`);
+    if (options.json) {
+      print(payload.drafts, options);
+      return;
+    }
+    console.log(payload.drafts.map(formatDraft).join("\n") || "No drafts found.");
+    return;
+  }
+
+  if (subcommand === "inspect") {
+    const [draftId] = positionals;
+    const payload = await apiRequest("GET", `/drafts/${draftId}`);
+    print(payload.draft, options);
+    return;
+  }
+
+  if (subcommand === "approve") {
+    const [draftId] = positionals;
+    const payload = await apiRequest("POST", `/drafts/${draftId}/approve`);
+    print(payload.draft, options);
+    return;
+  }
+
+  if (subcommand === "reject") {
+    const [draftId] = positionals;
+    const payload = await apiRequest("POST", `/drafts/${draftId}/reject`, {
+      reason: options.reason ?? null
+    });
+    print(payload.draft, options);
+    return;
+  }
+
+  throw new Error(`Unsupported drafts command: ${subcommand}`);
+}
+
+async function commandPacks(subcommand, positionals, options) {
+  if (subcommand === "ls") {
+    const payload = await apiRequest("GET", "/packs");
+    if (options.json) {
+      print(payload.packs, options);
+      return;
+    }
+    console.log(payload.packs.map(formatPack).join("\n") || "No packs found.");
+    return;
+  }
+
+  if (subcommand === "inspect") {
+    const [name] = positionals;
+    const payload = await apiRequest("GET", "/packs");
+    const found = payload.packs.find((pack) => pack.name === name);
+    if (!found) {
+      throw new Error(`Pack not found: ${name}`);
+    }
+    print(found, options);
+    return;
+  }
+
+  throw new Error(`Unsupported packs command: ${subcommand}`);
+}
+
+async function commandDoctor(options) {
+  const payload = await apiRequest("GET", "/doctor");
+  print(payload.doctor, options);
 }
 
 async function commandSkills(subcommand, positionals, options) {
@@ -544,6 +634,7 @@ async function main() {
     print(
       `agentos daemon start|stop|status|logs|install|uninstall
 agentos run "<goal>" [--surface browser|desktop] [--workspace name] [--skill name] [--input key=value] [--wait]
+agentos doctor
 agentos ps [--limit 20]
 agentos inspect <task-id>
 agentos logs <task-id>
@@ -551,7 +642,9 @@ agentos control <task-id> pause|resume|takeover|request_takeover|return|return_t
 agentos teach-step <task-id> --action clickTarget [--target "..."] [--text "..."] [--surface browser|desktop]
 agentos watch add "<goal>" [--pack live-pack] [--skill name] [--workspace name] [--input key=value]
 agentos watch teach <task-id> "<goal>" [--watch id] [--pack live-pack] [--workspace name]
-agentos watch ls|inspect|enable|disable|rm
+agentos watch ls|inspect|health|enable|disable|retry|rm
+agentos drafts ls|inspect|approve|reject
+agentos packs ls|inspect
 agentos skills ls|inspect|run`,
       sharedOptions
     );
@@ -591,6 +684,11 @@ agentos skills ls|inspect|run`,
     return;
   }
 
+  if (command === "doctor") {
+    await commandDoctor(sharedOptions);
+    return;
+  }
+
   if (command === "ps") {
     await commandPs(sharedOptions);
     return;
@@ -618,6 +716,16 @@ agentos skills ls|inspect|run`,
 
   if (command === "watch") {
     await commandWatch(subcommand, positionals, sharedOptions);
+    return;
+  }
+
+  if (command === "drafts") {
+    await commandDrafts(subcommand, positionals, sharedOptions);
+    return;
+  }
+
+  if (command === "packs") {
+    await commandPacks(subcommand, positionals, sharedOptions);
     return;
   }
 

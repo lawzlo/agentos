@@ -78,6 +78,21 @@ export async function createServer(overrides = {}) {
       return;
     }
 
+    if (req.method === "GET" && url.pathname === "/doctor") {
+      json(res, 200, {
+        doctor: {
+          ...controlPlane.doctor(),
+          daemon: {
+            pid: process.pid,
+            port: activePort,
+            startedAt,
+            dataDir: config.dataDir
+          }
+        }
+      });
+      return;
+    }
+
     if (req.method === "GET" && url.pathname === "/daemon/status") {
       json(res, 200, {
         daemon: {
@@ -192,6 +207,11 @@ export async function createServer(overrides = {}) {
       return;
     }
 
+    if (req.method === "GET" && url.pathname === "/packs") {
+      json(res, 200, { packs: controlPlane.listLivePackInfo() });
+      return;
+    }
+
     if (req.method === "GET" && url.pathname === "/watches") {
       json(res, 200, { watches: controlPlane.listWatchRules() });
       return;
@@ -223,6 +243,15 @@ export async function createServer(overrides = {}) {
     }
 
     if (req.method === "GET" && url.pathname.startsWith("/watches/")) {
+      if (url.pathname.endsWith("/health")) {
+        const watchRuleId = url.pathname.split("/")[2];
+        try {
+          json(res, 200, { health: controlPlane.getWatchHealth(watchRuleId) });
+        } catch (error) {
+          json(res, 404, { error: error.message });
+        }
+        return;
+      }
       const watchRuleId = url.pathname.split("/")[2];
       const watch = controlPlane.getWatchRule(watchRuleId);
       if (!watch) {
@@ -255,6 +284,17 @@ export async function createServer(overrides = {}) {
       return;
     }
 
+    if (req.method === "POST" && url.pathname.startsWith("/watches/") && url.pathname.endsWith("/retry")) {
+      const watchRuleId = url.pathname.split("/")[2];
+      try {
+        const watch = controlPlane.retryWatchRule(watchRuleId);
+        json(res, 200, { watch });
+      } catch (error) {
+        json(res, 404, { error: error.message });
+      }
+      return;
+    }
+
     if (req.method === "DELETE" && url.pathname.startsWith("/watches/")) {
       const watchRuleId = url.pathname.split("/")[2];
       try {
@@ -262,6 +302,53 @@ export async function createServer(overrides = {}) {
         json(res, 200, { ok: true });
       } catch (error) {
         json(res, 404, { error: error.message });
+      }
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/drafts") {
+      json(res, 200, { drafts: controlPlane.listDrafts(Number(url.searchParams.get("limit") ?? 50)) });
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname.startsWith("/drafts/")) {
+      const draftId = url.pathname.split("/")[2];
+      if (url.pathname.endsWith("/approve")) {
+        json(res, 405, { error: "Use POST /drafts/:id/approve" });
+        return;
+      }
+      if (url.pathname.endsWith("/reject")) {
+        json(res, 405, { error: "Use POST /drafts/:id/reject" });
+        return;
+      }
+      const draft = controlPlane.getDraft(draftId);
+      if (!draft) {
+        json(res, 404, { error: "Draft not found" });
+        return;
+      }
+      json(res, 200, { draft });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname.startsWith("/drafts/") && url.pathname.endsWith("/approve")) {
+      const draftId = url.pathname.split("/")[2];
+      try {
+        const draft = await controlPlane.approveDraft(draftId);
+        json(res, 200, { draft });
+      } catch (error) {
+        json(res, 400, { error: error.message });
+      }
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname.startsWith("/drafts/") && url.pathname.endsWith("/reject")) {
+      const draftId = url.pathname.split("/")[2];
+      const body = await readJsonBody(req);
+      try {
+        const draft = controlPlane.rejectDraft(draftId, body.reason ?? null);
+        json(res, 200, { draft });
+      } catch (error) {
+        json(res, 400, { error: error.message });
       }
       return;
     }

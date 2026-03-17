@@ -169,17 +169,29 @@ function contextForSignal(worldState, signal) {
 
 function createVisualDesktopPack({
   name,
+  family = "generic",
+  description = "Visual desktop inbox watcher",
   defaultTriggerTexts = [],
   unreadTokens = [],
   ignoreTokens = []
 }: {
   name: string;
+  family?: "chat" | "mail" | "generic";
+  description?: string;
   defaultTriggerTexts?: string[];
   unreadTokens?: string[];
   ignoreTokens?: string[];
 }) {
   return {
     name,
+    info: {
+      name,
+      family,
+      surface: "desktop",
+      supportsDrafts: true,
+      supportsAutoSend: family === "chat",
+      description
+    },
     async activate({ rule, workspace, surfaceRegistry }) {
       if (rule.appTarget && rule.preferredSurface === "desktop") {
         const desktop = surfaceRegistry.get("desktop");
@@ -235,7 +247,7 @@ function createVisualDesktopPack({
           watchItemText: match,
           watchSummary: match,
           watchContext: context.join("\n"),
-          ...(liveHints.openTargetQuery ? { clickTarget: liveHints.openTargetQuery } : {}),
+          openTarget: match,
           ...(liveHints.composeTargetQuery ? { typeTarget: liveHints.composeTargetQuery } : {}),
           ...(liveHints.sendTargetQuery ? { sendTarget: liveHints.sendTargetQuery } : {})
         }
@@ -247,6 +259,45 @@ function createVisualDesktopPack({
         inputs: {
           ...(detection.inputs ?? {}),
           watchProfileMode: rule.watchProfile?.executionMode ?? "planned"
+        }
+      };
+    },
+    async draftReply({ rule, detection, controlPlane }) {
+      const summary = String(detection?.summary ?? "").trim();
+      const context = Array.isArray(detection?.context) ? detection.context : [];
+      const combinedContext = [summary, ...context].filter(Boolean).join("\n");
+      if (controlPlane.modelClient.isConfigured()) {
+        const drafted = await controlPlane.modelClient.draftReply({
+          goal: rule.goal,
+          livePack: name,
+          summary,
+          context
+        });
+        return {
+          replyText: String(drafted.replyText ?? "").trim(),
+          metadata: {
+            confidence: drafted.confidence ?? null,
+            rationale: drafted.rationale ?? null,
+            source: "model"
+          }
+        };
+      }
+
+      const chinese = /[\u4e00-\u9fff]/u.test(`${rule.goal} ${combinedContext}`);
+      const replyText =
+        family === "mail"
+          ? chinese
+            ? "收到你的邮件，我会尽快处理并回复。"
+            : "Thanks for your email. I received it and will follow up shortly."
+          : chinese
+            ? "收到，我会尽快处理。"
+            : "Got it. I will follow up shortly.";
+      return {
+        replyText,
+        metadata: {
+          confidence: null,
+          rationale: "heuristic fallback",
+          source: "heuristic"
         }
       };
     }
@@ -261,21 +312,31 @@ export class LivePackRegistry {
     this.packs = new Map();
 
     for (const pack of [
-      createVisualDesktopPack({ name: "generic-desktop" }),
+      createVisualDesktopPack({
+        name: "generic-desktop",
+        family: "generic",
+        description: "Generic desktop watcher with OCR-based trigger detection."
+      }),
       createVisualDesktopPack({
         name: "slack-desktop",
+        family: "chat",
+        description: "Slack desktop watcher that detects unread threads and drafts short replies.",
         defaultTriggerTexts: ["unread", "new message", "new messages", "未读", "mention"],
         unreadTokens: ["unread", "new message", "new messages", "未读", "mention"],
         ignoreTokens: ["send", "reply", "search", "compose", "发送", "回复", "搜索"]
       }),
       createVisualDesktopPack({
         name: "wechat-desktop",
+        family: "chat",
+        description: "WeChat desktop watcher for unread conversations and reply drafts.",
         defaultTriggerTexts: ["未读", "新消息", "wechat", "微信"],
         unreadTokens: ["未读", "新消息", "wechat", "微信"],
         ignoreTokens: ["发送", "回复", "搜索"]
       }),
       createVisualDesktopPack({
         name: "generic-mail-desktop",
+        family: "mail",
+        description: "Generic desktop mail watcher with approval-first reply drafts.",
         defaultTriggerTexts: ["unread", "inbox", "mail", "邮件", "未读", "收件箱"],
         unreadTokens: ["unread", "new mail", "inbox", "邮件", "未读", "收件箱"],
         ignoreTokens: ["send", "reply", "compose", "发送", "回复", "撰写"]
@@ -299,5 +360,11 @@ export class LivePackRegistry {
 
   list() {
     return [...this.packs.keys()].sort();
+  }
+
+  listInfo() {
+    return [...this.packs.values()]
+      .map((pack) => pack.info ?? { name: pack.name, family: "generic", surface: "desktop", supportsDrafts: false, supportsAutoSend: false, description: pack.name })
+      .sort((left, right) => String(left.name).localeCompare(String(right.name)));
   }
 }

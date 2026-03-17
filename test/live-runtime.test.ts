@@ -37,6 +37,21 @@ async function waitForWatchRule(baseUrl, watchRuleId, matcher, timeoutMs = 10000
   throw new Error(`Timed out waiting for watch rule ${watchRuleId}`);
 }
 
+async function waitForDraft(baseUrl, matcher, timeoutMs = 10000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const response = await fetch(`${baseUrl}/drafts`);
+    const payload = await response.json();
+    const found = payload.drafts.find(matcher);
+    if (found) {
+      return found;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+
+  throw new Error("Timed out waiting for draft");
+}
+
 test("watch rules trigger deduped tasks and can be enabled or disabled", async () => {
   const dataDir = await createTempDir();
   const fakeLivePack = {
@@ -311,6 +326,163 @@ test("watch failures enter backoff and record retry metadata", async () => {
     assert.match(backedOff.lastError, /watch source unavailable/);
     assert.ok(Number(backedOff.dedupeState.backoffMs) >= 1000);
     assert.ok(Number(backedOff.dedupeState.retryAfter) > Date.now());
+  } finally {
+    await server.close();
+  }
+});
+
+test("draft-only watch rules create pending drafts that can be approved into tasks", async () => {
+  const dataDir = await createTempDir();
+  const fakeLivePack = {
+    async detectNewItems({ dedupeState }) {
+      if (dedupeState.lastFingerprint === "draft-item-1") {
+        return null;
+      }
+
+      return {
+        fingerprint: "draft-item-1",
+        summary: "Draft review required",
+        taskSpec: {
+          goal: "Review a drafted reply",
+          preferredSurface: "desktop",
+          steps: [
+            {
+              label: "Wait briefly",
+              surface: "desktop",
+              action: "wait",
+              params: { ms: 10 },
+              checkpoint: false
+            }
+          ]
+        }
+      };
+    }
+  };
+  const server = await startAgentServer({
+    dataDir,
+    livePacks: {
+      "draft-live": fakeLivePack
+    }
+  });
+
+  try {
+    const createResponse = await fetch(`${server.baseUrl}/watches`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        goal: "Always watch the draft-only inbox",
+        livePack: "draft-live",
+        preferredSurface: "desktop",
+        pollIntervalMs: 50,
+        inputs: {
+          automationPolicy: "confirm_required"
+        }
+      })
+    });
+    const { watch } = await createResponse.json();
+
+    const pendingDraft = await waitForDraft(server.baseUrl, (draft) => draft.watchRuleId === watch.id && draft.status === "pending");
+    assert.equal(pendingDraft.status, "pending");
+    assert.equal(pendingDraft.riskDecision.action, "draft");
+
+    const watchPending = await waitForWatchRule(server.baseUrl, watch.id, (current) => current.status === "awaiting_approval");
+    assert.equal(watchPending.health.state, "healthy");
+    assert.equal(watchPending.health.activeDraftId, pendingDraft.id);
+
+    const approvedResponse = await fetch(`${server.baseUrl}/drafts/${pendingDraft.id}/approve`, {
+      method: "POST"
+    });
+    const approvedPayload = await approvedResponse.json();
+    assert.equal(approvedPayload.draft.status, "approved");
+    assert.ok(approvedPayload.draft.taskId);
+
+    const completed = await waitForTask(server.baseUrl, approvedPayload.draft.taskId, (task) => task.status === "completed");
+    assert.equal(completed.status, "completed");
+  } finally {
+    await server.close();
+  }
+});
+
+test("watch retry clears backoff state and allows a recovered pack to trigger", async () => {
+  const dataDir = await createTempDir();
+  let shouldFail = true;
+  const fakeLivePack = {
+    async detectNewItems({ dedupeState }) {
+      if (shouldFail) {
+        throw new Error("temporary outage");
+      }
+      if (dedupeState.lastFingerprint === "retry-item-1") {
+        return null;
+      }
+      return {
+        fingerprint: "retry-item-1",
+        summary: "Retry succeeded",
+        taskSpec: {
+          goal: "Run after retry",
+          preferredSurface: "desktop",
+          steps: [
+            {
+              label: "Wait briefly",
+              surface: "desktop",
+              action: "wait",
+              params: { ms: 10 },
+              checkpoint: false
+            }
+          ]
+        }
+      };
+    }
+  };
+  const server = await startAgentServer({
+    dataDir,
+    livePacks: {
+      "retry-live": fakeLivePack
+    }
+  });
+
+  try {
+    const createResponse = await fetch(`${server.baseUrl}/watches`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        goal: "Always watch the retry inbox",
+        livePack: "retry-live",
+        preferredSurface: "desktop",
+        pollIntervalMs: 1000
+      })
+    });
+    const { watch } = await createResponse.json();
+
+    await waitForWatchRule(server.baseUrl, watch.id, (current) => current.status === "backoff");
+    shouldFail = false;
+
+    const retryResponse = await fetch(`${server.baseUrl}/watches/${watch.id}/retry`, {
+      method: "POST"
+    });
+    const retryPayload = await retryResponse.json();
+    assert.equal(retryPayload.watch.status, "watching");
+    assert.equal(retryPayload.watch.health.failureCount, 0);
+
+    const triggeredTask = await waitForWatchTask(server.baseUrl, watch.id);
+    const completed = await waitForTask(server.baseUrl, triggeredTask.id, (task) => task.status === "completed");
+    assert.equal(completed.status, "completed");
+  } finally {
+    await server.close();
+  }
+});
+
+test("doctor and packs endpoints expose live runtime diagnostics", async () => {
+  const dataDir = await createTempDir();
+  const server = await startAgentServer({ dataDir });
+
+  try {
+    const doctorPayload = await (await fetch(`${server.baseUrl}/doctor`)).json();
+    assert.equal(typeof doctorPayload.doctor.ok, "boolean");
+    assert.ok(Array.isArray(doctorPayload.doctor.warnings));
+
+    const packsPayload = await (await fetch(`${server.baseUrl}/packs`)).json();
+    assert.ok(packsPayload.packs.some((pack) => pack.name === "slack-desktop"));
+    assert.ok(packsPayload.packs.some((pack) => pack.name === "generic-mail-desktop"));
   } finally {
     await server.close();
   }

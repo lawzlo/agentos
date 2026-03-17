@@ -131,9 +131,11 @@ function collectWatchInputs(taskSpec: Record<string, any> = {}) {
   const fields = [
     ["startUrl", "Start URL"],
     ["desktopApp", "Desktop App"],
+    ["openTarget", "Open Target"],
     ["clickTarget", "Click Target"],
     ["typeTarget", "Type Target"],
     ["typeText", "Text To Type"],
+    ["sendTarget", "Send Target"],
     ["waitText", "Wait For Text"],
     ["waitUrl", "Wait For URL"],
     ["captureLabel", "Capture Label"],

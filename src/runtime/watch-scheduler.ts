@@ -39,6 +39,28 @@ function clearWatchFailureState(dedupeState: Record<string, unknown> = {}) {
   };
 }
 
+function shouldDraftReply(rule: WatchRuleLike, detection: Record<string, any> = {}) {
+  if (typeof detection.replyText === "string" && detection.replyText.trim()) {
+    return true;
+  }
+
+  const inputs = detection.inputs ?? {};
+  if (inputs.sendTarget || inputs.typeTarget || inputs.openTarget) {
+    return true;
+  }
+
+  const liveHints = (rule.watchProfile?.liveHints ?? {}) as Record<string, any>;
+  if (liveHints.sendTargetQuery || liveHints.composeTargetQuery || liveHints.openTargetQuery) {
+    return true;
+  }
+
+  const actionTemplate = Array.isArray(rule.watchProfile?.actionTemplate) ? rule.watchProfile.actionTemplate : [];
+  return actionTemplate.some((step) => {
+    const text = String(step?.params?.targetQuery ?? step?.params?.target?.text ?? step?.label ?? "").toLowerCase();
+    return /(send|reply|submit|发送|回复|提交)/iu.test(text) || step?.action === "typeIntoTarget";
+  });
+}
+
 export class WatchScheduler {
   controlPlane: any;
   store: any;
@@ -141,6 +163,8 @@ export class WatchScheduler {
     try {
       const activeTaskId = String(rule.dedupeState?.activeTaskId ?? "") || null;
       const activeTask = activeTaskId ? this.store.getTask(activeTaskId) : null;
+      const activeDraftId = String(rule.dedupeState?.activeDraftId ?? "") || null;
+      const activeDraft = activeDraftId ? this.store.getDraft(activeDraftId) : null;
       if (isActiveTask(activeTask)) {
         const updated = this.store.putWatchRule({
           ...rule,
@@ -154,6 +178,32 @@ export class WatchScheduler {
         });
         this.eventBus.broadcast("watch.updated", updated);
         return;
+      }
+
+      if (activeDraft?.status === "pending") {
+        const updated = this.store.putWatchRule({
+          ...rule,
+          lastObservedAt: nowIso(),
+          lastError: null,
+          status: "awaiting_approval",
+          dedupeState: clearWatchFailureState({
+            ...(rule.dedupeState ?? {}),
+            activeDraftId
+          })
+        });
+        this.eventBus.broadcast("watch.updated", updated);
+        return;
+      }
+
+      if (activeDraftId && activeDraft && ["approved", "rejected", "expired"].includes(activeDraft.status)) {
+        const cleared = this.store.putWatchRule({
+          ...rule,
+          dedupeState: {
+            ...(rule.dedupeState ?? {}),
+            activeDraftId: null
+          }
+        });
+        this.eventBus.broadcast("watch.updated", cleared);
       }
 
       if (activeTaskId && activeTask?.status === "completed" && rule.dedupeState?.lastHandledTaskId !== activeTaskId) {
@@ -248,7 +298,85 @@ export class WatchScheduler {
         return;
       }
 
-      const task = await this.controlPlane.createTaskFromWatchRule(rule, detection);
+      const replyDraft = shouldDraftReply(rule, detection)
+        ? await this.controlPlane.draftWatchReply({
+            watchRule: rule,
+            detection,
+            pack
+          })
+        : null;
+      const taskSpec = this.controlPlane.buildTaskSpecFromWatchRule(rule, detection, {
+        replyText: replyDraft?.replyText ?? null,
+        autoSend: true
+      });
+      const automation = this.controlPlane.policyEngine.evaluateAutomation({
+        taskSpec,
+        watchRule: rule,
+        detection,
+        replyText: replyDraft?.replyText ?? ""
+      });
+
+      if (automation.action === "block") {
+        const updated = this.store.putWatchRule({
+          ...rule,
+          lastObservedAt: nowIso(),
+          lastError: automation.reasons.join("; ") || "automation blocked",
+          status: "degraded",
+          dedupeState: {
+            ...(rule.dedupeState ?? {}),
+            lastFingerprint: detection.fingerprint ?? detection.summary ?? null,
+            lastSummary: detection.summary ?? null,
+            lastContext: detection.context ?? [],
+            activeTaskId: null,
+            activeDraftId: null
+          }
+        });
+        this.eventBus.broadcast("watch.updated", updated);
+        this.eventBus.broadcast("watch.blocked", {
+          rule: updated,
+          automation
+        });
+        return;
+      }
+
+      if (automation.action === "draft") {
+        const draft = this.controlPlane.createDraft({
+          watchRule: rule,
+          taskSpec,
+          detection,
+          riskDecision: automation,
+          replyText: replyDraft?.replyText ?? null,
+          summary: detection.summary ?? null,
+          metadata: {
+            reply: replyDraft?.metadata ?? {},
+            context: detection.context ?? []
+          }
+        });
+        const updated = this.store.putWatchRule({
+          ...rule,
+          lastObservedAt: nowIso(),
+          lastTriggeredAt: nowIso(),
+          lastError: null,
+          status: "awaiting_approval",
+          dedupeState: clearWatchFailureState({
+            ...(rule.dedupeState ?? {}),
+            lastFingerprint: detection.fingerprint ?? detection.summary ?? draft.id,
+            lastSummary: detection.summary ?? null,
+            lastContext: detection.context ?? [],
+            activeTaskId: null,
+            activeDraftId: draft.id,
+            failureCount: 0
+          })
+        });
+        this.eventBus.broadcast("watch.drafted", {
+          rule: updated,
+          draft
+        });
+        this.eventBus.broadcast("watch.updated", updated);
+        return;
+      }
+
+      const task = await this.controlPlane.createTask(taskSpec);
       const updated = this.store.putWatchRule({
         ...rule,
         lastObservedAt: nowIso(),

@@ -87,6 +87,7 @@ export interface WatchRule {
   goal: string;
   enabled: boolean;
   status: string;
+  health?: WatchHealth;
   preferredSurface: "browser" | "desktop";
   workspaceName: string | null;
   skillName: string | null;
@@ -101,6 +102,17 @@ export interface WatchRule {
   lastError: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface WatchHealth {
+  state: "healthy" | "warning" | "degraded" | "disabled";
+  failureCount: number;
+  retryAfter: string | null;
+  retryAfterMs: number | null;
+  activeTaskId: string | null;
+  activeDraftId: string | null;
+  lastHandledFingerprint: string | null;
+  summary: string | null;
 }
 
 export interface WatchProfile {
@@ -140,6 +152,41 @@ export interface TeachRecording {
     manualTeachStepsCount: number;
     manualCorrectionsCount: number;
   };
+}
+
+export interface RiskGateDecision {
+  policy: "allow" | "draft_only" | "confirm_required" | "blocked";
+  riskLevel: "normal" | "high";
+  reasons: string[];
+  action: "send" | "draft" | "block";
+}
+
+export interface DraftRecord {
+  id: string;
+  watchRuleId: string | null;
+  livePack: string | null;
+  status: "pending" | "approved" | "rejected" | "expired";
+  summary: string | null;
+  replyText: string | null;
+  fingerprint: string | null;
+  taskSpec: TaskSpec;
+  detection: Record<string, unknown>;
+  riskDecision: RiskGateDecision;
+  metadata: Record<string, unknown>;
+  taskId: string | null;
+  createdAt: string;
+  updatedAt: string;
+  approvedAt: string | null;
+  rejectedAt: string | null;
+}
+
+export interface LivePackInfo {
+  name: string;
+  family: "chat" | "mail" | "generic";
+  surface: "desktop" | "browser";
+  supportsDrafts: boolean;
+  supportsAutoSend: boolean;
+  description: string;
 }
 
 export interface SkillDefinition {

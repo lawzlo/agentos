@@ -22,6 +22,8 @@ export function describeStep(step) {
       return `Open ${params.url}`;
     case "clickTarget":
       return `Click "${params.targetQuery ?? params.target?.text ?? step.label}"`;
+    case "focusTarget":
+      return `Focus "${params.targetQuery ?? params.target?.text ?? step.label}"`;
     case "typeIntoTarget":
       return `Type into "${params.targetQuery ?? params.target?.text ?? step.label}"`;
     case "waitFor":
@@ -118,6 +120,20 @@ function heuristicPlan(taskSpec) {
     );
   }
 
+  if (defaultSurface === "browser" && inputs.openTarget) {
+    steps.push(
+      normalizeStep(
+        {
+          label: `Open ${inputs.openTarget}`,
+          surface: "browser",
+          action: "clickTarget",
+          params: { targetQuery: String(inputs.openTarget) }
+        },
+        steps.length
+      )
+    );
+  }
+
   if (inputs.form && typeof inputs.form === "object") {
     for (const [selector, value] of Object.entries(inputs.form)) {
       steps.push(
@@ -142,6 +158,20 @@ function heuristicPlan(taskSpec) {
           surface: "browser",
           action: "typeIntoTarget",
           params: { targetQuery: String(inputs.typeTarget), text: String(inputs.typeText), clear: true }
+        },
+        steps.length
+      )
+    );
+  }
+
+  if (defaultSurface === "browser" && inputs.sendTarget && inputs.autoSend === true) {
+    steps.push(
+      normalizeStep(
+        {
+          label: `Send via ${inputs.sendTarget}`,
+          surface: "browser",
+          action: "clickTarget",
+          params: { targetQuery: String(inputs.sendTarget) }
         },
         steps.length
       )
@@ -235,6 +265,20 @@ function heuristicPlan(taskSpec) {
     );
   }
 
+  if (defaultSurface === "desktop" && inputs.openTarget) {
+    steps.push(
+      normalizeStep(
+        {
+          label: `Open ${inputs.openTarget}`,
+          surface: "desktop",
+          action: "clickTarget",
+          params: { targetQuery: String(inputs.openTarget) }
+        },
+        steps.length
+      )
+    );
+  }
+
   if (defaultSurface === "desktop" && inputs.typeTarget && inputs.typeText) {
     steps.push(
       normalizeStep(
@@ -255,6 +299,20 @@ function heuristicPlan(taskSpec) {
           surface: "desktop",
           action: "typeText",
           params: { text: String(inputs.typeText) }
+        },
+        steps.length
+      )
+    );
+  }
+
+  if (defaultSurface === "desktop" && inputs.sendTarget && inputs.autoSend === true) {
+    steps.push(
+      normalizeStep(
+        {
+          label: `Send via ${inputs.sendTarget}`,
+          surface: "desktop",
+          action: "clickTarget",
+          params: { targetQuery: String(inputs.sendTarget) }
         },
         steps.length
       )

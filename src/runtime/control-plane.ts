@@ -147,6 +147,61 @@ export class ControlPlane {
     };
   }
 
+  #buildWatchHealth(rule) {
+    if (!rule) {
+      return null;
+    }
+
+    const retryAfter = Number(rule.dedupeState?.retryAfter ?? 0);
+    const activeTaskId = String(rule.dedupeState?.activeTaskId ?? "").trim() || null;
+    const activeDraftId = String(rule.dedupeState?.activeDraftId ?? "").trim() || null;
+    const failureCount = Number(rule.dedupeState?.failureCount ?? 0);
+    const state = !rule.enabled || rule.status === "disabled"
+      ? "disabled"
+      : rule.status === "degraded"
+        ? "degraded"
+        : rule.status === "backoff"
+          ? "warning"
+          : "healthy";
+
+    return {
+      state,
+      failureCount,
+      retryAfter: retryAfter ? new Date(retryAfter).toISOString() : null,
+      retryAfterMs: retryAfter && retryAfter > Date.now() ? retryAfter - Date.now() : null,
+      activeTaskId,
+      activeDraftId,
+      lastHandledFingerprint: String(rule.dedupeState?.lastFingerprint ?? "").trim() || null,
+      summary:
+        rule.lastError ??
+        (String(rule.dedupeState?.lastSummary ?? "").trim() || null) ??
+        null
+    };
+  }
+
+  #decorateWatchRule(rule) {
+    if (!rule) {
+      return null;
+    }
+
+    return {
+      ...rule,
+      health: this.#buildWatchHealth(rule)
+    };
+  }
+
+  #decorateDraft(draft) {
+    if (!draft) {
+      return null;
+    }
+
+    return {
+      ...draft,
+      watch: draft.watchRuleId ? this.#decorateWatchRule(this.store.getWatchRule(draft.watchRuleId)) : null,
+      task: draft.taskId ? this.getTask(draft.taskId) : null
+    };
+  }
+
   listTasks(limit = 50) {
     return this.store.listTasks(limit).map((task) => ({
       ...task,
@@ -172,6 +227,10 @@ export class ControlPlane {
 
   listLivePacks() {
     return this.livePackRegistry.list();
+  }
+
+  listLivePackInfo() {
+    return this.livePackRegistry.listInfo();
   }
 
   listSkills() {
@@ -288,8 +347,9 @@ export class ControlPlane {
     );
     const watchRule = this.store.putWatchRule(normalized);
     this.watchScheduler.sync(watchRule);
-    this.eventBus.broadcast(existingWatchRule ? "watch.learned" : "watch.created", watchRule);
-    return watchRule;
+    const decorated = this.#decorateWatchRule(watchRule);
+    this.eventBus.broadcast(existingWatchRule ? "watch.learned" : "watch.created", decorated);
+    return decorated;
   }
 
   listWorkspaceProfiles() {
@@ -301,11 +361,11 @@ export class ControlPlane {
   }
 
   listWatchRules() {
-    return this.store.listWatchRules();
+    return this.store.listWatchRules().map((rule) => this.#decorateWatchRule(rule));
   }
 
   getWatchRule(watchRuleId) {
-    return this.store.getWatchRule(watchRuleId);
+    return this.#decorateWatchRule(this.store.getWatchRule(watchRuleId));
   }
 
   createWatchRule(spec) {
@@ -314,8 +374,9 @@ export class ControlPlane {
     });
     const watchRule = this.store.putWatchRule(normalized);
     this.watchScheduler.sync(watchRule);
-    this.eventBus.broadcast("watch.created", watchRule);
-    return watchRule;
+    const decorated = this.#decorateWatchRule(watchRule);
+    this.eventBus.broadcast("watch.created", decorated);
+    return decorated;
   }
 
   updateWatchRule(watchRuleId, patch) {
@@ -337,8 +398,9 @@ export class ControlPlane {
     );
     const watchRule = this.store.putWatchRule(normalized);
     this.watchScheduler.sync(watchRule);
-    this.eventBus.broadcast("watch.updated", watchRule);
-    return watchRule;
+    const decorated = this.#decorateWatchRule(watchRule);
+    this.eventBus.broadcast("watch.updated", decorated);
+    return decorated;
   }
 
   enableWatchRule(watchRuleId) {
@@ -366,6 +428,190 @@ export class ControlPlane {
     this.watchScheduler.remove(watchRuleId);
     this.eventBus.broadcast("watch.deleted", { id: watchRuleId });
     return true;
+  }
+
+  getWatchHealth(watchRuleId) {
+    const watchRule = this.store.getWatchRule(watchRuleId);
+    if (!watchRule) {
+      throw new Error(`Watch rule not found: ${watchRuleId}`);
+    }
+    return this.#buildWatchHealth(watchRule);
+  }
+
+  retryWatchRule(watchRuleId) {
+    const watchRule = this.store.getWatchRule(watchRuleId);
+    if (!watchRule) {
+      throw new Error(`Watch rule not found: ${watchRuleId}`);
+    }
+
+    const updated = this.store.putWatchRule({
+      ...watchRule,
+      status: watchRule.enabled ? "watching" : "disabled",
+      lastError: null,
+      dedupeState: {
+        ...(watchRule.dedupeState ?? {}),
+        failureCount: 0,
+        retryAfter: null,
+        backoffMs: 0,
+        activeDraftId: null,
+        activeTaskId: null,
+        lastFingerprint: null,
+        lastSummary: null,
+        lastContext: []
+      }
+    });
+    this.watchScheduler.sync(updated);
+    const decorated = this.#decorateWatchRule(updated);
+    this.eventBus.broadcast("watch.updated", decorated);
+    this.eventBus.broadcast("watch.retry_requested", decorated);
+    return decorated;
+  }
+
+  listDrafts(limit = 50) {
+    return this.store.listDrafts(limit).map((draft) => this.#decorateDraft(draft));
+  }
+
+  getDraft(draftId) {
+    return this.#decorateDraft(this.store.getDraft(draftId));
+  }
+
+  createDraft({
+    watchRule = null,
+    taskSpec,
+    detection = {} as Record<string, any>,
+    riskDecision,
+    replyText = null,
+    summary = null,
+    metadata = {}
+  }: Record<string, any>) {
+    const draft = this.store.createDraft({
+      watchRuleId: watchRule?.id ?? null,
+      livePack: watchRule?.livePack ?? null,
+      status: "pending",
+      summary,
+      replyText,
+      fingerprint: detection?.fingerprint ?? null,
+      taskSpec,
+      detection,
+      riskDecision,
+      metadata
+    });
+    const decorated = this.#decorateDraft(draft);
+    this.eventBus.broadcast("draft.created", decorated);
+    return decorated;
+  }
+
+  async approveDraft(draftId) {
+    const draft = this.store.getDraft(draftId);
+    if (!draft) {
+      throw new Error(`Draft not found: ${draftId}`);
+    }
+    if (draft.status !== "pending") {
+      throw new Error("Only pending drafts can be approved.");
+    }
+
+    const task = await this.createTask(draft.taskSpec);
+    const approved = this.store.updateDraft(draftId, {
+      status: "approved",
+      taskId: task.id,
+      approvedAt: new Date().toISOString()
+    });
+
+    if (draft.watchRuleId) {
+      const watchRule = this.store.getWatchRule(draft.watchRuleId);
+      if (watchRule) {
+        const updated = this.store.putWatchRule({
+          ...watchRule,
+          status: "watching",
+          lastError: null,
+          dedupeState: {
+            ...(watchRule.dedupeState ?? {}),
+            activeTaskId: task.id,
+            activeDraftId: null,
+            lastFingerprint: draft.fingerprint ?? watchRule.dedupeState?.lastFingerprint ?? null,
+            lastSummary: draft.summary ?? watchRule.dedupeState?.lastSummary ?? null
+          }
+        });
+        this.eventBus.broadcast("watch.updated", this.#decorateWatchRule(updated));
+      }
+    }
+
+    const decorated = this.#decorateDraft(approved);
+    this.eventBus.broadcast("draft.approved", decorated);
+    return decorated;
+  }
+
+  rejectDraft(draftId, reason = null) {
+    const draft = this.store.getDraft(draftId);
+    if (!draft) {
+      throw new Error(`Draft not found: ${draftId}`);
+    }
+    if (draft.status !== "pending") {
+      throw new Error("Only pending drafts can be rejected.");
+    }
+
+    const rejected = this.store.updateDraft(draftId, {
+      status: "rejected",
+      rejectedAt: new Date().toISOString(),
+      metadata: {
+        ...(draft.metadata ?? {}),
+        rejectionReason: reason ?? null
+      }
+    });
+
+    if (draft.watchRuleId) {
+      const watchRule = this.store.getWatchRule(draft.watchRuleId);
+      if (watchRule) {
+        const updated = this.store.putWatchRule({
+          ...watchRule,
+          status: "watching",
+          lastError: null,
+          dedupeState: {
+            ...(watchRule.dedupeState ?? {}),
+            activeDraftId: null,
+            activeTaskId: null,
+            lastFingerprint: draft.fingerprint ?? watchRule.dedupeState?.lastFingerprint ?? null,
+            lastSummary: draft.summary ?? watchRule.dedupeState?.lastSummary ?? null
+          }
+        });
+        this.eventBus.broadcast("watch.updated", this.#decorateWatchRule(updated));
+      }
+    }
+
+    const decorated = this.#decorateDraft(rejected);
+    this.eventBus.broadcast("draft.rejected", decorated);
+    return decorated;
+  }
+
+  doctor() {
+    const watches = this.store.listWatchRules();
+    const drafts = this.store.listDrafts(200);
+    const degraded = watches.filter((rule) => ["degraded", "backoff"].includes(rule.status));
+    const pendingDrafts = drafts.filter((draft) => draft.status === "pending");
+    const warnings = [];
+    if (!this.config.browserExecutable) {
+      warnings.push("No managed browser executable detected.");
+    }
+    if (!this.modelClient.isConfigured()) {
+      warnings.push("Model client is not configured; live reply drafting uses heuristics.");
+    }
+    if (degraded.length) {
+      warnings.push(`${degraded.length} watch rule(s) are in backoff or degraded state.`);
+    }
+    if (pendingDrafts.length) {
+      warnings.push(`${pendingDrafts.length} pending draft(s) need approval or rejection.`);
+    }
+
+    return {
+      ok: warnings.length === 0,
+      warnings,
+      browserExecutable: this.config.browserExecutable ?? null,
+      modelConfigured: this.modelClient.isConfigured(),
+      livePackCount: this.livePackRegistry.list().length,
+      degradedWatchCount: degraded.length,
+      pendingDraftCount: pendingDrafts.length,
+      connectorCount: this.connectors.length
+    };
   }
 
   evaluatePolicy(taskSpec) {
@@ -627,13 +873,16 @@ export class ControlPlane {
     return { event: stored, task: null };
   }
 
-  async createTaskFromWatchRule(watchRule, detection = {}) {
+  buildTaskSpecFromWatchRule(watchRule, detection: Record<string, any> = {}, overrides: Record<string, any> = {}) {
     const detected = detection as Record<string, any>;
     const runtimeInputs = {
       ...(watchRule.taskInputs ?? {}),
       ...(detected.inputs ?? {}),
       watchRuleId: watchRule.id,
-      watchSummary: detected.summary ?? null
+      watchSummary: detected.summary ?? null,
+      ...(watchRule.preferredSurface === "desktop" && watchRule.appTarget ? { desktopApp: watchRule.appTarget } : {}),
+      ...(overrides.replyText && !detected.inputs?.typeText ? { typeText: overrides.replyText } : {}),
+      ...(overrides.autoSend != null ? { autoSend: overrides.autoSend } : {})
     };
     const actionTemplate =
       !watchRule.skillName && watchRule.watchProfile?.actionTemplate?.length
@@ -643,24 +892,67 @@ export class ControlPlane {
             watchRule.watchProfile?.metadata?.templateInputs ?? []
           )
         : null;
+    const baseTaskSpec = {
+      goal: detected.goal ?? `${watchRule.goal}${detected.summary ? `\n\nTrigger context: ${detected.summary}` : ""}`,
+      preferredSurface: watchRule.preferredSurface,
+      workspaceName: watchRule.workspaceName ?? `${watchRule.livePack}-live`,
+      skillName: watchRule.skillName ?? null,
+      triggerSource: `watch:${watchRule.id}`,
+      inputs: runtimeInputs,
+      ...(actionTemplate?.length ? { steps: actionTemplate } : {}),
+      executionMode:
+        actionTemplate?.length
+          ? "planned"
+          : watchRule.watchProfile?.executionMode ??
+            (watchRule.skillName ? "planned" : this.modelClient.isConfigured() ? "autonomous" : "planned")
+    };
+    const explicitTaskSpec = detected.taskSpec as Record<string, any> | null;
+    if (!explicitTaskSpec) {
+      return baseTaskSpec;
+    }
 
-    const taskSpec =
-      detected.taskSpec ??
-      {
-        goal: detected.goal ?? `${watchRule.goal}${detected.summary ? `\n\nTrigger context: ${detected.summary}` : ""}`,
-        preferredSurface: watchRule.preferredSurface,
-        workspaceName: watchRule.workspaceName ?? `${watchRule.livePack}-live`,
-        skillName: watchRule.skillName ?? null,
-        triggerSource: `watch:${watchRule.id}`,
-        inputs: runtimeInputs,
-        ...(actionTemplate?.length ? { steps: actionTemplate } : {}),
-        executionMode:
-          actionTemplate?.length
-            ? "planned"
-            : watchRule.watchProfile?.executionMode ??
-              (watchRule.skillName ? "planned" : this.modelClient.isConfigured() ? "autonomous" : "planned")
+    return {
+      ...baseTaskSpec,
+      ...explicitTaskSpec,
+      inputs: {
+        ...runtimeInputs,
+        ...(explicitTaskSpec.inputs ?? {})
+      },
+      steps: explicitTaskSpec.steps ?? baseTaskSpec.steps
+    };
+  }
+
+  async draftWatchReply({ watchRule, detection, pack }) {
+    if (detection?.replyText) {
+      return {
+        replyText: String(detection.replyText),
+        metadata: {
+          source: "detection"
+        }
       };
+    }
 
+    if (typeof pack?.draftReply === "function") {
+      return pack.draftReply({
+        rule: watchRule,
+        detection,
+        controlPlane: this
+      });
+    }
+
+    const summary = String(detection?.summary ?? "").trim();
+    const context = Array.isArray(detection?.context) ? detection.context : [];
+    const chinese = /[\u4e00-\u9fff]/u.test(`${watchRule.goal} ${summary} ${context.join(" ")}`);
+    return {
+      replyText: chinese ? "收到，我会尽快处理。" : "Got it. I will follow up shortly.",
+      metadata: {
+        source: "fallback"
+      }
+    };
+  }
+
+  async createTaskFromWatchRule(watchRule, detection = {}, options = {}) {
+    const taskSpec = this.buildTaskSpecFromWatchRule(watchRule, detection, options);
     return this.createTask(taskSpec);
   }
 
