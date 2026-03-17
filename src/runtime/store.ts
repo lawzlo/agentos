@@ -3,9 +3,15 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import { ArtifactRepository } from "./repositories/artifact-repository.js";
+import { DigestRepository } from "./repositories/digest-repository.js";
 import { DraftRepository } from "./repositories/draft-repository.js";
+import { EntityRepository } from "./repositories/entity-repository.js";
 import { EventRepository } from "./repositories/event-repository.js";
+import { KnowledgeRepository } from "./repositories/knowledge-repository.js";
+import { LearningSourceRepository } from "./repositories/learning-source-repository.js";
 import { MemoryRepository } from "./repositories/memory-repository.js";
+import { ObservationRepository } from "./repositories/observation-repository.js";
+import { ProposalRepository } from "./repositories/proposal-repository.js";
 import { SkillRepository } from "./repositories/skill-repository.js";
 import { TaskRepository } from "./repositories/task-repository.js";
 import { TraceRepository } from "./repositories/trace-repository.js";
@@ -27,6 +33,16 @@ import type {
   WorkspaceProfile,
   WorkspaceRecord
 } from "../types/runtime-schema.js";
+import type {
+  DigestRecord,
+  KnowledgeChunk,
+  LearningSource,
+  MemoryEntity,
+  MemoryEntitySnapshot,
+  MemoryFact,
+  ObservationRecord,
+  ProposalRecord
+} from "../types/learning.js";
 
 export class ControlPlaneStore {
   db: DatabaseSync;
@@ -40,6 +56,12 @@ export class ControlPlaneStore {
   watches: WatchRepository;
   drafts: DraftRepository;
   vault: VaultRepository;
+  learningSources: LearningSourceRepository;
+  observations: ObservationRepository;
+  entities: EntityRepository;
+  knowledge: KnowledgeRepository;
+  digests: DigestRepository;
+  proposals: ProposalRepository;
 
   constructor(dbPath: string) {
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
@@ -55,6 +77,12 @@ export class ControlPlaneStore {
     this.watches = new WatchRepository(this.db);
     this.drafts = new DraftRepository(this.db);
     this.vault = new VaultRepository(this.db);
+    this.learningSources = new LearningSourceRepository(this.db);
+    this.observations = new ObservationRepository(this.db);
+    this.entities = new EntityRepository(this.db);
+    this.knowledge = new KnowledgeRepository(this.db);
+    this.digests = new DigestRepository(this.db);
+    this.proposals = new ProposalRepository(this.db);
   }
 
   getSchemaVersion() {
@@ -211,6 +239,121 @@ export class ControlPlaneStore {
 
   listVaultEntries(scope = "default") {
     return this.vault.list(scope);
+  }
+
+  putLearningSource(source: Partial<LearningSource> & Pick<LearningSource, "kind">): LearningSource {
+    return this.learningSources.put(source);
+  }
+
+  getLearningSourceByKind(kind: LearningSource["kind"]): LearningSource | null {
+    return this.learningSources.getByKind(kind);
+  }
+
+  listLearningSources(): LearningSource[] {
+    return this.learningSources.list();
+  }
+
+  createObservation(
+    observation: Partial<ObservationRecord> & Pick<ObservationRecord, "sourceId" | "category" | "fingerprint">
+  ): ObservationRecord | null {
+    return this.observations.create(observation);
+  }
+
+  getObservationByFingerprint(sourceId: string, fingerprint: string): ObservationRecord | null {
+    return this.observations.getByFingerprint(sourceId, fingerprint);
+  }
+
+  updateObservation(id: string, patch: Partial<ObservationRecord>): ObservationRecord | null {
+    return this.observations.update(id, patch);
+  }
+
+  listObservations(limit = 50): ObservationRecord[] {
+    return this.observations.list(limit);
+  }
+
+  listObservationsSince(sinceIso: string): ObservationRecord[] {
+    return this.observations.listSince(sinceIso);
+  }
+
+  countObservations(): number {
+    return this.observations.count();
+  }
+
+  latestObservationAt(): string | null {
+    return this.observations.latestCreatedAt();
+  }
+
+  upsertMemoryEntity(entity: Partial<MemoryEntity> & Pick<MemoryEntity, "type" | "key" | "title">): MemoryEntity {
+    return this.entities.upsert(entity);
+  }
+
+  getMemoryEntitySnapshot(entityId: string): MemoryEntitySnapshot | null {
+    return this.entities.getSnapshot(entityId);
+  }
+
+  listMemoryEntities(limit = 50): MemoryEntity[] {
+    return this.entities.list(limit);
+  }
+
+  countMemoryEntities(): number {
+    return this.entities.count();
+  }
+
+  createMemoryFact(fact: Partial<MemoryFact> & Pick<MemoryFact, "entityId" | "kind" | "value">): MemoryFact {
+    return this.entities.addFact(fact);
+  }
+
+  createKnowledgeChunk(
+    chunk: Partial<KnowledgeChunk> & Pick<KnowledgeChunk, "sourceId" | "title" | "content">
+  ): KnowledgeChunk {
+    return this.knowledge.create(chunk);
+  }
+
+  searchKnowledge(query: string, limit = 20): KnowledgeChunk[] {
+    return this.knowledge.search(query, limit);
+  }
+
+  countKnowledgeChunks(): number {
+    return this.knowledge.count();
+  }
+
+  putDigest(digest: Partial<DigestRecord> & Pick<DigestRecord, "digestDate" | "summary">): DigestRecord {
+    return this.digests.put(digest);
+  }
+
+  listDigests(limit = 30): DigestRecord[] {
+    return this.digests.list(limit);
+  }
+
+  latestDigest(): DigestRecord | null {
+    return this.digests.latest();
+  }
+
+  putProposal(
+    proposal: Partial<ProposalRecord> &
+      Pick<ProposalRecord, "type" | "fingerprint" | "rationale" | "confidence" | "taskSpec">
+  ): ProposalRecord {
+    return this.proposals.put(proposal);
+  }
+
+  getProposal(id: string): ProposalRecord | null {
+    return this.proposals.get(id);
+  }
+
+  getProposalByFingerprint(fingerprint: string): ProposalRecord | null {
+    return this.proposals.getByFingerprint(fingerprint);
+  }
+
+  updateProposal(id: string, patch: Partial<ProposalRecord>): ProposalRecord | null {
+    return this.proposals.update(id, patch);
+  }
+
+  listProposals(limit = 50): ProposalRecord[] {
+    return this.proposals.list(limit);
+  }
+
+  countPendingProposals(): number {
+    return this.proposals.countPending();
   }
 
   close() {

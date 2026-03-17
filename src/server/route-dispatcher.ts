@@ -1,4 +1,5 @@
 import { handleAdminRoutes } from "./routes/admin-routes.js";
+import { handleLearningRoutes } from "./routes/learning-routes.js";
 import { handleSystemRoutes } from "./routes/system-routes.js";
 import { handleTaskRoutes } from "./routes/task-routes.js";
 import { handleWatchRoutes } from "./routes/watch-routes.js";
@@ -8,6 +9,7 @@ const routeHandlers: ApiRouteHandler[] = [
   handleSystemRoutes,
   handleTaskRoutes,
   handleWatchRoutes,
+  handleLearningRoutes,
   handleAdminRoutes
 ];
 

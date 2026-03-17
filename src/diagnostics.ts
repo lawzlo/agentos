@@ -16,7 +16,7 @@ export async function createDiagnosticBundle({
   config,
   daemon
 }: {
-  controlPlane: Pick<ControlPlane, "doctor" | "listTasks" | "listWatchRules" | "listDrafts">;
+  controlPlane: Pick<ControlPlane, "doctor" | "listTasks" | "listWatchRules" | "listDrafts" | "listProposals">;
   config: AgentOsConfig;
   daemon: DaemonStatus;
 }): Promise<DoctorBundle> {
@@ -47,12 +47,14 @@ export async function createDiagnosticBundle({
   const recentTasks = controlPlane.listTasks(20);
   const recentWatches = controlPlane.listWatchRules();
   const recentDrafts = controlPlane.listDrafts(50);
+  const recentProposals = controlPlane.listProposals(50);
 
   await Promise.all([
     fs.writeFile(path.join(bundlePath, "doctor.json"), JSON.stringify(snapshot, null, 2), "utf8"),
     fs.writeFile(path.join(bundlePath, "tasks.json"), JSON.stringify(recentTasks, null, 2), "utf8"),
     fs.writeFile(path.join(bundlePath, "watches.json"), JSON.stringify(recentWatches, null, 2), "utf8"),
     fs.writeFile(path.join(bundlePath, "drafts.json"), JSON.stringify(recentDrafts, null, 2), "utf8"),
+    fs.writeFile(path.join(bundlePath, "proposals.json"), JSON.stringify(recentProposals, null, 2), "utf8"),
     fs.writeFile(path.join(bundlePath, "daemon-log-tail.txt"), logTail, "utf8")
   ]);
 
@@ -84,6 +86,7 @@ export async function createDiagnosticBundle({
         "tasks.json",
         "watches.json",
         "drafts.json",
+        "proposals.json",
         "daemon-log-tail.txt",
         ...(copiedLogs.length ? copiedLogs.map((entry) => path.basename(entry)) : [])
       ]

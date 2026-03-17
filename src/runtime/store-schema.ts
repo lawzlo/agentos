@@ -178,6 +178,92 @@ export function initializeStoreSchema(db: any): void {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS learning_sources (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL UNIQUE,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      status TEXT NOT NULL,
+      config TEXT NOT NULL,
+      state TEXT NOT NULL,
+      last_observed_at TEXT,
+      last_error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS observations (
+      id TEXT PRIMARY KEY,
+      source_id TEXT NOT NULL,
+      category TEXT NOT NULL,
+      fingerprint TEXT NOT NULL,
+      summary TEXT,
+      metadata TEXT NOT NULL,
+      extracted_text TEXT,
+      artifact_refs TEXT NOT NULL,
+      entity_refs TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(source_id, fingerprint)
+    );
+    CREATE TABLE IF NOT EXISTS memory_entities (
+      id TEXT PRIMARY KEY,
+      entity_type TEXT NOT NULL,
+      entity_key TEXT NOT NULL,
+      title TEXT NOT NULL,
+      summary TEXT,
+      metadata TEXT NOT NULL,
+      last_observed_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(entity_type, entity_key)
+    );
+    CREATE TABLE IF NOT EXISTS memory_facts (
+      id TEXT PRIMARY KEY,
+      entity_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      value TEXT NOT NULL,
+      source_observation_id TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS knowledge_chunks (
+      id TEXT PRIMARY KEY,
+      source_id TEXT NOT NULL,
+      observation_id TEXT,
+      entity_id TEXT,
+      title TEXT NOT NULL,
+      content TEXT NOT NULL,
+      metadata TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_chunks_fts USING fts5(
+      chunk_id UNINDEXED,
+      title,
+      content
+    );
+    CREATE TABLE IF NOT EXISTS digests (
+      id TEXT PRIMARY KEY,
+      digest_date TEXT NOT NULL UNIQUE,
+      status TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      metadata TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS proposals (
+      id TEXT PRIMARY KEY,
+      proposal_type TEXT NOT NULL,
+      status TEXT NOT NULL,
+      fingerprint TEXT NOT NULL UNIQUE,
+      source_entity_ids TEXT NOT NULL,
+      rationale TEXT NOT NULL,
+      confidence REAL NOT NULL,
+      task_spec TEXT NOT NULL,
+      metadata TEXT NOT NULL,
+      task_id TEXT,
+      acted_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
     CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
     CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);
     CREATE INDEX IF NOT EXISTS idx_trace_events_trace_id ON trace_events(trace_id);
@@ -187,6 +273,13 @@ export function initializeStoreSchema(db: any): void {
     CREATE INDEX IF NOT EXISTS idx_skills_surface ON skills(surface_scope);
     CREATE INDEX IF NOT EXISTS idx_watch_rules_enabled ON watch_rules(enabled);
     CREATE INDEX IF NOT EXISTS idx_drafts_status ON drafts(status);
+    CREATE INDEX IF NOT EXISTS idx_observations_source_id ON observations(source_id);
+    CREATE INDEX IF NOT EXISTS idx_observations_created_at ON observations(created_at);
+    CREATE INDEX IF NOT EXISTS idx_memory_entities_type_key ON memory_entities(entity_type, entity_key);
+    CREATE INDEX IF NOT EXISTS idx_memory_facts_entity_id ON memory_facts(entity_id);
+    CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_source_id ON knowledge_chunks(source_id);
+    CREATE INDEX IF NOT EXISTS idx_digests_date ON digests(digest_date);
+    CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status);
     PRAGMA user_version = ${STORE_SCHEMA_VERSION};
   `);
 }

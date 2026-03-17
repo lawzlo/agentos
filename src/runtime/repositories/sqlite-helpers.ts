@@ -10,6 +10,14 @@ import type {
   WorkspaceProfile,
   WorkspaceRecord
 } from "../../types/runtime-schema.js";
+import type {
+  DigestRecord,
+  KnowledgeChunk,
+  LearningSource,
+  MemoryEntity,
+  MemoryFact,
+  ProposalRecord
+} from "../../types/learning.js";
 
 export { createId, nowIso };
 
@@ -244,6 +252,142 @@ export function hydrateVaultEntry(
         }
       : {}),
     metadata: parseJson(row.metadata as string | null | undefined, {}),
+    createdAt: asString(row.created_at),
+    updatedAt: asString(row.updated_at)
+  };
+}
+
+export function hydrateLearningSource(row: SqliteRow | null): LearningSource | null {
+  if (!row) {
+    return null;
+  }
+
+  return {
+    id: asString(row.id),
+    kind: asEnum(
+      row.kind,
+      ["filesystem-metadata", "filesystem-content", "watch-events", "task-results", "user-corrections"] as const,
+      "filesystem-metadata"
+    ),
+    enabled: asBoolean(row.enabled),
+    status: asEnum(row.status, ["idle", "scanning", "healthy", "degraded"] as const, "idle"),
+    config: parseJson(row.config as string | null | undefined, {}),
+    state: parseJson(row.state as string | null | undefined, {}),
+    lastObservedAt: asNullableString(row.last_observed_at),
+    lastError: asNullableString(row.last_error),
+    createdAt: asString(row.created_at),
+    updatedAt: asString(row.updated_at)
+  };
+}
+
+export function hydrateObservation(row: SqliteRow | null): import("../../types/learning.js").ObservationRecord | null {
+  if (!row) {
+    return null;
+  }
+
+  return {
+    id: asString(row.id),
+    sourceId: asString(row.source_id),
+    category: asString(row.category),
+    fingerprint: asString(row.fingerprint),
+    summary: asNullableString(row.summary),
+    metadata: parseJson(row.metadata as string | null | undefined, {}),
+    extractedText: asNullableString(row.extracted_text),
+    artifactRefs: parseJson(row.artifact_refs as string | null | undefined, []),
+    entityRefs: parseJson(row.entity_refs as string | null | undefined, []),
+    createdAt: asString(row.created_at),
+    updatedAt: asString(row.updated_at)
+  };
+}
+
+export function hydrateMemoryEntity(row: SqliteRow | null): MemoryEntity | null {
+  if (!row) {
+    return null;
+  }
+
+  return {
+    id: asString(row.id),
+    type: asEnum(
+      row.entity_type,
+      ["contact", "conversation", "document", "project", "commitment", "preference"] as const,
+      "document"
+    ),
+    key: asString(row.entity_key),
+    title: asString(row.title),
+    summary: asNullableString(row.summary),
+    metadata: parseJson(row.metadata as string | null | undefined, {}),
+    lastObservedAt: asString(row.last_observed_at),
+    createdAt: asString(row.created_at),
+    updatedAt: asString(row.updated_at)
+  };
+}
+
+export function hydrateMemoryFact(row: SqliteRow | null): MemoryFact | null {
+  if (!row) {
+    return null;
+  }
+
+  return {
+    id: asString(row.id),
+    entityId: asString(row.entity_id),
+    kind: asString(row.kind),
+    value: parseJson(row.value as string | null | undefined, {}),
+    sourceObservationId: asNullableString(row.source_observation_id),
+    createdAt: asString(row.created_at),
+    updatedAt: asString(row.updated_at)
+  };
+}
+
+export function hydrateKnowledgeChunk(row: SqliteRow | null): KnowledgeChunk | null {
+  if (!row) {
+    return null;
+  }
+
+  return {
+    id: asString(row.id),
+    sourceId: asString(row.source_id),
+    observationId: asNullableString(row.observation_id),
+    entityId: asNullableString(row.entity_id),
+    title: asString(row.title),
+    content: asString(row.content),
+    metadata: parseJson(row.metadata as string | null | undefined, {}),
+    createdAt: asString(row.created_at)
+  };
+}
+
+export function hydrateDigest(row: SqliteRow | null): DigestRecord | null {
+  if (!row) {
+    return null;
+  }
+
+  return {
+    id: asString(row.id),
+    digestDate: asString(row.digest_date),
+    status: asEnum(row.status, ["completed"] as const, "completed"),
+    summary: asString(row.summary),
+    metadata: parseJson(row.metadata as string | null | undefined, {}),
+    createdAt: asString(row.created_at),
+    updatedAt: asString(row.updated_at)
+  };
+}
+
+export function hydrateProposal(row: SqliteRow | null): ProposalRecord | null {
+  if (!row) {
+    return null;
+  }
+
+  return {
+    id: asString(row.id),
+    type: asEnum(row.proposal_type, ["reply", "follow_up", "review", "organize", "update_watch"] as const, "review"),
+    status: asEnum(row.status, ["pending", "accepted", "rejected", "dismissed"] as const, "pending"),
+    fingerprint: asString(row.fingerprint),
+    sourceEntityIds: parseJson(row.source_entity_ids as string | null | undefined, []),
+    rationale: asString(row.rationale),
+    confidence: asNumber(row.confidence, 0),
+    taskSpec: parseJson(row.task_spec as string | null | undefined, { goal: "" }),
+    metadata: parseJson(row.metadata as string | null | undefined, {}),
+    taskId: asNullableString(row.task_id),
+    actedAt: asNullableString(row.acted_at),
     createdAt: asString(row.created_at),
     updatedAt: asString(row.updated_at)
   };

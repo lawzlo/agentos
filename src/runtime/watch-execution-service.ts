@@ -390,7 +390,8 @@ export class WatchExecutionService {
         this.eventBus.broadcast("watch.updated", this.controlPlane.watchService.decorate(updated));
         this.eventBus.broadcast("watch.blocked", {
           rule: updated,
-          automation
+          automation,
+          detection
         });
         return;
       }
@@ -426,7 +427,8 @@ export class WatchExecutionService {
         });
         this.eventBus.broadcast("watch.drafted", {
           rule: updated,
-          draft
+          draft,
+          detection
         });
         this.eventBus.broadcast("watch.updated", this.controlPlane.watchService.decorate(updated));
         return;
@@ -450,7 +452,8 @@ export class WatchExecutionService {
       });
       this.eventBus.broadcast("watch.triggered", {
         rule: updated,
-        task
+        task,
+        detection
       });
       this.eventBus.broadcast("watch.updated", this.controlPlane.watchService.decorate(updated));
     } catch (error) {

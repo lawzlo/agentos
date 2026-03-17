@@ -16,6 +16,10 @@ import { commandWatch } from "./commands/watch-command.js";
 import { commandDrafts } from "./commands/drafts-command.js";
 import { commandPacks } from "./commands/packs-command.js";
 import { commandSkills } from "./commands/skills-command.js";
+import { commandLearn } from "./commands/learn-command.js";
+import { commandMemory } from "./commands/memory-command.js";
+import { commandDigest } from "./commands/digest-command.js";
+import { commandProposals } from "./commands/proposals-command.js";
 import { boolOption, parseArgs, print, type CliOptions } from "./cli-utils.js";
 
 function helpText() {
@@ -33,7 +37,13 @@ agentos watch teach <task-id> "<goal>" [--watch id] [--pack live-pack] [--worksp
 agentos watch ls|inspect|health|enable|disable|retry|rm
 agentos drafts ls|inspect|approve|reject
 agentos packs ls|inspect
-agentos skills ls|inspect|run`;
+agentos skills ls|inspect|run
+agentos learn status
+agentos learn sources ls
+agentos memory search <query>
+agentos memory inspect <entity-id>
+agentos digest run
+agentos proposals ls|accept|reject`;
 }
 
 async function main() {
@@ -116,6 +126,26 @@ async function main() {
 
   if (command === "skills") {
     await commandSkills(subcommand, positionals, sharedOptions);
+    return;
+  }
+
+  if (command === "learn") {
+    await commandLearn(subcommand, positionals, sharedOptions);
+    return;
+  }
+
+  if (command === "memory") {
+    await commandMemory(subcommand, positionals, sharedOptions);
+    return;
+  }
+
+  if (command === "digest") {
+    await commandDigest(subcommand, sharedOptions);
+    return;
+  }
+
+  if (command === "proposals") {
+    await commandProposals(subcommand, positionals, sharedOptions);
     return;
   }
 

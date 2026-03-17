@@ -26,6 +26,7 @@ import { WatchService } from "./watch-service.js";
 import { DraftService } from "./draft-service.js";
 import { WatchExecutionService } from "./watch-execution-service.js";
 import { RuntimeSupervisor } from "./runtime-supervisor.js";
+import { LearningService } from "./learning-service.js";
 import { createDiagnosticBundle } from "../diagnostics.js";
 import { getRuntimeVersionInfo } from "../version.js";
 import type { AgentOsConfig } from "../config.js";
@@ -46,6 +47,14 @@ import type {
   WatchHealth,
   WatchRule
 } from "../types/runtime-schema.js";
+import type {
+  DigestRecord,
+  KnowledgeChunk,
+  LearningSource,
+  LearningStatus,
+  MemoryEntitySnapshot,
+  ProposalRecord
+} from "../types/learning.js";
 import type {
   DaemonStatus,
   DoctorBundle,
@@ -105,6 +114,7 @@ export class ControlPlane {
   draftService: DraftService;
   watchExecutionService: WatchExecutionService;
   runtimeSupervisor: RuntimeSupervisor;
+  learningService: LearningService;
 
   constructor(config: AgentOsConfig) {
     this.config = config;
@@ -214,9 +224,16 @@ export class ControlPlane {
       connectors: this.connectors,
       surfaceRegistry: this.surfaceRegistry
     });
+    this.learningService = new LearningService({
+      store: this.store,
+      eventBus: this.eventBus,
+      config,
+      createTask: async (taskSpec: TaskSpec) => this.createTask(taskSpec)
+    });
   }
 
   async start() {
+    await this.learningService.start();
     for (const connector of this.connectors) {
       await connector.start();
     }
@@ -441,6 +458,7 @@ export class ControlPlane {
     const version = this.getVersionInfo();
     const schemaVersion = this.store.getSchemaVersion();
     const native = await this.#collectNativeDiagnostics();
+    const learning = this.learningService.status();
     const warnings = [...base.warnings];
 
     if (schemaVersion !== version.storeSchemaVersion) {
@@ -468,6 +486,7 @@ export class ControlPlane {
         (process.platform === "linux" || native.available) &&
         (!native.available || native.compatible),
       warnings,
+      learning,
       version,
       store: {
         schemaVersion,
@@ -802,7 +821,44 @@ export class ControlPlane {
   }
 
   async shutdown() {
+    await this.learningService.stop();
     await this.runtimeSupervisor.shutdown();
+  }
+
+  getLearningStatus(): LearningStatus {
+    return this.learningService.status();
+  }
+
+  listLearningSources(): LearningSource[] {
+    return this.learningService.listSources();
+  }
+
+  searchMemory(query: string, limit = 20): KnowledgeChunk[] {
+    return this.learningService.searchMemory(query, limit);
+  }
+
+  inspectMemoryEntity(entityId: string): MemoryEntitySnapshot | null {
+    return this.learningService.inspectEntity(entityId);
+  }
+
+  listDigests(limit = 30): DigestRecord[] {
+    return this.learningService.listDigests(limit);
+  }
+
+  async runDigest(): Promise<DigestRecord> {
+    return this.learningService.runDigest();
+  }
+
+  listProposals(limit = 50): ProposalRecord[] {
+    return this.learningService.listProposals(limit);
+  }
+
+  async acceptProposal(proposalId: string): Promise<{ proposal: ProposalRecord; taskId: string }> {
+    return this.learningService.acceptProposal(proposalId);
+  }
+
+  rejectProposal(proposalId: string): ProposalRecord {
+    return this.learningService.rejectProposal(proposalId);
   }
 }
 

@@ -4,6 +4,7 @@ import type {
   TaskSnapshot,
   WatchRule
 } from "./runtime-schema.js";
+import type { LearningStatus, ProposalRecord } from "./learning.js";
 import type { RuntimeVersionInfo } from "../version.js";
 import type { SidecarHealthResult, SidecarPermissionsResult } from "./native-sidecar.js";
 
@@ -36,6 +37,7 @@ export interface DoctorReport {
   degradedWatchCount: number;
   pendingDraftCount: number;
   connectorCount: number;
+  learning: LearningStatus;
   version: RuntimeVersionInfo;
   store: {
     schemaVersion: number;
@@ -77,5 +79,6 @@ export interface DiagnosticBundleSource {
   tasks: TaskSnapshot[];
   watches: WatchRule[];
   drafts: DraftRecord[];
+  proposals?: ProposalRecord[];
   connectors?: ConnectorStatus[];
 }
