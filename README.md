@@ -2,31 +2,42 @@
 
 Languages: [English](./README.md) | [简体中文](./README.zh-CN.md) | [日本語](./README.ja.md) | [Español](./README.es.md)
 
-AgentOS is a local-first control plane for autonomous agents that operate browsers and desktop apps on behalf of a user. It is not a bare-metal operating system; it is an agent operating layer that runs on top of macOS or Windows and keeps task intake, workspaces, traces, artifacts, and policy in one local runtime.
+AgentOS is a local-first runtime for personal agents that operate browsers and desktop apps on behalf of a user. It is not a bare-metal operating system. It is an always-on agent layer that runs on top of macOS or Windows and keeps tasks, workspaces, traces, learning, and watch rules in one local runtime.
 
-## What is implemented
+## What AgentOS does
+
+- Runs a local daemon and CLI for task execution, watch rules, takeover, and diagnostics
+- Operates browser and desktop surfaces through a shared `WorldState`
+- Resolves natural-language targets into executable UI actions
+- Keeps local traces, artifacts, workspaces, skills, watch profiles, and credentials
+- Learns from task outcomes, watch detections, manual corrections, and selected local files
+- Proposes follow-up tasks from learned information instead of auto-running them by default
+
+## Current capability summary
 
 - Local HTTP + WebSocket control plane
-- `agentos` CLI for daemon lifecycle, tasks, takeover control, watch rules, and skills
-- Task inbox, event intake, scheduler, policy evaluation, and trace replay primitives
-- Multi-agent execution pipeline with `Sentinel`, `Planner`, `Operator`, `Verifier`, and `Recovery`
-- Shared `WorldState` schema for browser and desktop observations
-- Target grounding engine that resolves natural-language targets into executable UI candidates
-- Target-based browser and desktop actions such as `clickTarget`, `typeIntoTarget`, `waitForTarget`, and `extractFromTarget`
-- Managed browser workspace via Playwright-driven Chrome profile
-- Desktop surface abstraction with a macOS bridge and a Windows bridge skeleton
-- Native macOS helper for OCR, screenshot capture, coordinate click, mouse move, and scroll
-- Autonomous execution loop for browser and desktop tasks through an OpenAI-compatible planner
-- Local skill registry with built-in app-pack placeholders plus persisted custom skills
-- Named workspace profiles for persistent personal browser/app state across tasks
-- Local file inbox connector that turns dropped JSON files into tasks or events
-- Persistent watch rules for always-on standing tasks
-- Watch health, retry, and draft approval flow for conservative live automation
-- Encrypted local credential vault with per-secret metadata
-- Local ops console at `/` for trace/debug use
-- SQLite-backed tasks, events, traces, workspaces, memory, and artifacts
+- `agentos` CLI for daemon lifecycle, tasks, drafts, watch rules, memory search, and proposals
+- Multi-agent execution chain with `Sentinel`, `Planner`, `Operator`, `Verifier`, and `Recovery`
+- Browser automation through a managed Playwright-driven Chrome profile
+- Desktop automation through shared browser/desktop abstractions plus a Rust native sidecar
+- Target-based actions such as `clickTarget`, `typeIntoTarget`, `waitForTarget`, and `extractFromTarget`
+- Persistent workspace profiles and watch rules
+- Conservative live automation with draft/approval flow
+- Local learning loop with observations, entities, searchable knowledge chunks, daily digests, and proposals
+- SQLite-backed local state
+
+## Repository layout
+
+- `src/`: runtime, server, adapters, services, and shared schemas
+- `bin/`: CLI entrypoint and subcommands
+- `rust/agentos-native/`: Rust native sidecar
+- `public/`: optional local debug console
+- `test/`: integration and runtime tests
+- `.agentos/`: local runtime state, database, logs, workspaces, and artifacts
 
 ## Quick start
+
+Install dependencies, build the TypeScript runtime, and start the daemon:
 
 ```bash
 npm install
@@ -34,19 +45,19 @@ npm run build:ts
 node dist/bin/agentos.js daemon start
 ```
 
-The daemon listens on `http://localhost:3017` by default. The web console remains available there, but the primary product entry is the CLI.
+Check that the daemon is healthy:
 
-## TypeScript and Rust split
+```bash
+node dist/bin/agentos.js daemon status --json
+node dist/bin/agentos.js doctor --json
+node dist/bin/agentos.js version --json
+```
 
-AgentOS is still runtime-first in Node.js, but the migration path is now explicit:
+The daemon listens on `http://127.0.0.1:3017` by default. The web console remains available for trace and debug use, but the primary entrypoint is the CLI.
 
-- `TypeScript` is the boundary layer for shared schemas and IPC contracts under [`src/types/`](./src/types)
-- `Rust` is the native/runtime-heavy layer under [`rust/agentos-native`](./rust/agentos-native)
-- `TypeScript` now owns the application/runtime source tree under `src/`, `bin/`, `public/`, and `test/`
-- The macOS native path now covers capture, frontmost app, OCR, text search, window listing, and permission status through the Rust sidecar and its embedded native bridge
-- The Windows bridge now covers capture, frontmost app, window listing, text input, key input, mouse input, and OCR/text lookup through PowerShell-native automation
+## Build requirements
 
-Run type checking for the new typed boundary:
+Type check the TypeScript source:
 
 ```bash
 npm run typecheck
@@ -58,7 +69,7 @@ Build the runtime into `dist/`:
 npm run build:ts
 ```
 
-Build the Rust sidecar:
+Build the Rust native sidecar:
 
 ```bash
 npm run native:build
@@ -66,29 +77,43 @@ npm run native:build
 
 Notes:
 
-- Building the Rust sidecar requires `cargo` to be installed locally.
-- `dist/` is generated and should not be committed.
-- You can point AgentOS at a prebuilt sidecar with `AGENTOS_NATIVE_SIDECAR=/path/to/agentos-native`.
+- Building the Rust sidecar requires `cargo`.
+- `dist/` is generated output and should not be committed.
+- If browser detection fails, set `AGENTOS_BROWSER_EXECUTABLE`.
+- If you want to watch browser execution, set `AGENTOS_HEADLESS=false`.
 
-## CLI-first usage
+## Core runtime model
 
-Start or inspect the daemon:
+AgentOS currently centers around these parts:
+
+- `Task`: a one-off unit of work
+- `Workspace`: persistent local browser/app state
+- `Watch rule`: an always-on standing rule that detects new items and creates tasks or drafts
+- `Draft`: a pending action that requires approval
+- `Skill`: a reusable learned workflow
+- `Learning source`: an input stream such as filesystem scans, watch events, task results, or manual corrections
+- `Proposal`: a suggested follow-up task created by the learning loop
+
+## Common CLI workflows
+
+### 1. Run a browser task
 
 ```bash
-node dist/bin/agentos.js daemon start
-node dist/bin/agentos.js daemon status
-node dist/bin/agentos.js doctor
-node dist/bin/agentos.js doctor --bundle
-node dist/bin/agentos.js version
+node dist/bin/agentos.js run \
+  "Open example.com, click More information, then capture a screenshot" \
+  --surface browser \
+  --wait
 ```
 
-Run a one-off task:
+### 2. Run a desktop task
 
 ```bash
-node dist/bin/agentos.js run "打开 example.com，点击 More information，然后截图" --surface browser
+node dist/bin/agentos.js run \
+  "Open TextEdit, type a short note, and wait for me" \
+  --surface desktop
 ```
 
-List current tasks or inspect a trace:
+### 3. Inspect tasks and traces
 
 ```bash
 node dist/bin/agentos.js ps
@@ -96,85 +121,234 @@ node dist/bin/agentos.js inspect <task-id>
 node dist/bin/agentos.js logs <task-id>
 ```
 
-Pause or take over a running task:
+### 4. Pause or take over a task
 
 ```bash
 node dist/bin/agentos.js control <task-id> pause
 node dist/bin/agentos.js control <task-id> request_takeover
 node dist/bin/agentos.js control <task-id> return_to_agent --note "I fixed the window focus"
+node dist/bin/agentos.js control <task-id> stop
 ```
 
-Create an always-on watch rule:
+### 5. Create a standing watch rule
 
 ```bash
-node dist/bin/agentos.js watch add "一直盯 Slack，有新消息就按我的风格回复" --skill slack-reply --workspace personal-main
+node dist/bin/agentos.js watch add \
+  "Always watch Slack and reply to low-risk unread threads in my style" \
+  --surface browser \
+  --workspace personal-main
+```
+
+Inspect watch health:
+
+```bash
 node dist/bin/agentos.js watch ls
+node dist/bin/agentos.js watch inspect <watch-id>
 node dist/bin/agentos.js watch health <watch-id>
 node dist/bin/agentos.js watch retry <watch-id>
 ```
 
-Teach a completed task into a reusable watch profile:
+### 6. Review or approve drafts
 
 ```bash
-node dist/bin/agentos.js watch teach <task-id> "一直盯这个收件箱，看到同类消息就按刚才的流程处理" --pack generic-mail-desktop --workspace personal-main
-```
-
-Inspect live packs or approve pending drafts:
-
-```bash
-node dist/bin/agentos.js packs ls
 node dist/bin/agentos.js drafts ls
+node dist/bin/agentos.js drafts inspect <draft-id>
 node dist/bin/agentos.js drafts approve <draft-id>
+node dist/bin/agentos.js drafts reject <draft-id> --reason "Need a human reply"
 ```
 
-Restart the daemon or prepare release artifacts:
+### 7. Teach a completed task into a watch profile
 
 ```bash
-node dist/bin/agentos.js daemon restart
-npm run package:release -- --platform darwin
-ALLOW_UNSIGNED_PACKAGE=1 npm run package:macos
+node dist/bin/agentos.js watch teach \
+  <task-id> \
+  "Keep watching this inbox and handle similar messages the same way" \
+  --pack generic-mail-desktop \
+  --workspace personal-main
 ```
+
+### 8. Inspect learning and proposals
+
+```bash
+node dist/bin/agentos.js learn status
+node dist/bin/agentos.js learn sources ls
+node dist/bin/agentos.js memory search "contract renewal"
+node dist/bin/agentos.js digest run
+node dist/bin/agentos.js proposals ls
+node dist/bin/agentos.js proposals accept <proposal-id>
+```
+
+## Learning loop
+
+AgentOS now includes a continuous local learning layer.
+
+By default it:
+
+- scans broad filesystem metadata under the user environment
+- selectively reads file content from managed workspaces, Downloads, Documents, Desktop, and recent text-like files
+- learns from watch detections, task results, and manual corrections
+- stores structured memory and searchable knowledge locally
+- creates silent background proposals instead of auto-running learned actions
+
+Learning source kinds:
+
+- `filesystem-metadata`
+- `filesystem-content`
+- `watch-events`
+- `task-results`
+- `user-corrections`
+
+Search and proposal flow:
+
+```bash
+node dist/bin/agentos.js memory search "pricing"
+node dist/bin/agentos.js proposals ls
+node dist/bin/agentos.js proposals accept <proposal-id>
+```
+
+## JSON examples
+
+### Example: target-based browser task
+
+```json
+{
+  "goal": "Fill the form and capture the result",
+  "preferredSurface": "browser",
+  "workspaceName": "personal-main",
+  "steps": [
+    {
+      "label": "Open the page",
+      "surface": "browser",
+      "action": "goto",
+      "params": { "url": "https://example.com" }
+    },
+    {
+      "label": "Type the email address",
+      "surface": "browser",
+      "action": "typeIntoTarget",
+      "params": {
+        "targetQuery": "email",
+        "text": "tan@example.com",
+        "clear": true
+      }
+    },
+    {
+      "label": "Submit the form",
+      "surface": "browser",
+      "action": "clickTarget",
+      "params": { "targetQuery": "submit" }
+    },
+    {
+      "label": "Capture the final state",
+      "surface": "browser",
+      "action": "capture",
+      "params": { "label": "done" }
+    }
+  ]
+}
+```
+
+### Example: desktop task
+
+```json
+{
+  "goal": "Open TextEdit and type a note",
+  "preferredSurface": "desktop",
+  "inputs": {
+    "desktopApp": "TextEdit",
+    "typeText": "Daily note from AgentOS"
+  },
+  "steps": [
+    {
+      "label": "Open TextEdit",
+      "surface": "desktop",
+      "action": "openApp",
+      "params": { "name": "TextEdit" }
+    },
+    {
+      "label": "Wait for the editor",
+      "surface": "desktop",
+      "action": "waitForText",
+      "params": { "text": "TextEdit", "timeoutMs": 5000 }
+    },
+    {
+      "label": "Type the note",
+      "surface": "desktop",
+      "action": "type",
+      "params": { "text": "Daily note from AgentOS" }
+    }
+  ]
+}
+```
+
+### Example: watch rule payload
+
+```json
+{
+  "goal": "Always watch Slack and reply to low-risk unread threads in my style",
+  "preferredSurface": "browser",
+  "workspaceName": "personal-main",
+  "livePack": "slack-browser",
+  "pollIntervalMs": 15000
+}
+```
+
+### Example: task control payload
+
+```json
+{
+  "action": "request_takeover"
+}
+```
+
+Supported task control actions:
+
+- `pause`
+- `resume`
+- `request_takeover`
+- `return_to_agent`
+- `stop`
 
 ## Runtime notes
 
-- AgentOS stores all local state under `.agentos/`.
-- The daemon writes runtime state under `.agentos/daemon/`.
-- Browser automation expects a Chrome-compatible executable. Set `AGENTOS_BROWSER_EXECUTABLE` if auto-detection fails.
-- The browser runs headless by default. Set `AGENTOS_HEADLESS=false` to watch the managed browser.
-- Desktop automation on macOS uses `screencapture`, `open`, and `osascript`, which may require Accessibility and Screen Recording permissions.
-- Desktop automation on Windows now uses native PowerShell and Win32 APIs for screen capture, visible-window discovery, input injection, and OCR-based text lookup.
-- Desktop observation now also captures on-screen window metadata and local permission status when the macOS native path is available.
-- Desktop steps can now use `clickAt`, `moveMouse`, `scroll`, `clickText`, `ocrScreen`, and `waitForText`.
-- Browser and desktop tasks can now use `clickTarget`, `focusTarget`, `typeIntoTarget`, `waitForTarget`, and `extractFromTarget` with `targetQuery`.
-- Model planning is optional. If `MODEL_BASE_URL`, `MODEL_API_KEY`, and `MODEL_NAME` are set, the planner will call an OpenAI-compatible chat completions API; otherwise it falls back to explicit `steps` or heuristic browser plans.
-- Autonomous tasks require model configuration and should set `executionMode: "autonomous"` or `autonomy.enabled: true`.
-- Tasks can opt into a persistent named workspace with `workspaceName`.
-- Saved skills can be listed or installed through the local API and invoked with `skillName`.
-- Teach Mode can save a successful run into a reusable skill either during task submission with `saveSkillAs` or later through `POST /skills/from-task`.
-- Standing tasks are stored as watch rules. The runtime currently ships bundled live packs for `slack-desktop`, `slack-browser`, `wechat-desktop`, `generic-mail-desktop`, and `generic-desktop`.
-- Live packs now expose pack metadata through `/packs`, and `agentos doctor` summarizes degraded watches and pending drafts.
-- `agentos doctor --bundle` writes a local diagnostic bundle under `.agentos/daemon/bundles/`.
-- `agentos version` and `GET /version` expose the runtime, native protocol, store schema, and install layout contract versions.
-- Conservative automation is now built in: Slack and WeChat can auto-send low-risk replies, while mail and high-risk actions default to pending drafts for approval.
-- JSON files dropped into `.agentos/inbox/` are ingested automatically. Task-shaped JSON creates a task; `{ "kind": "event", ... }` creates an event.
-- Release automation now ships with GitHub Actions workflows plus staging scripts for signed macOS `.pkg` and Windows `.msi` builds.
+- All local runtime state lives under `.agentos/`.
+- Daemon state lives under `.agentos/daemon/`.
+- Browser automation expects a Chrome-compatible executable.
+- Browser automation runs headless by default.
+- Desktop automation on macOS may require Accessibility and Screen Recording permissions.
+- Desktop automation on Windows uses native PowerShell and Win32 automation paths through the sidecar.
+- Built-in live packs currently include:
+  - `slack-browser`
+  - `slack-desktop`
+  - `wechat-desktop`
+  - `generic-mail-desktop`
+  - `generic-desktop`
+- Learning data, digests, and proposals are local only.
 
-## API
+## API overview
 
+System:
+
+- `GET /health`
+- `GET /doctor`
+- `POST /doctor/bundle`
+- `GET /version`
 - `GET /daemon/status`
+
+Tasks:
+
 - `POST /tasks`
 - `GET /tasks`
 - `GET /tasks/:id`
 - `POST /tasks/:id/control`
 - `POST /tasks/:id/teach-steps`
+- `GET /traces/:id`
 - `POST /events`
 - `GET /events`
-- `GET /traces/:id`
 - `POST /policy/evaluate`
-- `GET /connectors`
-- `GET /doctor`
-- `POST /doctor/bundle`
-- `GET /version`
+
+Watch and drafts:
+
 - `GET /packs`
 - `GET /watches`
 - `POST /watches`
@@ -189,6 +363,9 @@ ALLOW_UNSIGNED_PACKAGE=1 npm run package:macos
 - `GET /drafts/:id`
 - `POST /drafts/:id/approve`
 - `POST /drafts/:id/reject`
+
+Skills, workspace, vault:
+
 - `GET /skills`
 - `POST /skills/from-task`
 - `GET /skills/:name`
@@ -198,177 +375,41 @@ ALLOW_UNSIGNED_PACKAGE=1 npm run package:macos
 - `GET /vault/secrets`
 - `PUT /vault/secrets/:key`
 - `GET /vault/secrets/:key`
-- `GET /health`
-- `GET /ws`
 
-## Example target-based task
+Learning:
 
-```json
-{
-  "goal": "Fill the target page and capture the result",
-  "preferredSurface": "browser",
-  "workspaceName": "personal-main",
-  "steps": [
-    {
-      "label": "Open target page",
-      "surface": "browser",
-      "action": "goto",
-      "params": { "url": "https://example.com" }
-    },
-    {
-      "label": "Type into the email field",
-      "surface": "browser",
-      "action": "typeIntoTarget",
-      "params": { "targetQuery": "email", "text": "tan@example.com", "clear": true }
-    },
-    {
-      "label": "Click submit",
-      "surface": "browser",
-      "action": "clickTarget",
-      "params": { "targetQuery": "submit" }
-    }
-  ]
-}
+- `GET /learning/status`
+- `GET /learning/sources`
+- `GET /memory/search`
+- `GET /memory/entities/:id`
+- `GET /digests`
+- `POST /digests/run`
+- `GET /proposals`
+- `POST /proposals/:id/accept`
+- `POST /proposals/:id/reject`
+
+## Development and release
+
+Run the full test suite:
+
+```bash
+npm test
 ```
 
-## Example task control
+Restart the daemon after a local rebuild:
 
-```json
-{
-  "action": "request_takeover"
-}
+```bash
+node dist/bin/agentos.js daemon restart
 ```
 
-Supported control actions:
+Prepare release artifacts:
 
-- `pause`
-- `resume`
-- `request_takeover`
-- `return_to_agent`
-- `stop`
-
-`return_to_agent` can include an optional `note` field. AgentOS stores that correction note on the task result and carries it into learned skills as a recovery hint.
-
-## Example teach step payload
-
-```json
-{
-  "step": {
-    "label": "Click Send",
-    "surface": "desktop",
-    "action": "clickTarget",
-    "params": { "targetQuery": "发送" }
-  }
-}
+```bash
+npm run package:release -- --platform darwin
+ALLOW_UNSIGNED_PACKAGE=1 npm run package:macos
+npm run package:windows
 ```
 
-## Example skill definition
+## License
 
-```json
-{
-  "surfaceScope": "browser",
-  "triggerTerms": ["demo fill form"],
-  "anchors": [{ "text": "Submit", "role": "button" }],
-  "actionTemplate": [
-    {
-      "label": "Open demo page",
-      "surface": "browser",
-      "action": "goto",
-      "params": { "url": "https://example.com" }
-    },
-    {
-      "label": "Type name",
-      "surface": "browser",
-      "action": "typeIntoTarget",
-      "params": { "targetQuery": "name", "text": "AgentOS", "clear": true }
-    }
-  ],
-  "successCriteria": [{ "type": "textVisible", "value": "Submitted" }],
-  "recoveryHints": ["reload page"]
-}
-```
-
-Learned skills may contain parameter placeholders such as `{{typeText}}`. At run time, AgentOS resolves them from `taskSpec.inputs` and falls back to the defaults captured during teaching.
-
-## Example watch-teach payload
-
-```json
-{
-  "taskId": "task_123",
-  "goal": "Always watch the same inbox and react with the taught flow",
-  "livePack": "generic-mail-desktop",
-  "workspaceName": "personal-main",
-  "triggerTexts": ["New message", "未读"]
-}
-```
-
-## Teach Mode example
-
-```json
-{
-  "goal": "Open example.com, click More information, and capture the result",
-  "preferredSurface": "browser",
-  "saveSkillAs": "example-open-and-capture"
-}
-```
-
-## Example desktop task
-
-```json
-{
-  "goal": "Focus a native app and click the visible Submit button",
-  "preferredSurface": "desktop",
-  "steps": [
-    {
-      "label": "Focus the app",
-      "surface": "desktop",
-      "action": "focusApp",
-      "params": { "name": "Notes" }
-    },
-    {
-      "label": "Wait for Submit text",
-      "surface": "desktop",
-      "action": "waitForText",
-      "params": { "text": "Submit", "timeoutMs": 5000 }
-    },
-    {
-      "label": "Click the Submit button",
-      "surface": "desktop",
-      "action": "clickText",
-      "params": { "text": "Submit" }
-    }
-  ]
-}
-```
-
-## Example autonomous task
-
-```json
-{
-  "goal": "Autonomously complete the visible browser workflow",
-  "preferredSurface": "browser",
-  "executionMode": "autonomous",
-  "autonomy": {
-    "enabled": true,
-    "maxSteps": 8
-  }
-}
-```
-
-## Example file inbox payload
-
-```json
-{
-  "goal": "Run from the inbox connector",
-  "preferredSurface": "desktop",
-  "steps": [
-    {
-      "label": "Pause briefly",
-      "surface": "desktop",
-      "action": "wait",
-      "params": { "ms": 250 },
-      "checkpoint": false
-    }
-  ]
-}
-```
+MIT. See [LICENSE](./LICENSE).

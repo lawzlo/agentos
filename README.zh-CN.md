@@ -2,24 +2,41 @@
 
 语言: [English](./README.md) | [简体中文](./README.zh-CN.md) | [日本語](./README.ja.md) | [Español](./README.es.md)
 
-AgentOS 是一个本地优先的 agent 控制平面，用来代表用户操作浏览器和桌面应用。它不是裸机操作系统，而是运行在 macOS 或 Windows 之上的 agent operating layer，把任务入口、工作区、trace、artifact、policy 和长期值守整合到一个本地 runtime 中。
+AgentOS 是一个本地优先的个人 Agent runtime，用来代表用户操作浏览器和桌面应用。它不是裸机操作系统，而是运行在 macOS 或 Windows 之上的常驻 agent 层，把任务、工作区、trace、学习、watch rule 和本地执行统一在一个 runtime 里。
 
-## 已实现内容
+## AgentOS 现在能做什么
+
+- 启动本地 daemon 和 CLI，长期值守
+- 操作浏览器与桌面，并共享统一 `WorldState`
+- 把自然语言目标定位成可执行 UI target
+- 记录本地 traces、artifacts、workspace、skills、watch profile 和凭据
+- 从任务结果、watch 检测、人工修正和部分本地文件中持续学习
+- 基于学到的信息生成建议任务，默认不自动执行
+
+## 当前已实现能力
 
 - 本地 HTTP + WebSocket control plane
-- `agentos` CLI，用于 daemon 生命周期、任务、接管控制、watch rule 和 skills
-- `Sentinel / Planner / Operator / Verifier / Recovery` 多 agent 执行链
-- 浏览器和桌面的统一 `WorldState`
-- 自然语言目标 grounding 到可执行 UI target
-- 浏览器和桌面的 target-based actions，如 `clickTarget`、`typeIntoTarget`、`waitForTarget`
+- `agentos` CLI：daemon、任务、draft、watch rule、memory search、proposal
+- `Sentinel / Planner / Operator / Verifier / Recovery` 执行链
 - Playwright 驱动的托管浏览器 workspace
-- macOS / Windows 桌面 surface abstraction
-- Rust sidecar 驱动的本地 native 能力
-- 本地 skill registry、workspace profile、watch rule、credential vault
-- Teach recording、teach mode、watch teach
-- SQLite 持久化任务、事件、trace、workspace、memory 和 artifacts
+- 通过 Rust sidecar 驱动的本地桌面能力
+- `clickTarget`、`typeIntoTarget`、`waitForTarget`、`extractFromTarget` 等 target-based action
+- 持久化 workspace profile、watch rule、draft 审批流
+- 本地 learning loop：observations、entities、knowledge chunks、daily digest、proposals
+- SQLite 本地存储
+
+## 目录结构
+
+- `src/`：runtime、server、adapter、service、schema
+- `bin/`：CLI 入口和子命令
+- `rust/agentos-native/`：Rust native sidecar
+- `public/`：本地调试用 console
+- `test/`：集成测试与 runtime 测试
+- `.agentos/`：本地数据库、日志、workspace、artifact 和 daemon 状态
 
 ## 快速开始
+
+先安装依赖、构建 TypeScript runtime，然后启动 daemon：
 
 ```bash
 npm install
@@ -27,45 +44,75 @@ npm run build:ts
 node dist/bin/agentos.js daemon start
 ```
 
-默认监听 `http://localhost:3017`。Web console 仍可用于 trace/debug，但主入口是 CLI。
+检查当前 runtime 是否正常：
 
-## TypeScript 与 Rust
+```bash
+node dist/bin/agentos.js daemon status --json
+node dist/bin/agentos.js doctor --json
+node dist/bin/agentos.js version --json
+```
 
-- `TypeScript` 是应用/runtime 源码主线，覆盖 `src/`、`bin/`、`public/`、`test/`
-- `Rust` 负责 native/runtime-heavy 部分，位于 [`rust/agentos-native`](./rust/agentos-native)
-- macOS native path 现在通过 Rust sidecar 和内嵌 native bridge 提供截图、OCR、窗口枚举、权限状态等能力
-- Windows bridge 现在支持截图、窗口发现、输入注入和 OCR / 文本查找
+默认监听 `http://127.0.0.1:3017`。Web console 仍可用于 trace/debug，但主入口是 CLI。
 
-常用命令：
+## 构建要求
+
+类型检查：
 
 ```bash
 npm run typecheck
+```
+
+构建到 `dist/`：
+
+```bash
 npm run build:ts
+```
+
+构建 Rust sidecar：
+
+```bash
 npm run native:build
 ```
 
 说明：
 
 - 构建 Rust sidecar 需要本机安装 `cargo`
-- `dist/` 是构建产物，不应提交到 git
-- 可以通过 `AGENTOS_NATIVE_SIDECAR=/path/to/agentos-native` 指向预编译 sidecar
+- `dist/` 是构建产物，不应该提交到 git
+- 如果浏览器路径自动探测失败，可以设置 `AGENTOS_BROWSER_EXECUTABLE`
+- 如果想看浏览器真实执行，可以设置 `AGENTOS_HEADLESS=false`
 
-## CLI 用法
+## 核心运行模型
 
-启动或查看 daemon：
+AgentOS 目前围绕这些对象工作：
+
+- `Task`：一次性任务
+- `Workspace`：持久化浏览器或应用状态
+- `Watch rule`：持续监听并触发任务或 draft 的长期规则
+- `Draft`：等待批准的保守动作
+- `Skill`：复用型工作流
+- `Learning source`：学习来源，例如文件系统、watch 事件、任务结果、人工修正
+- `Proposal`：学习层生成的建议任务
+
+## 常见 CLI 流程
+
+### 1. 执行一次浏览器任务
 
 ```bash
-node dist/bin/agentos.js daemon start
-node dist/bin/agentos.js daemon status
+node dist/bin/agentos.js run \
+  "打开 example.com，点击 More information，然后截图" \
+  --surface browser \
+  --wait
 ```
 
-执行一次性任务：
+### 2. 执行一次桌面任务
 
 ```bash
-node dist/bin/agentos.js run "打开 example.com，点击 More information，然后截图" --surface browser
+node dist/bin/agentos.js run \
+  "打开 TextEdit，输入一段短笔记，然后等待我接管" \
+  --surface desktop
 ```
 
-查看任务或 trace：
+### 3. 查看任务和 trace
 
 ```bash
 node dist/bin/agentos.js ps
@@ -73,57 +120,251 @@ node dist/bin/agentos.js inspect <task-id>
 node dist/bin/agentos.js logs <task-id>
 ```
 
-暂停或接管运行中的任务：
+### 4. 暂停或接管运行中的任务
 
 ```bash
 node dist/bin/agentos.js control <task-id> pause
 node dist/bin/agentos.js control <task-id> request_takeover
 node dist/bin/agentos.js control <task-id> return_to_agent --note "我已经修正窗口焦点"
+node dist/bin/agentos.js control <task-id> stop
 ```
 
-创建长期 watch rule：
+### 5. 创建长期 watch rule
 
 ```bash
-node dist/bin/agentos.js watch add "一直盯 Slack，有新消息就按我的风格回复" --skill slack-reply --workspace personal-main
+node dist/bin/agentos.js watch add \
+  "一直盯 Slack，把低风险未读消息按我的风格自动回复" \
+  --surface browser \
+  --workspace personal-main
+```
+
+查看 watch 健康状态：
+
+```bash
 node dist/bin/agentos.js watch ls
+node dist/bin/agentos.js watch inspect <watch-id>
+node dist/bin/agentos.js watch health <watch-id>
+node dist/bin/agentos.js watch retry <watch-id>
 ```
 
-把一个完成过的任务教成可复用 watch profile：
+### 6. 查看或批准 draft
 
 ```bash
-node dist/bin/agentos.js watch teach <task-id> "一直盯这个收件箱，看到同类消息就按刚才的流程处理" --pack generic-mail-desktop --workspace personal-main
+node dist/bin/agentos.js drafts ls
+node dist/bin/agentos.js drafts inspect <draft-id>
+node dist/bin/agentos.js drafts approve <draft-id>
+node dist/bin/agentos.js drafts reject <draft-id> --reason "这条需要人工回复"
 ```
+
+### 7. 把完成过的任务教成 watch profile
+
+```bash
+node dist/bin/agentos.js watch teach \
+  <task-id> \
+  "一直盯这个收件箱，遇到类似消息就照刚才的流程处理" \
+  --pack generic-mail-desktop \
+  --workspace personal-main
+```
+
+### 8. 查看学习层和建议任务
+
+```bash
+node dist/bin/agentos.js learn status
+node dist/bin/agentos.js learn sources ls
+node dist/bin/agentos.js memory search "合同续签"
+node dist/bin/agentos.js digest run
+node dist/bin/agentos.js proposals ls
+node dist/bin/agentos.js proposals accept <proposal-id>
+```
+
+## 学习系统
+
+AgentOS 现在包含一层持续学习系统。
+
+默认行为：
+
+- 对用户环境做广泛的文件 metadata 扫描
+- 对受控目录和文本类文件做选择性内容读取
+- 从 watch 检测、任务结果、人工修正中学习
+- 本地保存结构化记忆和可搜索知识
+- 静默生成 proposal，不默认自动执行
+
+学习源类型：
+
+- `filesystem-metadata`
+- `filesystem-content`
+- `watch-events`
+- `task-results`
+- `user-corrections`
+
+常见使用方式：
+
+```bash
+node dist/bin/agentos.js memory search "报价"
+node dist/bin/agentos.js proposals ls
+node dist/bin/agentos.js proposals accept <proposal-id>
+```
+
+## JSON 示例
+
+### 示例：target-based 浏览器任务
+
+```json
+{
+  "goal": "填写表单并截图结果",
+  "preferredSurface": "browser",
+  "workspaceName": "personal-main",
+  "steps": [
+    {
+      "label": "打开页面",
+      "surface": "browser",
+      "action": "goto",
+      "params": { "url": "https://example.com" }
+    },
+    {
+      "label": "输入邮箱",
+      "surface": "browser",
+      "action": "typeIntoTarget",
+      "params": {
+        "targetQuery": "email",
+        "text": "tan@example.com",
+        "clear": true
+      }
+    },
+    {
+      "label": "点击提交",
+      "surface": "browser",
+      "action": "clickTarget",
+      "params": { "targetQuery": "submit" }
+    },
+    {
+      "label": "截图",
+      "surface": "browser",
+      "action": "capture",
+      "params": { "label": "done" }
+    }
+  ]
+}
+```
+
+### 示例：桌面任务
+
+```json
+{
+  "goal": "打开 TextEdit 并输入一条笔记",
+  "preferredSurface": "desktop",
+  "inputs": {
+    "desktopApp": "TextEdit",
+    "typeText": "这是 AgentOS 写入的每日笔记"
+  },
+  "steps": [
+    {
+      "label": "打开 TextEdit",
+      "surface": "desktop",
+      "action": "openApp",
+      "params": { "name": "TextEdit" }
+    },
+    {
+      "label": "等待编辑器出现",
+      "surface": "desktop",
+      "action": "waitForText",
+      "params": { "text": "TextEdit", "timeoutMs": 5000 }
+    },
+    {
+      "label": "输入内容",
+      "surface": "desktop",
+      "action": "type",
+      "params": { "text": "这是 AgentOS 写入的每日笔记" }
+    }
+  ]
+}
+```
+
+### 示例：watch rule
+
+```json
+{
+  "goal": "一直盯 Slack，把低风险未读消息按我的风格自动回复",
+  "preferredSurface": "browser",
+  "workspaceName": "personal-main",
+  "livePack": "slack-browser",
+  "pollIntervalMs": 15000
+}
+```
+
+### 示例：task control
+
+```json
+{
+  "action": "request_takeover"
+}
+```
+
+支持的 task control：
+
+- `pause`
+- `resume`
+- `request_takeover`
+- `return_to_agent`
+- `stop`
 
 ## Runtime 说明
 
-- 所有本地状态保存在 `.agentos/`
-- daemon 运行时状态保存在 `.agentos/daemon/`
-- 浏览器自动化默认寻找 Chrome-compatible executable，可用 `AGENTOS_BROWSER_EXECUTABLE` 指定
-- 浏览器默认 headless，可设 `AGENTOS_HEADLESS=false` 观看实际执行
-- 桌面自动化在 macOS 上可能需要 Accessibility 和 Screen Recording 权限
-- 桌面 watch 现在支持 context extraction、backoff/retry metadata 和 teach-based live hints
-- 任务完成后会自动生成 teach recording，skill/watch 学习链会直接复用这份 recording
+- 所有本地状态都在 `.agentos/`
+- daemon 状态在 `.agentos/daemon/`
+- 浏览器自动化需要 Chrome-compatible executable
+- 浏览器默认 headless
+- macOS 桌面自动化可能需要 Accessibility 和 Screen Recording 权限
+- Windows 桌面自动化通过 sidecar 使用本地 PowerShell / Win32 路径
+- 当前内置 live packs 包括：
+  - `slack-browser`
+  - `slack-desktop`
+  - `wechat-desktop`
+  - `generic-mail-desktop`
+  - `generic-desktop`
+- 学习数据、digest、proposal 都只保存在本地
 
-## API
+## API 概览
 
+系统：
+
+- `GET /health`
+- `GET /doctor`
+- `POST /doctor/bundle`
+- `GET /version`
 - `GET /daemon/status`
+
+任务：
+
 - `POST /tasks`
 - `GET /tasks`
 - `GET /tasks/:id`
 - `POST /tasks/:id/control`
 - `POST /tasks/:id/teach-steps`
+- `GET /traces/:id`
 - `POST /events`
 - `GET /events`
-- `GET /traces/:id`
 - `POST /policy/evaluate`
-- `GET /connectors`
+
+Watch / draft：
+
+- `GET /packs`
 - `GET /watches`
 - `POST /watches`
 - `POST /watches/from-task`
 - `GET /watches/:id`
+- `GET /watches/:id/health`
 - `POST /watches/:id/enable`
 - `POST /watches/:id/disable`
+- `POST /watches/:id/retry`
 - `DELETE /watches/:id`
+- `GET /drafts`
+- `GET /drafts/:id`
+- `POST /drafts/:id/approve`
+- `POST /drafts/:id/reject`
+
+Skill / workspace / vault：
+
 - `GET /skills`
 - `POST /skills/from-task`
 - `GET /skills/:name`
@@ -133,53 +374,41 @@ node dist/bin/agentos.js watch teach <task-id> "一直盯这个收件箱，看�
 - `GET /vault/secrets`
 - `PUT /vault/secrets/:key`
 - `GET /vault/secrets/:key`
-- `GET /health`
-- `GET /ws`
 
-## 示例：target-based task
+Learning：
 
-```json
-{
-  "goal": "Fill the target page and capture the result",
-  "preferredSurface": "browser",
-  "workspaceName": "personal-main",
-  "steps": [
-    {
-      "label": "Open target page",
-      "surface": "browser",
-      "action": "goto",
-      "params": { "url": "https://example.com" }
-    },
-    {
-      "label": "Type into the email field",
-      "surface": "browser",
-      "action": "typeIntoTarget",
-      "params": { "targetQuery": "email", "text": "tan@example.com", "clear": true }
-    },
-    {
-      "label": "Click submit",
-      "surface": "browser",
-      "action": "clickTarget",
-      "params": { "targetQuery": "submit" }
-    }
-  ]
-}
+- `GET /learning/status`
+- `GET /learning/sources`
+- `GET /memory/search`
+- `GET /memory/entities/:id`
+- `GET /digests`
+- `POST /digests/run`
+- `GET /proposals`
+- `POST /proposals/:id/accept`
+- `POST /proposals/:id/reject`
+
+## 开发与发布
+
+运行全量测试：
+
+```bash
+npm test
 ```
 
-## 示例：task control
+本地重建后重启 daemon：
 
-```json
-{
-  "action": "request_takeover"
-}
+```bash
+node dist/bin/agentos.js daemon restart
 ```
 
-支持的 control actions：
+准备发布产物：
 
-- `pause`
-- `resume`
-- `request_takeover`
-- `return_to_agent`
-- `stop`
+```bash
+npm run package:release -- --platform darwin
+ALLOW_UNSIGNED_PACKAGE=1 npm run package:macos
+npm run package:windows
+```
 
-`return_to_agent` 可以带一个可选的 `note` 字段。AgentOS 会把这条修正备注保存到任务结果中，并作为 recovery hint 带入后续学习出的 skill。
+## License
+
+MIT，见 [LICENSE](./LICENSE)。
