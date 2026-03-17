@@ -486,6 +486,7 @@ test("doctor and packs endpoints expose live runtime diagnostics", async () => {
     const packsPayload = await (await fetch(`${server.baseUrl}/packs`)).json();
     assert.ok(packsPayload.packs.some((pack) => pack.name === "slack-desktop"));
     assert.ok(packsPayload.packs.some((pack) => pack.name === "slack-browser"));
+    assert.ok(packsPayload.packs.some((pack) => pack.name === "wechat-desktop"));
     assert.ok(packsPayload.packs.some((pack) => pack.name === "generic-mail-desktop"));
   } finally {
     await server.close();
@@ -714,6 +715,153 @@ test("slack desktop pack can detect unread threads and build reply steps from a 
   });
   assert.equal(context?.inputs?.typeTarget, "Message");
   assert.equal(context?.inputs?.sendTarget, "Send");
+  assert.equal(Array.isArray(context?.taskSpec?.steps), true);
+  assert.equal(context?.taskSpec?.steps?.[0]?.action, "clickTarget");
+  assert.equal(context?.taskSpec?.steps?.[2]?.params?.text, "{{typeText}}");
+});
+
+test("wechat desktop pack can detect unread conversations and build reply steps from a desktop world state", async () => {
+  let opened = false;
+  const initialWorldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-wechat",
+    appContext: {
+      appName: "WeChat",
+      windows: [{ title: "WeChat" }]
+    },
+    capture: null,
+    ocrBlocks: [],
+    interactionCandidates: [
+      {
+        id: "thread-zhangsan",
+        surface: "desktop",
+        kind: "text",
+        text: "未读: 张三",
+        role: "text",
+        bounds: { x: 10, y: 10, width: 160, height: 24, centerX: 90, centerY: 22 },
+        confidence: 0.88,
+        sourceHints: { source: "ocr" },
+        isInteractive: true
+      }
+    ],
+    visibleText: "微信\n最近聊天\n未读\n张三\n客户: 明天下午方便吗？",
+    recentActions: [],
+    summary: "WeChat unread list",
+    timestamp: new Date().toISOString()
+  };
+  const threadWorldState = {
+    ...initialWorldState,
+    interactionCandidates: [
+      {
+        id: "thread-zhangsan",
+        surface: "desktop",
+        kind: "text",
+        text: "张三",
+        role: "text",
+        bounds: { x: 10, y: 10, width: 160, height: 24, centerX: 90, centerY: 22 },
+        confidence: 0.88,
+        sourceHints: { source: "ocr" },
+        isInteractive: true
+      },
+      {
+        id: "compose",
+        surface: "desktop",
+        kind: "text",
+        text: "输入消息",
+        role: "textbox",
+        bounds: { x: 10, y: 210, width: 240, height: 32, centerX: 130, centerY: 226 },
+        confidence: 0.84,
+        sourceHints: { source: "ocr", placeholder: "输入消息" },
+        isInteractive: true
+      },
+      {
+        id: "send",
+        surface: "desktop",
+        kind: "text",
+        text: "发送",
+        role: "button",
+        bounds: { x: 260, y: 210, width: 60, height: 32, centerX: 290, centerY: 226 },
+        confidence: 0.84,
+        sourceHints: { source: "ocr" },
+        isInteractive: true
+      }
+    ],
+    visibleText: "微信\n张三\n客户: 明天下午方便吗？\n我: 我先确认一下时间。\n输入消息\n发送"
+  };
+  const fakeSurface = {
+    async observe() {
+      return opened ? threadWorldState : initialWorldState;
+    },
+    async act({ step }) {
+      if (step.action === "clickTarget") {
+        opened = true;
+      }
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("wechat-desktop");
+  const rule: WatchRule = {
+    id: "watch-wechat-desktop",
+    goal: "Always watch WeChat and reply to unread conversations",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "wechat-desktop-main",
+    skillName: null,
+    appTarget: "WeChat",
+    livePack: "wechat-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-wechat",
+    name: "wechat-desktop-main",
+    rootPath: "/tmp/wechat-desktop-main",
+    profilePath: "/tmp/wechat-desktop-main/profile",
+    downloadsPath: "/tmp/wechat-desktop-main/downloads",
+    artifactsPath: "/tmp/wechat-desktop-main/artifacts",
+    scratchPath: "/tmp/wechat-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: initialWorldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {} as never
+  });
+  assert.equal(detection?.summary, "张三");
+
+  const context = await pack?.extractContext?.({
+    rule,
+    worldState: initialWorldState as never,
+    detection: detection as never,
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: { isConfigured: () => false }
+    } as never
+  });
+  assert.equal(context?.inputs?.typeTarget, "输入消息");
+  assert.equal(context?.inputs?.sendTarget, "发送");
+  assert.equal(context?.context?.[0], "客户: 明天下午方便吗？");
   assert.equal(Array.isArray(context?.taskSpec?.steps), true);
   assert.equal(context?.taskSpec?.steps?.[0]?.action, "clickTarget");
   assert.equal(context?.taskSpec?.steps?.[2]?.params?.text, "{{typeText}}");

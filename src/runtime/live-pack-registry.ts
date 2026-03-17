@@ -51,6 +51,8 @@ const SEND_PATTERN = /(send|reply|submit|发送|回复|提交)/iu;
 const UNREAD_PATTERN = /(unread|mention|new message|new messages|未读|新消息)/iu;
 const SLACK_UI_CHROME_PATTERN =
   /^(search|compose|home|later|activity|more|threads|drafts|canvas|huddle|send|reply|message|messages|slack|搜索|撰写|发送|回复|消息)$/iu;
+const WECHAT_UI_CHROME_PATTERN =
+  /^(wechat|微信|搜索|search|send|发送|reply|回复|聊天信息|聊天记录|通讯录|contacts|发现|moments|我|me|文件传输助手|表情|图片|文件|语音消息)$/iu;
 
 function createWatchTask(rule: WatchRule): TaskRecord {
   const timestamp = new Date().toISOString();
@@ -464,6 +466,167 @@ function extractSlackThreadContext(worldState: WorldState | null, summary: strin
   ).slice(0, 4);
 }
 
+function normalizeWeChatSummary(value: string): string {
+  return String(value ?? "")
+    .replace(/^[●•]\s*/u, "")
+    .replace(/^(unread|new message|new messages|未读|新消息)\s*[:：-]?\s*/iu, "")
+    .replace(/^\(\d+\)\s*/u, "")
+    .replace(/\s+\(\d+\)$/u, "")
+    .trim();
+}
+
+function isWeChatUiChrome(text: string): boolean {
+  return WECHAT_UI_CHROME_PATTERN.test(String(text ?? "").trim());
+}
+
+function scoreWeChatCandidate({
+  candidate,
+  worldState
+}: {
+  candidate: InteractionCandidate;
+  worldState: WorldState | null;
+}): number | null {
+  const hintText = candidateHintText(candidate);
+  const summary = normalizeWeChatSummary(candidate.text || hintText);
+  if (!summary || isWeChatUiChrome(summary) || SEND_PATTERN.test(summary)) {
+    return null;
+  }
+
+  let score = candidate.isInteractive ? 12 : 4;
+  if (candidate.role === "button" || candidate.role === "link" || candidate.role === "text") {
+    score += 3;
+  }
+  if (UNREAD_PATTERN.test(hintText)) {
+    score += 28;
+  }
+
+  const lines = visibleLines(worldState);
+  for (const [index, line] of lines.entries()) {
+    if (!UNREAD_PATTERN.test(line)) {
+      continue;
+    }
+    const nearby = lines
+      .slice(Math.max(0, index - 2), index + 6)
+      .some((entry) => entry.includes(summary) || summary.includes(normalizeWeChatSummary(entry)));
+    if (nearby) {
+      score += 18;
+      break;
+    }
+  }
+
+  if (/[\u4e00-\u9fff]/u.test(summary)) {
+    score += 2;
+  }
+  if (summary.length >= 2 && summary.length <= 48) {
+    score += 3;
+  }
+
+  return score;
+}
+
+function findWeChatUnreadCandidate(worldState: WorldState | null): InteractionCandidate | null {
+  const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
+  const ranked = candidates
+    .map((candidate) => ({ candidate, score: scoreWeChatCandidate({ candidate, worldState }) }))
+    .filter((entry): entry is { candidate: InteractionCandidate; score: number } => Number.isFinite(entry.score))
+    .sort((left, right) => right.score - left.score);
+  return ranked[0]?.candidate ?? null;
+}
+
+function pickWeChatComposeQuery(worldState: WorldState | null): string {
+  const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
+  const composeCandidate =
+    candidates.find((candidate) => {
+      const hintText = candidateHintText(candidate);
+      return (
+        candidate.role === "textbox" ||
+        /(message|reply|input|chat|消息|回复|输入|请输入)/iu.test(hintText) ||
+        /(message|reply|input|chat|消息|回复|输入|请输入)/iu.test(candidate.text)
+      );
+    }) ?? null;
+
+  if (!composeCandidate) {
+    return /[\u4e00-\u9fff]/u.test(String(worldState?.visibleText ?? "")) ? "输入" : "Message";
+  }
+
+  const hints = (composeCandidate.sourceHints ?? {}) as Record<string, unknown>;
+  return (
+    String(hints.placeholder ?? hints.ariaLabel ?? composeCandidate.text ?? "").trim() ||
+    (/[\u4e00-\u9fff]/u.test(String(worldState?.visibleText ?? "")) ? "输入" : "Message")
+  );
+}
+
+function pickWeChatSendQuery(worldState: WorldState | null): string {
+  const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
+  const sendCandidate =
+    candidates.find((candidate) => {
+      const hintText = candidateHintText(candidate);
+      return candidate.role === "button" && (SEND_PATTERN.test(hintText) || SEND_PATTERN.test(candidate.text));
+    }) ?? null;
+
+  if (!sendCandidate) {
+    return /[\u4e00-\u9fff]/u.test(String(worldState?.visibleText ?? "")) ? "发送" : "Send";
+  }
+
+  return (
+    String(sendCandidate.text ?? "").trim() ||
+    String(((sendCandidate.sourceHints ?? {}) as Record<string, unknown>).ariaLabel ?? "").trim() ||
+    (/[\u4e00-\u9fff]/u.test(String(worldState?.visibleText ?? "")) ? "发送" : "Send")
+  );
+}
+
+function extractWeChatThreadContext(worldState: WorldState | null, summary: string): string[] {
+  const lines = visibleLines(worldState).filter((line) => !isWeChatUiChrome(line));
+  const normalizedSummary = normalizeWeChatSummary(summary);
+  const summaryIndex = lines.findIndex((line) => normalizeWeChatSummary(line) === normalizedSummary);
+  const pool = summaryIndex === -1 ? lines : lines.slice(summaryIndex + 1);
+  return uniqueStrings(
+    pool.filter((line) => {
+      const normalized = normalizeWeChatSummary(line);
+      return (
+        normalized &&
+        normalized !== normalizedSummary &&
+        !UNREAD_PATTERN.test(line) &&
+        !SEND_PATTERN.test(line) &&
+        !/(message|reply|input|chat|消息|回复|输入|请输入)/iu.test(line)
+      );
+    })
+  ).slice(0, 4);
+}
+
+function buildWeChatReplySteps(): RuntimeStep[] {
+  return [
+    {
+      label: "Open unread WeChat conversation",
+      surface: "desktop",
+      action: "clickTarget",
+      params: { targetQuery: "{{openTarget}}" },
+      checkpoint: false
+    },
+    {
+      label: "Wait for WeChat composer",
+      surface: "desktop",
+      action: "waitForTarget",
+      params: { targetQuery: "{{typeTarget}}", timeoutMs: 5000 },
+      checkpoint: false
+    },
+    {
+      label: "Type WeChat reply",
+      surface: "desktop",
+      action: "typeIntoTarget",
+      params: { targetQuery: "{{typeTarget}}", text: "{{typeText}}", clear: false },
+      checkpoint: false
+    },
+    {
+      label: "Send WeChat reply",
+      surface: "desktop",
+      action: "clickTarget",
+      params: { targetQuery: "{{sendTarget}}" },
+      checkpoint: false
+    }
+  ];
+}
+
 function buildSlackReplySteps(surface: LivePackSurface): RuntimeStep[] {
   return [
     {
@@ -735,6 +898,158 @@ function createSlackPack({
   };
 }
 
+function createWeChatPack(): LivePack {
+  return {
+    name: "wechat-desktop",
+    info: {
+      name: "wechat-desktop",
+      family: "chat",
+      surface: "desktop",
+      supportsDrafts: true,
+      supportsAutoSend: true,
+      description: "WeChat desktop watcher that detects unread conversations, extracts context, and sends low-risk replies."
+    },
+    async activate({ rule, workspace, surfaceRegistry }) {
+      const adapter = surfaceRegistry.get("desktop");
+      if (!adapter) {
+        return;
+      }
+      await adapter
+        .act({
+          task: createWatchTask(rule),
+          step: {
+            id: `watch-focus-${rule.id}`,
+            action: "focusApp",
+            surface: "desktop",
+            params: { name: rule.appTarget ?? "WeChat" }
+          },
+          workspace: profileAsWorkspace(rule, workspace),
+          traceId: null,
+          outputs: {}
+        })
+        .catch(() => null);
+    },
+    async observeInbox(args) {
+      return observeWatchSurface({ ...args, surface: "desktop" });
+    },
+    async detectNewItems({ rule, worldState, dedupeState = {} }) {
+      const candidate = findWeChatUnreadCandidate(worldState);
+      if (!candidate) {
+        return null;
+      }
+
+      const summary = normalizeWeChatSummary(candidate.text || candidateHintText(candidate));
+      if (!summary) {
+        return null;
+      }
+
+      const context = contextForSignal(worldState, { text: candidate.text || summary });
+      const itemFingerprint = fingerprint(
+        `wechat-desktop:${rule.workspaceName ?? "default"}:${summary}:${context.join("|")}`
+      );
+      if (dedupeState.lastFingerprint === itemFingerprint) {
+        return null;
+      }
+
+      return {
+        fingerprint: itemFingerprint,
+        summary,
+        text: summary,
+        context,
+        inputs: {
+          watchItemText: summary,
+          watchSummary: summary,
+          watchContext: context.join("\n"),
+          openTarget: String(candidate.text ?? summary).trim() || summary
+        },
+        metadata: {
+          openCandidate: candidate,
+          surface: "desktop"
+        }
+      };
+    },
+    async extractContext({ rule, workspace, surfaceRegistry, detection }) {
+      const adapter = surfaceRegistry.get("desktop");
+      if (!adapter) {
+        return null;
+      }
+
+      const openTarget = String(detection.inputs?.openTarget ?? detection.summary ?? "").trim();
+      if (openTarget) {
+        const openCandidate = (detection.metadata?.openCandidate ?? null) as Record<string, unknown> | null;
+        await adapter.act({
+          task: createWatchTask(rule),
+          step: {
+            id: `wechat-open-${rule.id}`,
+            label: "Open WeChat conversation",
+            surface: "desktop",
+            action: "clickTarget",
+            params: {
+              targetQuery: openTarget,
+              ...(openCandidate ? { target: openCandidate } : {})
+            }
+          },
+          workspace: profileAsWorkspace(rule, workspace),
+          traceId: null,
+          outputs: {}
+        });
+      }
+
+      const threadState = await observeWatchSurface({
+        rule,
+        workspace,
+        surfaceRegistry,
+        controlPlane: {} as LivePackControlPlane,
+        surface: "desktop"
+      });
+      const summary = String(detection.summary ?? "").trim();
+      const context = extractWeChatThreadContext(threadState, summary);
+      return {
+        summary,
+        context,
+        inputs: {
+          ...(detection.inputs ?? {}),
+          watchContext: context.join("\n"),
+          openTarget: String(detection.inputs?.openTarget ?? summary).trim() || summary,
+          typeTarget: pickWeChatComposeQuery(threadState),
+          sendTarget: pickWeChatSendQuery(threadState)
+        },
+        taskSpec: {
+          preferredSurface: "desktop",
+          steps: buildWeChatReplySteps()
+        }
+      };
+    },
+    async draftReply({ rule, detection, controlPlane }) {
+      const summary = String(detection?.summary ?? "").trim();
+      const context = Array.isArray(detection?.context) ? detection.context : [];
+      if (controlPlane.modelClient.isConfigured()) {
+        const drafted = await controlPlane.modelClient.draftReply({
+          goal: rule.goal,
+          livePack: "wechat-desktop",
+          summary,
+          context
+        });
+        return {
+          replyText: String(drafted.replyText ?? "").trim(),
+          metadata: {
+            confidence: drafted.confidence ?? null,
+            rationale: drafted.rationale ?? null,
+            source: "model"
+          }
+        };
+      }
+
+      return draftHeuristicReply({
+        family: "chat",
+        goal: rule.goal,
+        summary,
+        context
+      });
+    }
+  };
+}
+
 function createVisualDesktopPack({
   name,
   family = "generic",
@@ -898,14 +1213,7 @@ export class LivePackRegistry {
         surface: "browser",
         description: "Slack browser watcher that detects unread threads, extracts context, and sends low-risk replies."
       }),
-      createVisualDesktopPack({
-        name: "wechat-desktop",
-        family: "chat",
-        description: "WeChat desktop watcher for unread conversations and reply drafts.",
-        defaultTriggerTexts: ["未读", "新消息", "wechat", "微信"],
-        unreadTokens: ["未读", "新消息", "wechat", "微信"],
-        ignoreTokens: ["发送", "回复", "搜索"]
-      }),
+      createWeChatPack(),
       createVisualDesktopPack({
         name: "generic-mail-desktop",
         family: "mail",
