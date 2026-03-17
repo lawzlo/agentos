@@ -7,8 +7,9 @@ import {
   daemonStop,
   daemonUninstall
 } from "../cli-utils.js";
+import type { CliOptions } from "../cli-utils.js";
 
-export async function handleDaemonCommand(subcommand: string | undefined, options: Record<string, any>) {
+export async function handleDaemonCommand(subcommand: string | undefined, options: CliOptions) {
   if (subcommand === "start") {
     await daemonStart(options);
     return true;

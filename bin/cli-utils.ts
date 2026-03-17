@@ -12,11 +12,36 @@ import {
   readDaemonRuntime,
   rotateDaemonLogs
 } from "../src/daemon-state.js";
+import type {
+  DraftRecord,
+  LivePackInfo,
+  TaskSnapshot,
+  WatchHealth,
+  WatchRule
+} from "../src/types/runtime-schema.js";
+import type { DaemonStatus } from "../src/types/system.js";
 
 export const config = resolveConfig();
 export const distBinDir = path.dirname(fileURLToPath(import.meta.url));
 export const distRoot = path.resolve(distBinDir, "..");
 export const runtimeEntry = path.join(distRoot, "src/index.js");
+
+export type CliOptionScalar = string | boolean;
+export type CliOptionValue = CliOptionScalar | CliOptionScalar[];
+export type CliOptions = Record<string, CliOptionValue | undefined> & {
+  json?: boolean;
+  foreground?: boolean;
+  timeout?: string | boolean;
+};
+
+export interface ParsedArgs {
+  positionals: string[];
+  options: CliOptions;
+}
+
+interface ErrorPayload {
+  error?: string;
+}
 
 function toCamelCase(value: string) {
   return String(value)
@@ -24,9 +49,9 @@ function toCamelCase(value: string) {
     .replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
 }
 
-export function parseArgs(argv: string[]) {
-  const positionals = [];
-  const options: Record<string, any> = {};
+export function parseArgs(argv: string[]): ParsedArgs {
+  const positionals: string[] = [];
+  const options: CliOptions = {};
 
   for (let index = 0; index < argv.length; index += 1) {
     const entry = argv[index];
@@ -54,14 +79,14 @@ export function parseArgs(argv: string[]) {
   return { positionals, options };
 }
 
-export function listify(value: any) {
+export function listify(value: CliOptionValue | undefined): CliOptionScalar[] {
   if (value == null) {
     return [];
   }
   return Array.isArray(value) ? value : [value];
 }
 
-export function parseInputs(value: any) {
+export function parseInputs(value: CliOptionValue | undefined): Record<string, string> {
   const inputs: Record<string, string> = {};
   for (const entry of listify(value)) {
     const [key, ...rest] = String(entry).split("=");
@@ -73,7 +98,10 @@ export function parseInputs(value: any) {
   return inputs;
 }
 
-export function boolOption(value: any) {
+export function boolOption(value: CliOptionValue | undefined): boolean {
+  if (Array.isArray(value)) {
+    return boolOption(value.at(-1));
+  }
   if (value === true) {
     return true;
   }
@@ -87,7 +115,11 @@ export function baseUrl() {
   return process.env.AGENTOS_BASE_URL ?? `http://127.0.0.1:${config.port}`;
 }
 
-export async function apiRequest(method: string, pathname: string, body: unknown = null) {
+export async function apiRequest<TResponse extends object>(
+  method: string,
+  pathname: string,
+  body: unknown = null
+): Promise<TResponse> {
   const response = await fetch(`${baseUrl()}${pathname}`, {
     method,
     headers: body ? { "content-type": "application/json" } : undefined,
@@ -96,15 +128,15 @@ export async function apiRequest(method: string, pathname: string, body: unknown
     throw new Error(`Failed to reach AgentOS at ${baseUrl()}: ${error.message}`);
   });
 
-  const payload = await response.json().catch(() => ({}));
+  const payload = (await response.json().catch(() => ({}))) as TResponse & ErrorPayload;
   if (!response.ok) {
-    throw new Error((payload as Record<string, any>).error ?? `Request failed: ${response.status}`);
+    throw new Error(payload.error ?? `Request failed: ${response.status}`);
   }
 
-  return payload as Record<string, any>;
+  return payload;
 }
 
-export function print(data: unknown, options: Record<string, any> = {}) {
+export function print(data: unknown, options: CliOptions = {}) {
   if (options.json) {
     console.log(JSON.stringify(data, null, 2));
     return;
@@ -118,27 +150,31 @@ export function print(data: unknown, options: Record<string, any> = {}) {
   console.log(JSON.stringify(data, null, 2));
 }
 
-export function formatTask(task: Record<string, any>) {
+export function formatTask(task: Pick<TaskSnapshot, "id" | "status" | "goal">) {
   return `${task.id}  ${task.status.padEnd(11)}  ${task.goal}`;
 }
 
-export function formatWatch(rule: Record<string, any>) {
+export function formatWatch(
+  rule: Pick<WatchRule, "id" | "status" | "goal" | "livePack"> & {
+    health?: WatchHealth | null;
+  }
+) {
   const health = rule.health?.state ? String(rule.health.state).padEnd(9) : "n/a".padEnd(9);
   return `${rule.id}  ${String(rule.status).padEnd(18)}  ${health}  ${rule.livePack.padEnd(20)}  ${rule.goal}`;
 }
 
-export function formatPack(pack: Record<string, any>) {
+export function formatPack(pack: LivePackInfo) {
   return `${pack.name.padEnd(20)}  ${String(pack.family).padEnd(7)}  ${pack.surface.padEnd(7)}  ${pack.description}`;
 }
 
-export function formatDraft(draft: Record<string, any>) {
+export function formatDraft(draft: Pick<DraftRecord, "id" | "status" | "livePack" | "summary">) {
   return `${draft.id}  ${String(draft.status).padEnd(9)}  ${String(draft.livePack ?? "-").padEnd(20)}  ${draft.summary ?? "(no summary)"}`;
 }
 
-export async function waitForTask(taskId: string, timeoutMs = 30000) {
+export async function waitForTask(taskId: string, timeoutMs = 30000): Promise<TaskSnapshot> {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
-    const payload = await apiRequest("GET", `/tasks/${taskId}`);
+    const payload = await apiRequest<{ task: TaskSnapshot }>("GET", `/tasks/${taskId}`);
     if (["completed", "failed", "blocked", "interrupted"].includes(payload.task.status)) {
       return payload.task;
     }
@@ -147,11 +183,11 @@ export async function waitForTask(taskId: string, timeoutMs = 30000) {
   throw new Error(`Timed out waiting for task ${taskId}`);
 }
 
-export async function waitForDaemon(timeoutMs = 10000) {
+export async function waitForDaemon(timeoutMs = 10000): Promise<DaemonStatus> {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
     try {
-      const payload = await apiRequest("GET", "/daemon/status");
+      const payload = await apiRequest<{ daemon: DaemonStatus }>("GET", "/daemon/status");
       return payload.daemon;
     } catch {
       await new Promise((resolve) => setTimeout(resolve, 250));
@@ -160,9 +196,9 @@ export async function waitForDaemon(timeoutMs = 10000) {
   throw new Error("Timed out waiting for the daemon to start.");
 }
 
-export async function daemonStatus(options: Record<string, any>) {
+export async function daemonStatus(options: CliOptions) {
   try {
-    const payload = await apiRequest("GET", "/daemon/status");
+    const payload = await apiRequest<{ daemon: DaemonStatus }>("GET", "/daemon/status");
     print(payload.daemon, options);
     return;
   } catch {}
@@ -182,9 +218,9 @@ export async function daemonStatus(options: Record<string, any>) {
   );
 }
 
-export async function daemonStart(options: Record<string, any>) {
+export async function daemonStart(options: CliOptions) {
   try {
-    const payload = await apiRequest("GET", "/daemon/status");
+    const payload = await apiRequest<{ daemon: DaemonStatus }>("GET", "/daemon/status");
     print(options.json ? payload.daemon : `AgentOS daemon already running on port ${payload.daemon.port}.`, options);
     return;
   } catch {}
@@ -224,7 +260,7 @@ export async function daemonStart(options: Record<string, any>) {
   print(options.json ? daemon : `Started AgentOS daemon on http://127.0.0.1:${daemon.port}`, options);
 }
 
-export async function daemonStop(options: Record<string, any>) {
+export async function daemonStop(options: CliOptions) {
   const runtime = await readDaemonRuntime(config.daemonDir);
   if (!runtime.running || !runtime.state?.pid) {
     print(options.json ? { stopped: false, reason: "not_running" } : "AgentOS daemon is not running.", options);
@@ -235,7 +271,7 @@ export async function daemonStop(options: Record<string, any>) {
   print(options.json ? { stopped: true, pid: Number(runtime.state.pid) } : "Stopping AgentOS daemon.", options);
 }
 
-export async function daemonRestart(options: Record<string, any>) {
+export async function daemonRestart(options: CliOptions) {
   const runtime = await readDaemonRuntime(config.daemonDir);
   if (runtime.running && runtime.state?.pid) {
     process.kill(Number(runtime.state.pid), "SIGTERM");
@@ -252,7 +288,7 @@ export async function daemonRestart(options: Record<string, any>) {
   await daemonStart(options);
 }
 
-export async function daemonLogs(options: Record<string, any>) {
+export async function daemonLogs(options: CliOptions) {
   const logPath = daemonLogPath(config.daemonDir);
   const content = await fsp.readFile(logPath, "utf8").catch(() => "");
   print(options.json ? { logPath, content } : content || "No daemon log found yet.", options);
@@ -262,7 +298,7 @@ export function launchAgentPath() {
   return path.join(os.homedir(), "Library/LaunchAgents", "com.agentos.daemon.plist");
 }
 
-export async function daemonInstall(options: Record<string, any>) {
+export async function daemonInstall(options: CliOptions) {
   if (process.platform === "darwin") {
     const plistPath = launchAgentPath();
     const plist = `<?xml version="1.0" encoding="UTF-8"?>
@@ -319,7 +355,7 @@ export async function daemonInstall(options: Record<string, any>) {
   throw new Error("Auto-install is only implemented for macOS and Windows.");
 }
 
-export async function daemonUninstall(options: Record<string, any>) {
+export async function daemonUninstall(options: CliOptions) {
   if (process.platform === "darwin") {
     const plistPath = launchAgentPath();
     await fsp.rm(plistPath, { force: true }).catch(() => {});

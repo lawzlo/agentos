@@ -1,5 +1,6 @@
 import { nowIso } from "./id.js";
 import { materializeWatchActionTemplate } from "./watch-profile.js";
+import type { TaskRecord, TaskSpec, WatchProfile, WatchRule } from "../types/runtime-schema.js";
 
 interface WatchRuleLike {
   id: string;
@@ -10,18 +11,18 @@ interface WatchRuleLike {
   pollIntervalMs: number;
   workspaceName?: string | null;
   appTarget?: string | null;
-  preferredSurface?: string | null;
+  preferredSurface?: TaskSpec["preferredSurface"] | null;
   skillName?: string | null;
   taskInputs?: Record<string, unknown>;
   dedupeState?: Record<string, unknown>;
-  watchProfile?: Record<string, any>;
+  watchProfile?: WatchProfile | Record<string, any>;
   lastObservedAt?: string | null;
   lastTriggeredAt?: string | null;
   lastError?: string | null;
 }
 
 interface TaskLike {
-  id: string;
+  id?: string;
   status: string;
 }
 
@@ -42,7 +43,59 @@ function clearWatchFailureState(dedupeState: Record<string, unknown> = {}) {
   };
 }
 
-function shouldDraftReply(rule: WatchRuleLike, detection: Record<string, any> = {}) {
+export interface WatchDetection {
+  fingerprint?: string;
+  summary?: string | null;
+  goal?: string | null;
+  inputs?: Record<string, unknown>;
+  taskSpec?: Partial<TaskSpec> | null;
+  replyText?: string | null;
+  context?: string[];
+}
+
+interface WatchExecutionServiceOptions {
+  controlPlane: {
+    modelClient: { isConfigured(): boolean };
+    createTask(taskSpec: TaskSpec): Promise<TaskRecord>;
+    workspaceManager: {
+      prepareProfile(name: string, metadata?: Record<string, unknown>): Promise<unknown>;
+    };
+    watchService: {
+      decorate(rule: WatchRule | null): unknown;
+    };
+    draftService: {
+      create(input: Record<string, unknown>): unknown;
+    };
+    surfaceRegistry: {
+      get(name: string): unknown;
+    };
+    policyEngine: {
+      evaluateAutomation(input: {
+        taskSpec: TaskSpec;
+        watchRule: WatchRuleLike;
+        detection: WatchDetection;
+        replyText: string;
+      }): {
+        action: string;
+        reasons: string[];
+      };
+    };
+  };
+  store: {
+    getWatchRule(id: string): WatchRuleLike | null;
+    putWatchRule(rule: Record<string, unknown>): WatchRule;
+    getTask(id: string): TaskLike | null;
+    getDraft(id: string): { status: string } | null;
+  };
+  eventBus: {
+    broadcast(type: string, payload: unknown): void;
+  };
+  livePackRegistry: {
+    get(name: string): any;
+  };
+}
+
+function shouldDraftReply(rule: WatchRuleLike, detection: WatchDetection = {}) {
   if (typeof detection.replyText === "string" && detection.replyText.trim()) {
     return true;
   }
@@ -52,7 +105,7 @@ function shouldDraftReply(rule: WatchRuleLike, detection: Record<string, any> = 
     return true;
   }
 
-  const liveHints = (rule.watchProfile?.liveHints ?? {}) as Record<string, any>;
+  const liveHints = (rule.watchProfile?.liveHints ?? {}) as Record<string, unknown>;
   if (liveHints.sendTargetQuery || liveHints.composeTargetQuery || liveHints.openTargetQuery) {
     return true;
   }
@@ -65,25 +118,29 @@ function shouldDraftReply(rule: WatchRuleLike, detection: Record<string, any> = 
 }
 
 export class WatchExecutionService {
-  controlPlane: any;
-  store: any;
-  eventBus: any;
-  livePackRegistry: any;
+  controlPlane: WatchExecutionServiceOptions["controlPlane"];
+  store: WatchExecutionServiceOptions["store"];
+  eventBus: WatchExecutionServiceOptions["eventBus"];
+  livePackRegistry: WatchExecutionServiceOptions["livePackRegistry"];
 
   constructor({
     controlPlane,
     store,
     eventBus,
     livePackRegistry
-  }: Record<string, any>) {
+  }: WatchExecutionServiceOptions) {
     this.controlPlane = controlPlane;
     this.store = store;
     this.eventBus = eventBus;
     this.livePackRegistry = livePackRegistry;
   }
 
-  buildTaskSpecFromWatchRule(watchRule: Record<string, any>, detection: Record<string, any> = {}, overrides: Record<string, any> = {}) {
-    const detected = detection as Record<string, any>;
+  buildTaskSpecFromWatchRule(
+    watchRule: WatchRuleLike,
+    detection: WatchDetection = {},
+    overrides: Record<string, unknown> = {}
+  ): TaskSpec {
+    const detected = detection;
     const runtimeInputs = {
       ...(watchRule.taskInputs ?? {}),
       ...(detected.inputs ?? {}),
@@ -96,14 +153,14 @@ export class WatchExecutionService {
     const actionTemplate =
       !watchRule.skillName && watchRule.watchProfile?.actionTemplate?.length
         ? materializeWatchActionTemplate(
-            watchRule.watchProfile.actionTemplate,
+            watchRule.watchProfile.actionTemplate as any[],
             runtimeInputs,
-            watchRule.watchProfile?.metadata?.templateInputs ?? []
+            ((watchRule.watchProfile?.metadata as Record<string, unknown> | undefined)?.templateInputs as any[]) ?? []
           )
         : null;
     const baseTaskSpec = {
       goal: detected.goal ?? `${watchRule.goal}${detected.summary ? `\n\nTrigger context: ${detected.summary}` : ""}`,
-      preferredSurface: watchRule.preferredSurface,
+      preferredSurface: watchRule.preferredSurface ?? "desktop",
       workspaceName: watchRule.workspaceName ?? `${watchRule.livePack}-live`,
       skillName: watchRule.skillName ?? null,
       triggerSource: `watch:${watchRule.id}`,
@@ -112,10 +169,10 @@ export class WatchExecutionService {
       executionMode:
         actionTemplate?.length
           ? "planned"
-          : watchRule.watchProfile?.executionMode ??
+          : (watchRule.watchProfile?.executionMode as TaskSpec["executionMode"] | undefined) ??
             (watchRule.skillName ? "planned" : this.controlPlane.modelClient.isConfigured() ? "autonomous" : "planned")
-    };
-    const explicitTaskSpec = detected.taskSpec as Record<string, any> | null;
+    } satisfies TaskSpec;
+    const explicitTaskSpec = detected.taskSpec ?? null;
     if (!explicitTaskSpec) {
       return baseTaskSpec;
     }
@@ -131,7 +188,15 @@ export class WatchExecutionService {
     };
   }
 
-  async draftReply({ watchRule, detection, pack }: Record<string, any>) {
+  async draftReply({
+    watchRule,
+    detection,
+    pack
+  }: {
+    watchRule: WatchRuleLike;
+    detection: WatchDetection;
+    pack: any;
+  }) {
     if (detection?.replyText) {
       return {
         replyText: String(detection.replyText),
@@ -160,7 +225,11 @@ export class WatchExecutionService {
     };
   }
 
-  async createTaskFromWatchRule(watchRule: Record<string, any>, detection = {}, options = {}) {
+  async createTaskFromWatchRule(
+    watchRule: WatchRuleLike,
+    detection: WatchDetection = {},
+    options: Record<string, unknown> = {}
+  ) {
     const taskSpec = this.buildTaskSpecFromWatchRule(watchRule, detection, options);
     return this.controlPlane.createTask(taskSpec);
   }
@@ -378,7 +447,7 @@ export class WatchExecutionService {
             reply: replyDraft?.metadata ?? {},
             context: detection.context ?? []
           }
-        });
+        }) as { id?: string };
         const updated = this.store.putWatchRule({
           ...rule,
           lastObservedAt: nowIso(),

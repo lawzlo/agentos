@@ -1,20 +1,22 @@
 import {
   apiRequest,
   boolOption,
+  type CliOptions,
   formatWatch,
   listify,
   parseInputs,
   print
 } from "../cli-utils.js";
+import type { WatchHealth, WatchRule } from "../../src/types/runtime-schema.js";
 
-export async function commandWatch(subcommand: string | undefined, positionals: string[], options: Record<string, any>) {
+export async function commandWatch(subcommand: string | undefined, positionals: string[], options: CliOptions) {
   if (subcommand === "add") {
     const goal = positionals.join(" ").trim();
     if (!goal) {
       throw new Error("watch add requires a goal");
     }
 
-    const payload = await apiRequest("POST", "/watches", {
+    const payload = await apiRequest<{ watch: WatchRule }>("POST", "/watches", {
       goal,
       preferredSurface: options.surface,
       workspaceName: options.workspace,
@@ -34,7 +36,7 @@ export async function commandWatch(subcommand: string | undefined, positionals: 
       throw new Error("watch teach requires a completed task id");
     }
 
-    const payload = await apiRequest("POST", "/watches/from-task", {
+    const payload = await apiRequest<{ watch: WatchRule }>("POST", "/watches/from-task", {
       taskId,
       watchRuleId: options.watch ?? null,
       goal: goalParts.join(" ").trim() || undefined,
@@ -52,7 +54,7 @@ export async function commandWatch(subcommand: string | undefined, positionals: 
   }
 
   if (subcommand === "ls") {
-    const payload = await apiRequest("GET", "/watches");
+    const payload = await apiRequest<{ watches: WatchRule[] }>("GET", "/watches");
     if (options.json) {
       print(payload.watches, options);
       return;
@@ -63,35 +65,35 @@ export async function commandWatch(subcommand: string | undefined, positionals: 
 
   if (subcommand === "inspect") {
     const [watchId] = positionals;
-    const payload = await apiRequest("GET", `/watches/${watchId}`);
+    const payload = await apiRequest<{ watch: WatchRule }>("GET", `/watches/${watchId}`);
     print(payload.watch, options);
     return;
   }
 
   if (subcommand === "health") {
     const [watchId] = positionals;
-    const payload = await apiRequest("GET", `/watches/${watchId}/health`);
+    const payload = await apiRequest<{ health: WatchHealth }>("GET", `/watches/${watchId}/health`);
     print(payload.health, options);
     return;
   }
 
   if (subcommand === "enable" || subcommand === "disable") {
     const [watchId] = positionals;
-    const payload = await apiRequest("POST", `/watches/${watchId}/${subcommand}`);
+    const payload = await apiRequest<{ watch: WatchRule }>("POST", `/watches/${watchId}/${subcommand}`);
     print(payload.watch, options);
     return;
   }
 
   if (subcommand === "retry") {
     const [watchId] = positionals;
-    const payload = await apiRequest("POST", `/watches/${watchId}/retry`);
+    const payload = await apiRequest<{ watch: WatchRule }>("POST", `/watches/${watchId}/retry`);
     print(payload.watch, options);
     return;
   }
 
   if (subcommand === "rm") {
     const [watchId] = positionals;
-    const payload = await apiRequest("DELETE", `/watches/${watchId}`);
+    const payload = await apiRequest<{ ok: boolean }>("DELETE", `/watches/${watchId}`);
     print(payload, options);
     return;
   }

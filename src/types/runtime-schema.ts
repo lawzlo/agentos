@@ -8,7 +8,24 @@ export interface TaskSpec {
   priority?: "low" | "normal" | "high";
   inputs?: Record<string, unknown>;
   steps?: RuntimeStep[];
+  autonomy?: {
+    maxSteps?: number;
+  };
+  saveSkillAs?: string | null;
+  saveWatchAs?: Record<string, unknown> | null;
 }
+
+export type TaskStatus =
+  | "queued"
+  | "planning"
+  | "running"
+  | "verifying"
+  | "paused"
+  | "takeover"
+  | "blocked"
+  | "failed"
+  | "completed"
+  | "interrupted";
 
 export interface RuntimeStep {
   id?: string;
@@ -44,6 +61,64 @@ export interface ArtifactReference {
   path: string;
   metadata: Record<string, unknown>;
   createdAt: string;
+}
+
+export interface RuntimeControlState {
+  mode: "agent" | "paused" | "takeover" | "stopped";
+  reason: string | null;
+  source: string;
+  updatedAt: string;
+}
+
+export interface TraceEventRecord {
+  id: string;
+  traceId: string;
+  taskId: string;
+  role: string;
+  type: string;
+  stepId: string | null;
+  message: string;
+  payload: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface TraceRecord {
+  id: string;
+  taskId: string;
+  status: string;
+  startedAt: string;
+  endedAt: string | null;
+  summary: string | null;
+  plan: RuntimeStep[];
+  output: Record<string, unknown> | null;
+}
+
+export interface TraceSnapshot extends TraceRecord {
+  events: TraceEventRecord[];
+}
+
+export interface TaskRecord {
+  id: string;
+  goal: string;
+  status: TaskStatus;
+  priority: "low" | "normal" | "high";
+  triggerSource: string;
+  deadline: string | null;
+  preferredSurface: "auto" | "browser" | "desktop";
+  workspaceId: string | null;
+  traceId: string | null;
+  taskSpec: TaskSpec | Record<string, unknown>;
+  plan: RuntimeStep[];
+  result: Record<string, unknown> | null;
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TaskSnapshot extends TaskRecord {
+  trace: TraceSnapshot | null;
+  artifacts: ArtifactReference[];
+  runtimeControl: RuntimeControlState | null;
 }
 
 export interface OcrBlock {
@@ -187,6 +262,12 @@ export interface LivePackInfo {
   supportsDrafts: boolean;
   supportsAutoSend: boolean;
   description: string;
+}
+
+export interface ConnectorStatus {
+  name: string;
+  status?: string;
+  [key: string]: unknown;
 }
 
 export interface SkillDefinition {

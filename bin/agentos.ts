@@ -16,7 +16,7 @@ import { commandWatch } from "./commands/watch-command.js";
 import { commandDrafts } from "./commands/drafts-command.js";
 import { commandPacks } from "./commands/packs-command.js";
 import { commandSkills } from "./commands/skills-command.js";
-import { boolOption, parseArgs, print } from "./cli-utils.js";
+import { boolOption, parseArgs, print, type CliOptions } from "./cli-utils.js";
 
 function helpText() {
   return `agentos daemon start|stop|status|logs|restart|install|uninstall
@@ -41,7 +41,7 @@ async function main() {
   const subcommand = rawSubcommand?.startsWith("--") ? undefined : rawSubcommand;
   const rest = rawSubcommand?.startsWith("--") ? [rawSubcommand, ...restArgs] : restArgs;
   const { positionals, options } = parseArgs(rest);
-  const sharedOptions: Record<string, any> = {
+  const sharedOptions: CliOptions = {
     ...options,
     json: boolOption(options.json)
   };

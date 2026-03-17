@@ -1,5 +1,25 @@
 import { buildTeachRecording } from "./teach-recorder.js";
 import { ExecutionStoppedError } from "./errors.js";
+import type { TaskRecord, TaskSnapshot, TaskSpec } from "../types/runtime-schema.js";
+
+interface RuntimeSupervisorOptions {
+  controlPlane: any;
+  store: any;
+  traceStore: any;
+  eventBus: any;
+  executionController: any;
+  workspaceManager: any;
+  policyEngine: any;
+  autonomy: any;
+  planner: any;
+  operator: any;
+  verifier: any;
+  recovery: any;
+  memoryStore: any;
+  watchScheduler: any;
+  connectors: Array<{ start(): Promise<void>; stop?(): Promise<void> }>;
+  surfaceRegistry: { shutdown(): Promise<void> };
+}
 
 export class RuntimeSupervisor {
   controlPlane: any;
@@ -16,8 +36,8 @@ export class RuntimeSupervisor {
   recovery: any;
   memoryStore: any;
   watchScheduler: any;
-  connectors: any[];
-  surfaceRegistry: any;
+  connectors: Array<{ start(): Promise<void>; stop?(): Promise<void> }>;
+  surfaceRegistry: { shutdown(): Promise<void> };
   queue: string[];
   running: boolean;
 
@@ -38,7 +58,7 @@ export class RuntimeSupervisor {
     watchScheduler,
     connectors,
     surfaceRegistry
-  }: Record<string, any>) {
+  }: RuntimeSupervisorOptions) {
     this.controlPlane = controlPlane;
     this.store = store;
     this.traceStore = traceStore;
@@ -59,7 +79,7 @@ export class RuntimeSupervisor {
     this.running = false;
   }
 
-  enqueue(taskId: string) {
+  enqueue(taskId: string): void {
     this.queue.push(taskId);
     void this.drain();
   }
@@ -88,7 +108,17 @@ export class RuntimeSupervisor {
     }
   }
 
-  async waitForExecutionAccess({ taskId, traceId, phase, step = null }: Record<string, any>) {
+  async waitForExecutionAccess({
+    taskId,
+    traceId,
+    phase,
+    step = null
+  }: {
+    taskId: string;
+    traceId: string;
+    phase: string;
+    step?: { id?: string } | null;
+  }) {
     const control = this.executionController.getState(taskId);
     if (!control || control.mode === "agent") {
       return;
@@ -141,7 +171,17 @@ export class RuntimeSupervisor {
     });
   }
 
-  async requestRecoveryTakeover({ taskId, traceId, error, decision }: Record<string, any>) {
+  async requestRecoveryTakeover({
+    taskId,
+    traceId,
+    error,
+    decision
+  }: {
+    taskId: string;
+    traceId: string;
+    error: Error;
+    decision: { classification?: string; nextAction?: string };
+  }) {
     this.controlPlane.controlTask(taskId, "request_takeover", {
       source: "recovery",
       reason: `Recovery requested takeover: ${error.message}`
@@ -188,7 +228,7 @@ export class RuntimeSupervisor {
   }
 
   async runTask(taskId: string) {
-    let task = this.store.getTask(taskId);
+    let task = this.store.getTask(taskId) as TaskRecord | null;
     if (!task) {
       return;
     }
@@ -234,7 +274,7 @@ export class RuntimeSupervisor {
           this.eventBus.broadcast("task.updated", this.controlPlane.getTask(taskId));
 
           let result;
-          const controlGate = async ({ phase, step }: Record<string, any>) =>
+          const controlGate = async ({ phase, step }: { phase: string; step?: { id?: string } | null }) =>
             this.waitForExecutionAccess({
               taskId,
               traceId: trace.id,
@@ -242,7 +282,9 @@ export class RuntimeSupervisor {
               step
             });
 
-          if (this.autonomy.isEnabled(task.taskSpec)) {
+          const taskSpec = task.taskSpec as TaskSpec;
+
+          if (this.autonomy.isEnabled(taskSpec)) {
             this.store.updateTask(taskId, {
               plan: [{ id: "autonomy", label: "Autonomous loop", surface: task.preferredSurface, action: "autonomy" }],
               status: "running"
@@ -255,7 +297,7 @@ export class RuntimeSupervisor {
               message: "Planner delegated the task to the autonomy loop.",
               payload: {
                 executionMode: "autonomous",
-                maxSteps: task.taskSpec.autonomy?.maxSteps ?? 8
+                maxSteps: taskSpec.autonomy?.maxSteps ?? 8
               }
             });
 
@@ -323,7 +365,7 @@ export class RuntimeSupervisor {
             ...result,
             teachRecording: buildTeachRecording({
               goal: task.goal,
-              taskSpec: task.taskSpec,
+                  taskSpec,
               planSteps: this.store.getTask(taskId)?.plan ?? [],
               executionSteps: result.steps ?? [],
               manualTeachSteps: result.manualTeachSteps ?? [],
@@ -344,15 +386,21 @@ export class RuntimeSupervisor {
             this.memoryStore.remember("task-outputs", taskId, result.outputs);
           }
 
-          if (task.taskSpec.saveSkillAs) {
-            this.controlPlane.saveTaskAsSkill(taskId, task.taskSpec.saveSkillAs);
+          if (taskSpec.saveSkillAs) {
+            this.controlPlane.saveTaskAsSkill(taskId, taskSpec.saveSkillAs);
           }
 
-          if (task.taskSpec.saveWatchAs) {
-            this.controlPlane.saveTaskAsWatchRule(taskId, task.taskSpec.saveWatchAs);
+          if (taskSpec.saveWatchAs) {
+            this.controlPlane.saveTaskAsWatchRule(taskId, taskSpec.saveWatchAs);
           }
 
-          if (task.triggerSource?.startsWith("watch:") && (task.result?.manualTeachSteps?.length || task.result?.manualCorrections?.length)) {
+          const manualTeachSteps = Array.isArray((task.result as Record<string, unknown> | null)?.manualTeachSteps)
+            ? ((task.result as Record<string, unknown>).manualTeachSteps as unknown[])
+            : [];
+          const manualCorrections = Array.isArray((task.result as Record<string, unknown> | null)?.manualCorrections)
+            ? ((task.result as Record<string, unknown>).manualCorrections as unknown[])
+            : [];
+          if (task.triggerSource?.startsWith("watch:") && (manualTeachSteps.length || manualCorrections.length)) {
             this.controlPlane.saveTaskAsWatchRule(taskId, {
               watchRuleId: task.triggerSource.slice("watch:".length)
             });

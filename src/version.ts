@@ -7,6 +7,14 @@ export const NATIVE_PROTOCOL_VERSION = 1;
 export const STORE_SCHEMA_VERSION = 1;
 export const INSTALL_LAYOUT_VERSION = 1;
 
+export interface RuntimeVersionInfo {
+  appVersion: string;
+  runtimeProtocolVersion: number;
+  nativeProtocolVersion: number;
+  storeSchemaVersion: number;
+  installLayoutVersion: number;
+}
+
 function packageJsonPath(): string {
   return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "package.json");
 }
@@ -21,7 +29,7 @@ function readPackageVersion(): string {
   }
 }
 
-export function getRuntimeVersionInfo() {
+export function getRuntimeVersionInfo(): RuntimeVersionInfo {
   return {
     appVersion: readPackageVersion(),
     runtimeProtocolVersion: RUNTIME_PROTOCOL_VERSION,

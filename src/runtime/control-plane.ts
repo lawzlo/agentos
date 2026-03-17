@@ -28,36 +28,71 @@ import { WatchExecutionService } from "./watch-execution-service.js";
 import { RuntimeSupervisor } from "./runtime-supervisor.js";
 import { createDiagnosticBundle } from "../diagnostics.js";
 import { getRuntimeVersionInfo } from "../version.js";
+import type { AgentOsConfig } from "../config.js";
+import type {
+  ConnectorStatus,
+  DraftRecord,
+  LivePackInfo,
+  RuntimeStep,
+  SkillDefinition,
+  TaskRecord,
+  TaskSnapshot,
+  TaskSpec,
+  TraceSnapshot,
+  WatchHealth,
+  WatchRule
+} from "../types/runtime-schema.js";
+import type {
+  DaemonStatus,
+  DoctorBundle,
+  DoctorReport,
+  NativeDiagnostics
+} from "../types/system.js";
+import type { RuntimeVersionInfo } from "../version.js";
+import type { SidecarHealthResult, SidecarPermissionsResult } from "../types/native-sidecar.js";
+
+type ControlPlaneConnector = FileInboxConnector;
+
+interface WatchDraftInput {
+  watchRule?: WatchRule | null;
+  taskSpec: TaskSpec;
+  detection?: Record<string, unknown>;
+  riskDecision: Record<string, unknown>;
+  replyText?: string | null;
+  summary?: string | null;
+  metadata?: Record<string, unknown>;
+}
 
 export class ControlPlane {
-  config: any;
-  store: any;
-  eventBus: any;
-  artifactStore: any;
-  traceStore: any;
-  workspaceManager: any;
-  memoryStore: any;
-  skillRegistry: any;
-  executionController: any;
-  credentialVault: any;
-  policyEngine: any;
-  modelClient: any;
-  groundingEngine: any;
-  surfaceRegistry: any;
-  sentinel: any;
-  planner: any;
-  operator: any;
-  verifier: any;
-  recovery: any;
-  autonomy: any;
-  connectors: any;
-  livePackRegistry: any;
-  watchScheduler: any;
-  watchService: any;
-  draftService: any;
-  watchExecutionService: any;
-  runtimeSupervisor: any;
-  constructor(config) {
+  config: AgentOsConfig;
+  store: ControlPlaneStore;
+  eventBus: EventBus;
+  artifactStore: ArtifactStore;
+  traceStore: TraceStore;
+  workspaceManager: WorkspaceManager;
+  memoryStore: MemoryStore;
+  skillRegistry: SkillRegistry;
+  executionController: ExecutionController;
+  credentialVault: CredentialVault;
+  policyEngine: PolicyEngine;
+  modelClient: OpenAICompatibleModelClient;
+  groundingEngine: GroundingEngine;
+  surfaceRegistry: SurfaceRegistry;
+  sentinel: SentinelAgent;
+  planner: PlannerAgent;
+  operator: OperatorAgent;
+  verifier: VerifierAgent;
+  recovery: RecoveryAgent;
+  autonomy: AutonomyAgent;
+  connectors: ControlPlaneConnector[];
+  livePackRegistry: LivePackRegistry;
+  watchScheduler: WatchScheduler;
+  watchService: WatchService;
+  draftService: DraftService;
+  watchExecutionService: WatchExecutionService;
+  runtimeSupervisor: RuntimeSupervisor;
+
+  constructor(config: AgentOsConfig) {
     this.config = config;
     this.store = new ControlPlaneStore(config.dbPath);
     this.eventBus = new EventBus();
@@ -142,10 +177,10 @@ export class ControlPlane {
     this.draftService = new DraftService({
       store: this.store,
       eventBus: this.eventBus,
-      createTask: (taskSpec: Record<string, any>) => this.createTask(taskSpec),
+      createTask: (taskSpec: TaskSpec) => this.createTask(taskSpec),
       getTask: (taskId: string) => this.getTask(taskId),
       getWatchRule: (watchRuleId: string) => this.watchService.get(watchRuleId),
-      decorateWatchRule: (watchRule: Record<string, any>) => this.watchService.decorate(watchRule)
+      decorateWatchRule: (watchRule: WatchRule | null) => this.watchService.decorate(watchRule)
     });
     this.runtimeSupervisor = new RuntimeSupervisor({
       controlPlane: this,
@@ -175,7 +210,7 @@ export class ControlPlane {
     await this.watchScheduler.start();
   }
 
-  decorateTask(task) {
+  decorateTask(task: TaskRecord | null): TaskSnapshot | null {
     if (!task) {
       return null;
     }
@@ -189,17 +224,17 @@ export class ControlPlane {
   }
 
   listTasks(limit = 50) {
-    return this.store.listTasks(limit).map((task) => ({
+    return (this.store.listTasks(limit) as TaskRecord[]).map((task) => ({
       ...task,
       runtimeControl: this.executionController.getState(task.id)
     }));
   }
 
-  getTask(taskId) {
-    return this.decorateTask(this.store.getTask(taskId));
+  getTask(taskId: string): TaskSnapshot | null {
+    return this.decorateTask(this.store.getTask(taskId) as TaskRecord | null);
   }
 
-  getTrace(traceId) {
+  getTrace(traceId: string): TraceSnapshot | null {
     return this.traceStore.get(traceId);
   }
 
@@ -207,7 +242,7 @@ export class ControlPlane {
     return this.store.listEvents(limit);
   }
 
-  listConnectors() {
+  listConnectors(): ConnectorStatus[] {
     return this.connectors.map((connector) => connector.status());
   }
 
@@ -215,24 +250,24 @@ export class ControlPlane {
     return this.livePackRegistry.list();
   }
 
-  listLivePackInfo() {
+  listLivePackInfo(): LivePackInfo[] {
     return this.livePackRegistry.listInfo();
   }
 
-  listSkills() {
+  listSkills(): SkillDefinition[] {
     return this.skillRegistry.listSkills();
   }
 
-  getSkill(name) {
+  getSkill(name: string): SkillDefinition | null {
     return this.skillRegistry.getSkill(name);
   }
 
-  putSkill(skill) {
+  putSkill(skill: SkillDefinition): SkillDefinition {
     return this.skillRegistry.putSkill(skill);
   }
 
-  saveTaskAsSkill(taskId, name) {
-    const task = this.store.getTask(taskId);
+  saveTaskAsSkill(taskId: string, name: string): SkillDefinition {
+    const task = this.store.getTask(taskId) as TaskRecord | null;
     if (!task) {
       throw new Error(`Task not found: ${taskId}`);
     }
@@ -249,10 +284,10 @@ export class ControlPlane {
       taskId,
       taskSpec: task.taskSpec,
       planSteps: task.plan ?? [],
-      executionSteps: task.result?.steps ?? [],
-      manualCorrections: task.result?.manualCorrections ?? [],
-      manualTeachSteps: task.result?.manualTeachSteps ?? [],
-      teachRecording: task.result?.teachRecording ?? null
+      executionSteps: Array.isArray(task.result?.steps) ? task.result.steps : [],
+      manualCorrections: Array.isArray(task.result?.manualCorrections) ? task.result.manualCorrections : [],
+      manualTeachSteps: Array.isArray(task.result?.manualTeachSteps) ? task.result.manualTeachSteps : [],
+      teachRecording: (task.result?.teachRecording ?? null) as any
     });
 
     this.eventBus.broadcast("skill.saved", skill);
@@ -302,7 +337,7 @@ export class ControlPlane {
     return this.watchService.delete(watchRuleId);
   }
 
-  getWatchHealth(watchRuleId) {
+  getWatchHealth(watchRuleId: string): WatchHealth {
     return this.watchService.getHealth(watchRuleId);
   }
 
@@ -314,19 +349,19 @@ export class ControlPlane {
     return this.draftService.list(limit);
   }
 
-  getDraft(draftId) {
+  getDraft(draftId: string) {
     return this.draftService.get(draftId);
   }
 
   createDraft({
     watchRule = null,
     taskSpec,
-    detection = {} as Record<string, any>,
+    detection = {},
     riskDecision,
     replyText = null,
     summary = null,
     metadata = {}
-  }: Record<string, any>) {
+  }: WatchDraftInput) {
     return this.draftService.create({
       watchRule,
       taskSpec,
@@ -346,11 +381,11 @@ export class ControlPlane {
     return this.draftService.reject(draftId, reason);
   }
 
-  getVersionInfo() {
+  getVersionInfo(): RuntimeVersionInfo {
     return getRuntimeVersionInfo();
   }
 
-  async #collectNativeDiagnostics() {
+  async #collectNativeDiagnostics(): Promise<NativeDiagnostics> {
     const desktopSurface = this.surfaceRegistry.get("desktop");
     const bridge = desktopSurface?.bridge;
     if (!bridge || typeof bridge.sidecarHealth !== "function") {
@@ -362,10 +397,10 @@ export class ControlPlane {
     }
 
     try {
-      const health = await bridge.sidecarHealth();
+      const health = (await bridge.sidecarHealth()) as SidecarHealthResult;
       const permissions =
         typeof bridge.getPermissionsStatus === "function"
-          ? await bridge.getPermissionsStatus().catch(() => null)
+          ? ((await bridge.getPermissionsStatus().catch(() => null)) as SidecarPermissionsResult | null)
           : null;
       const compatible =
         Number(health.nativeProtocolVersion ?? -1) ===
@@ -385,7 +420,7 @@ export class ControlPlane {
     }
   }
 
-  async doctor() {
+  async doctor(): Promise<DoctorReport> {
     const base = this.watchService.doctor();
     const version = this.getVersionInfo();
     const schemaVersion = this.store.getSchemaVersion();
@@ -426,12 +461,12 @@ export class ControlPlane {
     };
   }
 
-  async createDoctorBundle(daemon: Record<string, any>) {
+  async createDoctorBundle(daemon: DaemonStatus): Promise<DoctorBundle> {
     return createDiagnosticBundle({
       controlPlane: this,
       config: this.config,
       daemon
-    });
+    }) as Promise<DoctorBundle>;
   }
 
   evaluatePolicy(taskSpec) {
@@ -466,13 +501,17 @@ export class ControlPlane {
     };
   }
 
-  recordTaskCorrection(taskId, note, { source = "user", mode = null } = {}) {
+  recordTaskCorrection(
+    taskId: string,
+    note: string,
+    { source = "user", mode = null }: { source?: string; mode?: string | null } = {}
+  ): TaskSnapshot | null {
     const trimmed = String(note ?? "").trim();
     if (!trimmed) {
       return this.getTask(taskId);
     }
 
-    const task = this.store.getTask(taskId);
+    const task = this.store.getTask(taskId) as TaskRecord | null;
     if (!task) {
       throw new Error(`Task not found: ${taskId}`);
     }
@@ -487,7 +526,10 @@ export class ControlPlane {
     const updated = this.store.updateTask(taskId, {
       result: {
         ...(task.result ?? {}),
-        manualCorrections: [...(task.result?.manualCorrections ?? []), correction]
+        manualCorrections: [
+          ...(Array.isArray(task.result?.manualCorrections) ? task.result.manualCorrections : []),
+          correction
+        ]
       }
     });
 
@@ -507,7 +549,11 @@ export class ControlPlane {
     return snapshot;
   }
 
-  recordTaskTeachStep(taskId, step, { source = "user" } = {}) {
+  recordTaskTeachStep(
+    taskId: string,
+    step: RuntimeStep,
+    { source = "user" }: { source?: string } = {}
+  ): TaskSnapshot | null {
     const task = this.store.getTask(taskId);
     if (!task) {
       throw new Error(`Task not found: ${taskId}`);
@@ -531,7 +577,7 @@ export class ControlPlane {
         ...(task.result ?? {}),
         manualTeachSteps: [...(task.result?.manualTeachSteps ?? []), normalizedStep]
       }
-    });
+    }) as TaskRecord | null;
 
     if (task.traceId) {
       this.traceStore.log({
@@ -549,8 +595,16 @@ export class ControlPlane {
     return snapshot;
   }
 
-  controlTask(taskId, action, { source = "user", reason = null, note = null } = {}) {
-    const task = this.store.getTask(taskId);
+  controlTask(
+    taskId: string,
+    action: string,
+    {
+      source = "user",
+      reason = null,
+      note = null
+    }: { source?: string; reason?: string | null; note?: string | null } = {}
+  ): TaskSnapshot | null {
+    const task = this.store.getTask(taskId) as TaskRecord | null;
     if (!task) {
       throw new Error(`Task not found: ${taskId}`);
     }
@@ -621,7 +675,7 @@ export class ControlPlane {
     const updated = this.store.updateTask(taskId, {
       status: transition.status,
       error: action === "stop" ? finalReason : task.error
-    });
+    }) as TaskRecord | null;
 
     if (task.traceId) {
       this.traceStore.log({
@@ -643,15 +697,15 @@ export class ControlPlane {
     return snapshot;
   }
 
-  async createTask(taskSpec) {
+  async createTask(taskSpec: TaskSpec): Promise<TaskRecord> {
     const normalized = this.sentinel.normalize(taskSpec);
-    const task = this.store.createTask(normalized);
+    const task = this.store.createTask(normalized) as TaskRecord;
     this.eventBus.broadcast("task.created", task);
     this.runtimeSupervisor.enqueue(task.id);
     return task;
   }
 
-  async previewTask(taskSpec) {
+  async previewTask(taskSpec: TaskSpec) {
     const normalized = this.sentinel.normalize(taskSpec);
     const preview = await this.planner.preview(normalized);
     const evaluation = this.policyEngine.evaluateTask(normalized);
@@ -666,7 +720,7 @@ export class ControlPlane {
     };
   }
 
-  async ingestEvent(event) {
+  async ingestEvent(event: Record<string, any>) {
     const stored = this.store.createEvent(event);
     this.eventBus.broadcast("event.created", stored);
 
@@ -693,16 +747,32 @@ export class ControlPlane {
     return { event: stored, task: null };
   }
 
-  buildTaskSpecFromWatchRule(watchRule, detection: Record<string, any> = {}, overrides: Record<string, any> = {}) {
-    return this.watchExecutionService.buildTaskSpecFromWatchRule(watchRule, detection, overrides);
+  buildTaskSpecFromWatchRule(
+    watchRule: WatchRule,
+    detection: Record<string, unknown> = {},
+    overrides: Record<string, unknown> = {}
+  ): TaskSpec {
+    return this.watchExecutionService.buildTaskSpecFromWatchRule(watchRule as any, detection, overrides);
   }
 
-  async draftWatchReply({ watchRule, detection, pack }) {
-    return this.watchExecutionService.draftReply({ watchRule, detection, pack });
+  async draftWatchReply({
+    watchRule,
+    detection,
+    pack
+  }: {
+    watchRule: WatchRule;
+    detection: Record<string, unknown>;
+    pack: unknown;
+  }) {
+    return this.watchExecutionService.draftReply({ watchRule: watchRule as any, detection, pack });
   }
 
-  async createTaskFromWatchRule(watchRule, detection = {}, options = {}) {
-    return this.watchExecutionService.createTaskFromWatchRule(watchRule, detection, options);
+  async createTaskFromWatchRule(
+    watchRule: WatchRule,
+    detection: Record<string, unknown> = {},
+    options: Record<string, unknown> = {}
+  ) {
+    return this.watchExecutionService.createTaskFromWatchRule(watchRule as any, detection, options);
   }
 
   async shutdown() {

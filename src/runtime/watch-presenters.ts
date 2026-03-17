@@ -1,4 +1,9 @@
-export function buildWatchHealth(rule: Record<string, any> | null) {
+import type { DraftRecord, TaskSnapshot, WatchHealth, WatchRule } from "../types/runtime-schema.js";
+
+type LooseWatchRule = WatchRule | Record<string, any>;
+type LooseDraftRecord = DraftRecord | Record<string, any>;
+
+export function buildWatchHealth(rule: LooseWatchRule | null): WatchHealth | null {
   if (!rule) {
     return null;
   }
@@ -30,7 +35,7 @@ export function buildWatchHealth(rule: Record<string, any> | null) {
   };
 }
 
-export function decorateWatchRule(rule: Record<string, any> | null) {
+export function decorateWatchRule(rule: LooseWatchRule | null): WatchRule | LooseWatchRule | null {
   if (!rule) {
     return null;
   }
@@ -42,13 +47,13 @@ export function decorateWatchRule(rule: Record<string, any> | null) {
 }
 
 export function decorateDraft(
-  draft: Record<string, any> | null,
+  draft: LooseDraftRecord | null,
   {
     getWatchRule,
     getTask
   }: {
-    getWatchRule: (watchRuleId: string) => Record<string, any> | null;
-    getTask: (taskId: string) => Record<string, any> | null;
+    getWatchRule: (watchRuleId: string) => WatchRule | null;
+    getTask: (taskId: string) => TaskSnapshot | null;
   }
 ) {
   if (!draft) {

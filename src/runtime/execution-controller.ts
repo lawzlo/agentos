@@ -1,10 +1,20 @@
 import { ExecutionStoppedError } from "./errors.js";
+import type { RuntimeControlState } from "../types/runtime-schema.js";
 
 function nowIso() {
   return new Date().toISOString();
 }
 
-function snapshot(state) {
+interface ExecutionWaiter {
+  resolve: (value: RuntimeControlState | null) => void;
+  reject: (error: Error) => void;
+}
+
+interface ExecutionState extends RuntimeControlState {
+  waiters: ExecutionWaiter[];
+}
+
+function snapshot(state: ExecutionState | null): RuntimeControlState | null {
   if (!state) {
     return null;
   }
@@ -18,12 +28,12 @@ function snapshot(state) {
 }
 
 export class ExecutionController {
-  states: any;
+  states: Map<string, ExecutionState>;
   constructor() {
     this.states = new Map();
   }
 
-  registerTask(taskId) {
+  registerTask(taskId: string): RuntimeControlState | null {
     if (!this.states.has(taskId)) {
       this.states.set(taskId, {
         mode: "agent",
@@ -37,7 +47,7 @@ export class ExecutionController {
     return snapshot(this.states.get(taskId));
   }
 
-  unregisterTask(taskId) {
+  unregisterTask(taskId: string): void {
     const state = this.states.get(taskId);
     if (!state) {
       return;
@@ -50,11 +60,15 @@ export class ExecutionController {
     this.states.delete(taskId);
   }
 
-  getState(taskId) {
+  getState(taskId: string): RuntimeControlState | null {
     return snapshot(this.states.get(taskId) ?? null);
   }
 
-  setMode(taskId, mode, { reason = null, source = "system" } = {}) {
+  setMode(
+    taskId: string,
+    mode: ExecutionState["mode"],
+    { reason = null, source = "system" }: { reason?: string | null; source?: string } = {}
+  ): RuntimeControlState | null {
     if (!this.states.has(taskId)) {
       this.registerTask(taskId);
     }
@@ -79,7 +93,7 @@ export class ExecutionController {
     return snapshot(state);
   }
 
-  async waitForAgent(taskId) {
+  async waitForAgent(taskId: string): Promise<RuntimeControlState | null> {
     const state = this.states.get(taskId);
     if (!state || state.mode === "agent") {
       return this.getState(taskId);
