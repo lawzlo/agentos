@@ -1,0 +1,63 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  release:
+    types:
+      - published
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build signed macOS package
+        env:
+          AGENTOS_MACOS_SIGN_IDENTITY: ${{ secrets.AGENTOS_MACOS_SIGN_IDENTITY }}
+        run: npm run package:macos
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agentos-macos
+          path: release/artifacts/*.pkg
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install WiX
+        run: choco install wixtoolset --yes
+
+      - name: Build signed Windows installer
+        shell: pwsh
+        env:
+          AGENTOS_WINDOWS_SIGN_PFX_BASE64: ${{ secrets.AGENTOS_WINDOWS_SIGN_PFX_BASE64 }}
+          AGENTOS_WINDOWS_SIGN_PFX_PASSWORD: ${{ secrets.AGENTOS_WINDOWS_SIGN_PFX_PASSWORD }}
+        run: npm run package:windows
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agentos-windows
+          path: release/artifacts/*.msi
