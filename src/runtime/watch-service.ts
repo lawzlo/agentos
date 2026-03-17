@@ -1,15 +1,46 @@
 import { normalizeWatchRule } from "./watch-rule-parser.js";
 import { deriveWatchProfileFromExecution } from "./watch-profile.js";
 import { buildWatchHealth, decorateWatchRule } from "./watch-presenters.js";
+import type { AgentOsConfig } from "../config.js";
+import type { EventBus } from "./event-bus.js";
+import type { LivePackRegistry } from "./live-pack-registry.js";
+import type { OpenAICompatibleModelClient } from "./model-client.js";
+import type { ControlPlaneStore } from "./store.js";
+import type { WatchScheduler } from "./watch-scheduler.js";
+import type { ConnectorStatus, TaskSpec, TeachRecording, WatchHealth, WatchRule } from "../types/runtime-schema.js";
+import type { WatchRuleInput } from "./watch-rule-parser.js";
+
+interface WatchServiceOptions {
+  store: ControlPlaneStore;
+  modelClient: OpenAICompatibleModelClient;
+  watchScheduler: WatchScheduler;
+  eventBus: EventBus;
+  livePackRegistry: LivePackRegistry;
+  connectors: Array<{ status(): ConnectorStatus }>;
+  config: AgentOsConfig;
+}
+
+interface SaveWatchRuleOptions {
+  watchRuleId?: string | null;
+  goal?: string | null;
+  preferredSurface?: "browser" | "desktop" | null;
+  workspaceName?: string | null;
+  livePack?: string | null;
+  appTarget?: string | null;
+  skillName?: string | null;
+  pollIntervalMs?: number | null;
+  enabled?: boolean | null;
+  triggerTexts?: string[];
+}
 
 export class WatchService {
-  store: any;
-  modelClient: any;
-  watchScheduler: any;
-  eventBus: any;
-  livePackRegistry: any;
-  connectors: any[];
-  config: any;
+  store: ControlPlaneStore;
+  modelClient: OpenAICompatibleModelClient;
+  watchScheduler: WatchScheduler;
+  eventBus: EventBus;
+  livePackRegistry: LivePackRegistry;
+  connectors: Array<{ status(): ConnectorStatus }>;
+  config: AgentOsConfig;
 
   constructor({
     store,
@@ -19,7 +50,7 @@ export class WatchService {
     livePackRegistry,
     connectors,
     config
-  }: Record<string, any>) {
+  }: WatchServiceOptions) {
     this.store = store;
     this.modelClient = modelClient;
     this.watchScheduler = watchScheduler;
@@ -29,7 +60,7 @@ export class WatchService {
     this.config = config;
   }
 
-  decorate(rule: Record<string, any> | null) {
+  decorate(rule: WatchRule | null): WatchRule | null {
     return decorateWatchRule(rule);
   }
 
@@ -46,8 +77,8 @@ export class WatchService {
       pollIntervalMs = null,
       enabled = null,
       triggerTexts = []
-    }: Record<string, any> = {}
-  ) {
+    }: SaveWatchRuleOptions = {}
+  ): WatchRule | null {
     const task = this.store.getTask(taskId);
     if (!task) {
       throw new Error(`Task not found: ${taskId}`);
@@ -60,17 +91,20 @@ export class WatchService {
     const existingWatchRule =
       (watchRuleId ? this.store.getWatchRule(watchRuleId) : null) ??
       (task.triggerSource?.startsWith("watch:") ? this.store.getWatchRule(task.triggerSource.slice("watch:".length)) : null);
+    const taskResult = task.result ?? {};
+    const taskSpec = task.taskSpec as TaskSpec;
+    const taskInputs = taskSpec.inputs ?? {};
 
     const watchProfile = deriveWatchProfileFromExecution({
       goal: task.goal,
       taskId,
       taskSpec: task.taskSpec,
       planSteps: task.plan ?? [],
-      executionSteps: task.result?.steps ?? [],
-      manualTeachSteps: task.result?.manualTeachSteps ?? [],
-      manualCorrections: task.result?.manualCorrections ?? [],
+      executionSteps: Array.isArray(taskResult.steps) ? taskResult.steps : [],
+      manualTeachSteps: Array.isArray(taskResult.manualTeachSteps) ? taskResult.manualTeachSteps : [],
+      manualCorrections: Array.isArray(taskResult.manualCorrections) ? taskResult.manualCorrections : [],
       result: task.result,
-      teachRecording: task.result?.teachRecording ?? null,
+      teachRecording: (taskResult.teachRecording ?? null) as TeachRecording | null,
       overrides: {
         triggerTexts: triggerTexts.length ? triggerTexts : existingWatchRule?.watchProfile?.triggerTexts ?? [],
         recoveryHints: existingWatchRule?.watchProfile?.recoveryHints ?? []
@@ -82,20 +116,27 @@ export class WatchService {
         ...(existingWatchRule ?? {}),
         id: existingWatchRule?.id ?? watchRuleId ?? undefined,
         goal: goal ?? existingWatchRule?.goal ?? task.goal,
-        preferredSurface: preferredSurface ?? existingWatchRule?.preferredSurface ?? task.preferredSurface,
-        workspaceName: workspaceName ?? existingWatchRule?.workspaceName ?? task.taskSpec.workspaceName ?? null,
+        preferredSurface:
+          preferredSurface ??
+          existingWatchRule?.preferredSurface ??
+          (task.preferredSurface === "auto" ? "desktop" : task.preferredSurface),
+        workspaceName: workspaceName ?? existingWatchRule?.workspaceName ?? taskSpec.workspaceName ?? null,
         livePack: livePack ?? existingWatchRule?.livePack ?? null,
-        appTarget: appTarget ?? existingWatchRule?.appTarget ?? task.taskSpec.inputs?.desktopApp ?? null,
+        appTarget:
+          appTarget ??
+          existingWatchRule?.appTarget ??
+          (typeof taskInputs.desktopApp === "string" ? taskInputs.desktopApp : null),
         skillName: skillName ?? existingWatchRule?.skillName ?? null,
         pollIntervalMs: pollIntervalMs ?? existingWatchRule?.pollIntervalMs ?? 15000,
         enabled: enabled ?? existingWatchRule?.enabled ?? true,
         watchProfile: {
           ...(existingWatchRule?.watchProfile ?? {}),
-          ...watchProfile
+          ...watchProfile,
+          executionMode: watchProfile.executionMode === "autonomous" ? "autonomous" : "planned"
         },
         taskInputs: {
           ...(existingWatchRule?.taskInputs ?? {}),
-          ...(task.taskSpec.inputs ?? {}),
+          ...taskInputs,
           watchTemplateLearnedFromTaskId: taskId
         },
         lastError: null,
@@ -105,7 +146,7 @@ export class WatchService {
         modelConfigured: this.modelClient.isConfigured()
       }
     );
-    const watchRule = this.store.putWatchRule(normalized);
+    const watchRule = this.store.putWatchRule(normalized as unknown as Record<string, unknown>);
     this.watchScheduler.sync(watchRule);
     const decorated = this.decorate(watchRule);
     this.eventBus.broadcast(existingWatchRule ? "watch.learned" : "watch.created", decorated);
@@ -113,25 +154,25 @@ export class WatchService {
   }
 
   list() {
-    return this.store.listWatchRules().map((rule: Record<string, any>) => this.decorate(rule));
+    return this.store.listWatchRules().map((rule) => this.decorate(rule)).filter(Boolean);
   }
 
-  get(watchRuleId: string) {
+  get(watchRuleId: string): WatchRule | null {
     return this.decorate(this.store.getWatchRule(watchRuleId));
   }
 
-  create(spec: Record<string, any>) {
+  create(spec: WatchRuleInput): WatchRule | null {
     const normalized = normalizeWatchRule(spec, {
       modelConfigured: this.modelClient.isConfigured()
     });
-    const watchRule = this.store.putWatchRule(normalized);
+    const watchRule = this.store.putWatchRule(normalized as unknown as Record<string, unknown>);
     this.watchScheduler.sync(watchRule);
     const decorated = this.decorate(watchRule);
     this.eventBus.broadcast("watch.created", decorated);
     return decorated;
   }
 
-  update(watchRuleId: string, patch: Record<string, any>) {
+  update(watchRuleId: string, patch: Partial<WatchRuleInput> & { taskInputs?: Record<string, unknown> }) {
     const existing = this.store.getWatchRule(watchRuleId);
     if (!existing) {
       throw new Error(`Watch rule not found: ${watchRuleId}`);
@@ -148,7 +189,7 @@ export class WatchService {
         modelConfigured: this.modelClient.isConfigured()
       }
     );
-    const watchRule = this.store.putWatchRule(normalized);
+    const watchRule = this.store.putWatchRule(normalized as unknown as Record<string, unknown>);
     this.watchScheduler.sync(watchRule);
     const decorated = this.decorate(watchRule);
     this.eventBus.broadcast("watch.updated", decorated);
@@ -182,7 +223,7 @@ export class WatchService {
     return true;
   }
 
-  getHealth(watchRuleId: string) {
+  getHealth(watchRuleId: string): WatchHealth {
     const watchRule = this.store.getWatchRule(watchRuleId);
     if (!watchRule) {
       throw new Error(`Watch rule not found: ${watchRuleId}`);
@@ -222,9 +263,9 @@ export class WatchService {
   doctor() {
     const watches = this.store.listWatchRules();
     const drafts = this.store.listDrafts(200);
-    const degraded = watches.filter((rule: Record<string, any>) => ["degraded", "backoff"].includes(rule.status));
-    const pendingDrafts = drafts.filter((draft: Record<string, any>) => draft.status === "pending");
-    const warnings = [];
+    const degraded = watches.filter((rule) => ["degraded", "backoff"].includes(rule.status));
+    const pendingDrafts = drafts.filter((draft) => draft.status === "pending");
+    const warnings: string[] = [];
     if (!this.config.browserExecutable) {
       warnings.push("No managed browser executable detected.");
     }

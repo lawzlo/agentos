@@ -13,9 +13,23 @@ import { VaultRepository } from "./repositories/vault-repository.js";
 import { WatchRepository } from "./repositories/watch-repository.js";
 import { WorkspaceRepository } from "./repositories/workspace-repository.js";
 import { getStoreSchemaVersion, initializeStoreSchema } from "./store-schema.js";
+import type {
+  ArtifactReference,
+  DraftRecord,
+  EventRecord,
+  SkillDefinition,
+  TaskRecord,
+  TaskSpec,
+  TaskStatus,
+  TraceEventRecord,
+  TraceRecord,
+  WatchRule,
+  WorkspaceProfile,
+  WorkspaceRecord
+} from "../types/runtime-schema.js";
 
 export class ControlPlaneStore {
-  db: any;
+  db: DatabaseSync;
   tasks: TaskRepository;
   events: EventRepository;
   traces: TraceRepository;
@@ -47,87 +61,87 @@ export class ControlPlaneStore {
     return getStoreSchemaVersion(this.db);
   }
 
-  createTask(taskSpec: Record<string, any>) {
-    return this.tasks.create(taskSpec);
+  createTask(taskSpec: TaskSpec): TaskRecord {
+    return this.tasks.create(taskSpec) as TaskRecord;
   }
 
-  updateTask(id: string, patch: Record<string, any>) {
-    return this.tasks.update(id, patch);
+  updateTask(id: string, patch: Partial<TaskRecord>): TaskRecord | null {
+    return this.tasks.update(id, patch) as TaskRecord | null;
   }
 
-  listTasks(limit = 50) {
-    return this.tasks.list(limit);
+  listTasks(limit = 50): TaskRecord[] {
+    return this.tasks.list(limit) as TaskRecord[];
   }
 
-  getTask(id: string) {
-    return this.tasks.get(id);
+  getTask(id: string): TaskRecord | null {
+    return this.tasks.get(id) as TaskRecord | null;
   }
 
-  listTasksByStatuses(statuses: string[] = []) {
-    return this.tasks.listByStatuses(statuses);
+  listTasksByStatuses(statuses: TaskStatus[] = []): TaskRecord[] {
+    return this.tasks.listByStatuses(statuses) as TaskRecord[];
   }
 
-  createEvent(event: Record<string, any>) {
+  createEvent(event: Record<string, unknown>): EventRecord {
     return this.events.create(event);
   }
 
-  attachEventTask(eventId: string, taskId: string) {
+  attachEventTask(eventId: string, taskId: string): Record<string, unknown> {
     return this.events.attachTask(eventId, taskId);
   }
 
-  listEvents(limit = 50) {
+  listEvents(limit = 50): EventRecord[] {
     return this.events.list(limit);
   }
 
-  createTrace(input: Record<string, any>) {
+  createTrace(input: Record<string, unknown>): TraceRecord {
     return this.traces.create(input);
   }
 
-  updateTrace(id: string, patch: Record<string, any>) {
+  updateTrace(id: string, patch: Record<string, unknown>): TraceRecord | null {
     return this.traces.update(id, patch);
   }
 
-  getTrace(id: string) {
+  getTrace(id: string): TraceRecord | null {
     return this.traces.get(id);
   }
 
-  appendTraceEvent(event: Record<string, any>) {
+  appendTraceEvent(event: Record<string, unknown>): TraceEventRecord {
     return this.traces.appendEvent(event);
   }
 
-  listTraceEvents(traceId: string) {
+  listTraceEvents(traceId: string): TraceEventRecord[] {
     return this.traces.listEvents(traceId);
   }
 
-  createWorkspace(workspace: Record<string, any>) {
+  createWorkspace(workspace: WorkspaceRecord): WorkspaceRecord {
     return this.workspaces.create(workspace);
   }
 
-  getWorkspace(id: string) {
+  getWorkspace(id: string): WorkspaceRecord | null {
     return this.workspaces.get(id);
   }
 
-  getWorkspaceByTask(taskId: string) {
+  getWorkspaceByTask(taskId: string): WorkspaceRecord | null {
     return this.workspaces.getByTask(taskId);
   }
 
-  putWorkspaceProfile(profile: Record<string, any>) {
+  putWorkspaceProfile(profile: WorkspaceProfile): WorkspaceProfile {
     return this.workspaces.putProfile(profile);
   }
 
-  getWorkspaceProfileByName(name: string) {
+  getWorkspaceProfileByName(name: string): WorkspaceProfile | null {
     return this.workspaces.getProfileByName(name);
   }
 
-  listWorkspaceProfiles() {
+  listWorkspaceProfiles(): WorkspaceProfile[] {
     return this.workspaces.listProfiles();
   }
 
-  createArtifact(artifact: Record<string, any>) {
+  createArtifact(artifact: Record<string, unknown>): ArtifactReference {
     return this.artifacts.create(artifact);
   }
 
-  listArtifactsForTask(taskId: string) {
+  listArtifactsForTask(taskId: string): ArtifactReference[] {
     return this.artifacts.listForTask(taskId);
   }
 
@@ -143,27 +157,27 @@ export class ControlPlaneStore {
     return this.memory.listPolicies();
   }
 
-  putSkill(skill: Record<string, any>) {
+  putSkill(skill: SkillDefinition): SkillDefinition {
     return this.skills.put(skill);
   }
 
-  getSkill(name: string) {
+  getSkill(name: string): SkillDefinition | null {
     return this.skills.get(name);
   }
 
-  listSkills() {
+  listSkills(): SkillDefinition[] {
     return this.skills.list();
   }
 
-  putWatchRule(watchRule: Record<string, any>) {
+  putWatchRule(watchRule: WatchRule | Record<string, unknown>): WatchRule {
     return this.watches.put(watchRule);
   }
 
-  getWatchRule(id: string) {
+  getWatchRule(id: string): WatchRule | null {
     return this.watches.get(id);
   }
 
-  listWatchRules() {
+  listWatchRules(): WatchRule[] {
     return this.watches.list();
   }
 
@@ -171,23 +185,23 @@ export class ControlPlaneStore {
     return this.watches.delete(id);
   }
 
-  createDraft(draft: Record<string, any>) {
-    return this.drafts.create(draft);
+  createDraft(draft: DraftRecord | Record<string, unknown>): DraftRecord {
+    return this.drafts.create(draft) as DraftRecord;
   }
 
-  updateDraft(id: string, patch: Record<string, any>) {
-    return this.drafts.update(id, patch);
+  updateDraft(id: string, patch: Partial<DraftRecord>): DraftRecord | null {
+    return this.drafts.update(id, patch) as DraftRecord | null;
   }
 
-  getDraft(id: string) {
-    return this.drafts.get(id);
+  getDraft(id: string): DraftRecord | null {
+    return this.drafts.get(id) as DraftRecord | null;
   }
 
-  listDrafts(limit = 50) {
-    return this.drafts.list(limit);
+  listDrafts(limit = 50): DraftRecord[] {
+    return this.drafts.list(limit) as DraftRecord[];
   }
 
-  putVaultEntry(entry: Record<string, any>) {
+  putVaultEntry(entry: Record<string, unknown>) {
     return this.vault.put(entry);
   }
 

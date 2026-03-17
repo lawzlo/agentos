@@ -1,9 +1,11 @@
 import type { DraftRecord, TaskSnapshot, WatchHealth, WatchRule } from "../types/runtime-schema.js";
 
-type LooseWatchRule = WatchRule | Record<string, any>;
-type LooseDraftRecord = DraftRecord | Record<string, any>;
+export interface DecoratedDraftRecord extends DraftRecord {
+  watch: WatchRule | null;
+  task: TaskSnapshot | null;
+}
 
-export function buildWatchHealth(rule: LooseWatchRule | null): WatchHealth | null {
+export function buildWatchHealth(rule: WatchRule | null): WatchHealth | null {
   if (!rule) {
     return null;
   }
@@ -35,7 +37,7 @@ export function buildWatchHealth(rule: LooseWatchRule | null): WatchHealth | nul
   };
 }
 
-export function decorateWatchRule(rule: LooseWatchRule | null): WatchRule | LooseWatchRule | null {
+export function decorateWatchRule(rule: WatchRule | null): WatchRule | null {
   if (!rule) {
     return null;
   }
@@ -47,7 +49,7 @@ export function decorateWatchRule(rule: LooseWatchRule | null): WatchRule | Loos
 }
 
 export function decorateDraft(
-  draft: LooseDraftRecord | null,
+  draft: DraftRecord | null,
   {
     getWatchRule,
     getTask
@@ -55,7 +57,7 @@ export function decorateDraft(
     getWatchRule: (watchRuleId: string) => WatchRule | null;
     getTask: (taskId: string) => TaskSnapshot | null;
   }
-) {
+): DecoratedDraftRecord | null {
   if (!draft) {
     return null;
   }

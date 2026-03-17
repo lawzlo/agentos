@@ -1,43 +1,100 @@
 import { buildTeachRecording } from "./teach-recorder.js";
 import { ExecutionStoppedError } from "./errors.js";
+import type { AutonomyAgent } from "./agents/autonomy.js";
+import type { OperatorAgent } from "./agents/operator.js";
+import type { PlannerAgent } from "./agents/planner.js";
+import type { RecoveryAgent } from "./agents/recovery.js";
+import type { VerifierAgent } from "./agents/verifier.js";
+import type { ControlPlane } from "./control-plane.js";
+import type { EventBus } from "./event-bus.js";
+import type { ExecutionController } from "./execution-controller.js";
+import type { MemoryStore } from "./memory-store.js";
+import type { PolicyEngine } from "./policy-engine.js";
+import type { SurfaceRegistry } from "./surface-registry.js";
+import type { ControlPlaneStore } from "./store.js";
+import type { TraceStore } from "./trace-store.js";
+import type { WatchScheduler } from "./watch-scheduler.js";
+import type { WorkspaceManager } from "./workspace-manager.js";
 import type { TaskRecord, TaskSnapshot, TaskSpec } from "../types/runtime-schema.js";
 
+interface RuntimeConnector {
+  start(): Promise<void>;
+  stop?(): Promise<void>;
+}
+
+interface RecoveryDecision {
+  decision: string;
+  classification?: string;
+  nextAction?: string;
+}
+
+type RuntimeResult = Record<string, unknown> & {
+  verification?: Record<string, unknown>;
+  outputs?: Record<string, unknown>;
+  steps?: unknown[];
+  summary?: string | null;
+  manualTeachSteps?: unknown[];
+  manualCorrections?: unknown[];
+};
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function errorName(error: unknown): string | null {
+  return error instanceof Error ? error.name : null;
+}
+
+function errorDetails(error: unknown): Record<string, unknown> | null {
+  if (error && typeof error === "object" && "details" in error) {
+    const details = (error as { details?: unknown }).details;
+    if (details && typeof details === "object") {
+      return details as Record<string, unknown>;
+    }
+  }
+
+  return null;
+}
+
 interface RuntimeSupervisorOptions {
-  controlPlane: any;
-  store: any;
-  traceStore: any;
-  eventBus: any;
-  executionController: any;
-  workspaceManager: any;
-  policyEngine: any;
-  autonomy: any;
-  planner: any;
-  operator: any;
-  verifier: any;
-  recovery: any;
-  memoryStore: any;
-  watchScheduler: any;
-  connectors: Array<{ start(): Promise<void>; stop?(): Promise<void> }>;
-  surfaceRegistry: { shutdown(): Promise<void> };
+  controlPlane: Pick<
+    ControlPlane,
+    "mergePersistedResult" | "getTask" | "decorateTask" | "controlTask" | "saveTaskAsSkill" | "saveTaskAsWatchRule"
+  >;
+  store: Pick<ControlPlaneStore, "listTasksByStatuses" | "updateTask" | "getTask" | "updateTrace" | "close">;
+  traceStore: TraceStore;
+  eventBus: EventBus;
+  executionController: ExecutionController;
+  workspaceManager: WorkspaceManager;
+  policyEngine: PolicyEngine;
+  autonomy: AutonomyAgent;
+  planner: PlannerAgent;
+  operator: OperatorAgent;
+  verifier: VerifierAgent;
+  recovery: RecoveryAgent;
+  memoryStore: MemoryStore;
+  watchScheduler: WatchScheduler;
+  connectors: RuntimeConnector[];
+  surfaceRegistry: SurfaceRegistry;
 }
 
 export class RuntimeSupervisor {
-  controlPlane: any;
-  store: any;
-  traceStore: any;
-  eventBus: any;
-  executionController: any;
-  workspaceManager: any;
-  policyEngine: any;
-  autonomy: any;
-  planner: any;
-  operator: any;
-  verifier: any;
-  recovery: any;
-  memoryStore: any;
-  watchScheduler: any;
-  connectors: Array<{ start(): Promise<void>; stop?(): Promise<void> }>;
-  surfaceRegistry: { shutdown(): Promise<void> };
+  controlPlane: RuntimeSupervisorOptions["controlPlane"];
+  store: RuntimeSupervisorOptions["store"];
+  traceStore: TraceStore;
+  eventBus: EventBus;
+  executionController: ExecutionController;
+  workspaceManager: WorkspaceManager;
+  policyEngine: PolicyEngine;
+  autonomy: AutonomyAgent;
+  planner: PlannerAgent;
+  operator: OperatorAgent;
+  verifier: VerifierAgent;
+  recovery: RecoveryAgent;
+  memoryStore: MemoryStore;
+  watchScheduler: WatchScheduler;
+  connectors: RuntimeConnector[];
+  surfaceRegistry: SurfaceRegistry;
   queue: string[];
   running: boolean;
 
@@ -179,12 +236,12 @@ export class RuntimeSupervisor {
   }: {
     taskId: string;
     traceId: string;
-    error: Error;
+    error: unknown;
     decision: { classification?: string; nextAction?: string };
   }) {
     this.controlPlane.controlTask(taskId, "request_takeover", {
       source: "recovery",
-      reason: `Recovery requested takeover: ${error.message}`
+      reason: `Recovery requested takeover: ${errorMessage(error)}`
     });
 
     this.traceStore.log({
@@ -206,7 +263,7 @@ export class RuntimeSupervisor {
     });
   }
 
-  async drain() {
+  async drain(): Promise<void> {
     if (this.running) {
       return;
     }
@@ -216,10 +273,10 @@ export class RuntimeSupervisor {
       const taskId = this.queue.shift();
       try {
         await this.runTask(taskId);
-      } catch (error: any) {
+      } catch (error: unknown) {
         const task = this.store.updateTask(taskId, {
           status: "failed",
-          error: error.message
+          error: errorMessage(error)
         });
         this.eventBus.broadcast("task.updated", this.controlPlane.decorateTask(task));
       }
@@ -227,8 +284,8 @@ export class RuntimeSupervisor {
     this.running = false;
   }
 
-  async runTask(taskId: string) {
-    let task = this.store.getTask(taskId) as TaskRecord | null;
+  async runTask(taskId: string): Promise<void> {
+    let task = this.store.getTask(taskId);
     if (!task) {
       return;
     }
@@ -273,7 +330,7 @@ export class RuntimeSupervisor {
           task = this.store.updateTask(taskId, { status: "planning", error: null });
           this.eventBus.broadcast("task.updated", this.controlPlane.getTask(taskId));
 
-          let result;
+          let result: RuntimeResult;
           const controlGate = async ({ phase, step }: { phase: string; step?: { id?: string } | null }) =>
             this.waitForExecutionAccess({
               taskId,
@@ -285,8 +342,9 @@ export class RuntimeSupervisor {
           const taskSpec = task.taskSpec as TaskSpec;
 
           if (this.autonomy.isEnabled(taskSpec)) {
+            const autonomySurface = task.preferredSurface === "auto" ? "browser" : task.preferredSurface;
             this.store.updateTask(taskId, {
-              plan: [{ id: "autonomy", label: "Autonomous loop", surface: task.preferredSurface, action: "autonomy" }],
+              plan: [{ id: "autonomy", label: "Autonomous loop", surface: autonomySurface, action: "autonomy" }],
               status: "running"
             });
             this.traceStore.log({
@@ -360,7 +418,7 @@ export class RuntimeSupervisor {
             };
           }
 
-          result = this.controlPlane.mergePersistedResult(taskId, result);
+          result = this.controlPlane.mergePersistedResult(taskId, result) as RuntimeResult;
           result = {
             ...result,
             teachRecording: buildTeachRecording({
@@ -394,12 +452,8 @@ export class RuntimeSupervisor {
             this.controlPlane.saveTaskAsWatchRule(taskId, taskSpec.saveWatchAs);
           }
 
-          const manualTeachSteps = Array.isArray((task.result as Record<string, unknown> | null)?.manualTeachSteps)
-            ? ((task.result as Record<string, unknown>).manualTeachSteps as unknown[])
-            : [];
-          const manualCorrections = Array.isArray((task.result as Record<string, unknown> | null)?.manualCorrections)
-            ? ((task.result as Record<string, unknown>).manualCorrections as unknown[])
-            : [];
+          const manualTeachSteps = Array.isArray(task.result?.manualTeachSteps) ? task.result.manualTeachSteps : [];
+          const manualCorrections = Array.isArray(task.result?.manualCorrections) ? task.result.manualCorrections : [];
           if (task.triggerSource?.startsWith("watch:") && (manualTeachSteps.length || manualCorrections.length)) {
             this.controlPlane.saveTaskAsWatchRule(taskId, {
               watchRuleId: task.triggerSource.slice("watch:".length)
@@ -407,12 +461,12 @@ export class RuntimeSupervisor {
           }
 
           return;
-        } catch (error: any) {
+        } catch (error: unknown) {
           if (error instanceof ExecutionStoppedError) {
             task = this.store.updateTask(taskId, {
               status: "failed",
               error: error.message,
-              result: this.controlPlane.mergePersistedResult(taskId, { details: error.details ?? null })
+              result: this.controlPlane.mergePersistedResult(taskId, { details: errorDetails(error) })
             });
             this.traceStore.finish(trace.id, task.status, error.message, task.result);
             this.eventBus.broadcast("task.updated", this.controlPlane.getTask(taskId));
@@ -424,7 +478,7 @@ export class RuntimeSupervisor {
             traceId: trace.id,
             attempt,
             error
-          });
+          }) as RecoveryDecision;
 
           if (decision.decision === "retry" && attempt < 1) {
             this.traceStore.log({
@@ -457,24 +511,27 @@ export class RuntimeSupervisor {
                 decision
               });
               continue;
-            } catch (controlError: any) {
+            } catch (controlError: unknown) {
               task = this.store.updateTask(taskId, {
                 status: "failed",
-                error: controlError.message,
-                result: this.controlPlane.mergePersistedResult(taskId, { details: controlError.details ?? null })
+                error: errorMessage(controlError),
+                result: this.controlPlane.mergePersistedResult(taskId, { details: errorDetails(controlError) })
               });
-              this.traceStore.finish(trace.id, task.status, controlError.message, task.result);
+              this.traceStore.finish(trace.id, task.status, errorMessage(controlError), task.result);
               this.eventBus.broadcast("task.updated", this.controlPlane.getTask(taskId));
               return;
             }
           }
 
           task = this.store.updateTask(taskId, {
-            status: error.name === "PolicyError" || decision.decision === "takeover" ? "blocked" : "failed",
-            error: error.message,
-            result: this.controlPlane.mergePersistedResult(taskId, { details: error.details ?? null, recovery: decision })
+            status: errorName(error) === "PolicyError" || decision.decision === "takeover" ? "blocked" : "failed",
+            error: errorMessage(error),
+            result: this.controlPlane.mergePersistedResult(taskId, {
+              details: errorDetails(error),
+              recovery: decision
+            })
           });
-          this.traceStore.finish(trace.id, task.status, error.message, task.result);
+          this.traceStore.finish(trace.id, task.status, errorMessage(error), task.result);
           this.eventBus.broadcast("task.updated", this.controlPlane.getTask(taskId));
           return;
         }

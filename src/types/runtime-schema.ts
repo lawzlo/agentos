@@ -121,6 +121,39 @@ export interface TaskSnapshot extends TaskRecord {
   runtimeControl: RuntimeControlState | null;
 }
 
+export interface EventRecord {
+  id: string;
+  type: string;
+  source: string;
+  taskId: string | null;
+  payload: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface WorkspaceRecord {
+  id: string;
+  taskId: string;
+  rootPath: string;
+  profilePath: string;
+  downloadsPath: string;
+  artifactsPath: string;
+  scratchPath: string;
+  createdAt: string;
+}
+
+export interface WorkspaceProfile {
+  id: string;
+  name: string;
+  rootPath: string;
+  profilePath: string;
+  downloadsPath: string;
+  artifactsPath: string;
+  scratchPath: string;
+  metadata: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface OcrBlock {
   id: string;
   text: string;
@@ -204,6 +237,17 @@ export interface WatchProfile {
     dynamicInputKeys?: string[];
   };
   metadata?: Record<string, unknown>;
+}
+
+export interface WatchDetection {
+  fingerprint?: string;
+  summary?: string | null;
+  goal?: string | null;
+  text?: string | null;
+  inputs?: Record<string, unknown>;
+  taskSpec?: Partial<TaskSpec> | null;
+  replyText?: string | null;
+  context?: string[];
 }
 
 export interface TeachTemplateInput {

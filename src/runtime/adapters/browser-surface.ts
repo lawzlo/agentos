@@ -1,9 +1,12 @@
 import path from "node:path";
 import { chromium } from "playwright-core";
+import type { BrowserContext, Locator, Page } from "playwright-core";
 
 import { SurfaceAdapter } from "./surface-adapter.js";
 import { RecoverableError } from "../errors.js";
 import { createInteractionCandidate, createWorldState, summarizeRecentActions } from "../world-state.js";
+import type { ArtifactStore } from "../artifact-store.js";
+import type { WorkspaceRecord } from "../../types/runtime-schema.js";
 
 function escapeSelectorValue(value) {
   return String(value ?? "").replaceAll("\\", "\\\\").replaceAll("\"", '\\"');
@@ -37,11 +40,19 @@ async function locateElement(page, params) {
 }
 
 export class BrowserSurfaceAdapter extends SurfaceAdapter {
-  artifactStore: any;
-  browserExecutable: any;
+  artifactStore: ArtifactStore;
+  browserExecutable: string | null;
   headless: boolean;
-  contexts: any;
-  constructor({ artifactStore, browserExecutable, headless }: { artifactStore: any; browserExecutable: string | null; headless: boolean }) {
+  contexts: Map<string, BrowserContext>;
+  constructor({
+    artifactStore,
+    browserExecutable,
+    headless
+  }: {
+    artifactStore: ArtifactStore;
+    browserExecutable: string | null;
+    headless: boolean;
+  }) {
     super("browser");
     this.artifactStore = artifactStore;
     this.browserExecutable = browserExecutable;
@@ -49,7 +60,7 @@ export class BrowserSurfaceAdapter extends SurfaceAdapter {
     this.contexts = new Map();
   }
 
-  async #getContext(workspace) {
+  async #getContext(workspace: WorkspaceRecord): Promise<BrowserContext> {
     if (this.contexts.has(workspace.id)) {
       return this.contexts.get(workspace.id);
     }
@@ -71,13 +82,13 @@ export class BrowserSurfaceAdapter extends SurfaceAdapter {
     return context;
   }
 
-  async #page(workspace) {
+  async #page(workspace: WorkspaceRecord): Promise<Page> {
     const context = await this.#getContext(workspace);
     const existing = context.pages()[0];
     return existing ?? context.newPage();
   }
 
-  async #collectCandidates(page) {
+  async #collectCandidates(page: Page) {
     const rawCandidates = await page
       .locator("button, a[href], input, textarea, select, [role='button'], [role='textbox'], [contenteditable='true']")
       .evaluateAll((nodes) =>
@@ -128,13 +139,24 @@ export class BrowserSurfaceAdapter extends SurfaceAdapter {
       );
   }
 
-  async #resolveLocatorFromTarget(page, target) {
-    const hints = target?.sourceHints ?? {};
+  async #resolveLocatorFromTarget(
+    page: Page,
+    target: Record<string, unknown> | null | undefined
+  ): Promise<Locator | null> {
+    const targetText = typeof target?.text === "string" ? target.text : "";
+    const hints = (target?.sourceHints ?? {}) as {
+      ariaLabel?: string;
+      placeholder?: string;
+      name?: string;
+      title?: string;
+      tag?: string;
+      href?: string;
+    };
     const locators = [];
 
-    if (target?.text) {
-      locators.push(page.getByText(target.text, { exact: true }).first());
-      locators.push(page.getByText(target.text, { exact: false }).first());
+    if (targetText) {
+      locators.push(page.getByText(targetText, { exact: true }).first());
+      locators.push(page.getByText(targetText, { exact: false }).first());
     }
 
     if (hints.ariaLabel) {
@@ -168,7 +190,7 @@ export class BrowserSurfaceAdapter extends SurfaceAdapter {
     return null;
   }
 
-  async #clickByBounds(page, bounds) {
+  async #clickByBounds(page: Page, bounds?: { centerX?: number; centerY?: number } | null) {
     if (!bounds) {
       return false;
     }
@@ -374,19 +396,25 @@ export class BrowserSurfaceAdapter extends SurfaceAdapter {
     }
   }
 
-  async verify({ workspace, expectation = {} }: { workspace: any; expectation?: any }) {
+  async verify({
+    workspace,
+    expectation = {}
+  }: {
+    workspace: WorkspaceRecord;
+    expectation?: Record<string, unknown>;
+  }) {
     const page = await this.#page(workspace);
-    const details: Record<string, any> = {};
-    const check = expectation as Record<string, any>;
+    const details: Record<string, unknown> = {};
+    const check = expectation;
 
-    if (check.urlIncludes) {
+    if (typeof check.urlIncludes === "string" && check.urlIncludes) {
       details.url = page.url();
       if (!page.url().includes(check.urlIncludes)) {
         return { ok: false, details };
       }
     }
 
-    if (check.selectorVisible) {
+    if (typeof check.selectorVisible === "string" && check.selectorVisible) {
       const visible = await page.locator(check.selectorVisible).first().isVisible().catch(() => false);
       details.selectorVisible = visible;
       if (!visible) {
@@ -394,7 +422,7 @@ export class BrowserSurfaceAdapter extends SurfaceAdapter {
       }
     }
 
-    if (check.textVisible) {
+    if (typeof check.textVisible === "string" && check.textVisible) {
       const visible = await page.getByText(check.textVisible, { exact: false }).first().isVisible().catch(() => false);
       details.textVisible = visible;
       if (!visible) {
@@ -402,18 +430,20 @@ export class BrowserSurfaceAdapter extends SurfaceAdapter {
       }
     }
 
-    if (check.targetVisible?.text) {
-      const visible = await page.getByText(check.targetVisible.text, { exact: false }).first().isVisible().catch(() => false);
+    const targetVisible = check.targetVisible as { text?: string } | undefined;
+    if (typeof targetVisible?.text === "string" && targetVisible.text) {
+      const visible = await page.getByText(targetVisible.text, { exact: false }).first().isVisible().catch(() => false);
       details.targetVisible = visible;
       if (!visible) {
         return { ok: false, details };
       }
     }
 
-    if (check.selectorText) {
-      const content = (await page.locator(check.selectorText.selector).textContent())?.trim() ?? "";
+    const selectorText = check.selectorText as { selector?: string; equals?: string } | undefined;
+    if (typeof selectorText?.selector === "string" && selectorText.selector) {
+      const content = (await page.locator(selectorText.selector).textContent())?.trim() ?? "";
       details.selectorText = content;
-      if (content !== check.selectorText.equals) {
+      if (content !== selectorText.equals) {
         return { ok: false, details };
       }
     }

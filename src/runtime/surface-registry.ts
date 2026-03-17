@@ -1,14 +1,19 @@
+import type { SurfaceAdapter } from "./adapters/surface-adapter.js";
+
+export type SurfaceName = "browser" | "desktop";
+
 export class SurfaceRegistry {
-  surfaces: any;
-  constructor(surfaces) {
+  surfaces: Map<string, SurfaceAdapter>;
+
+  constructor(surfaces: Record<string, SurfaceAdapter>) {
     this.surfaces = new Map(Object.entries(surfaces));
   }
 
-  get(name) {
-    return this.surfaces.get(name);
+  get<TSurface extends SurfaceAdapter = SurfaceAdapter>(name: string): TSurface | undefined {
+    return this.surfaces.get(name) as TSurface | undefined;
   }
 
-  async shutdown() {
+  async shutdown(): Promise<void> {
     for (const surface of this.surfaces.values()) {
       await surface.shutdown();
     }

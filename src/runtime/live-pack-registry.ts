@@ -1,4 +1,62 @@
 import crypto from "node:crypto";
+import type { ControlPlane } from "./control-plane.js";
+import type { SurfaceRegistry } from "./surface-registry.js";
+import type {
+  LivePackInfo,
+  TaskRecord,
+  WatchDetection,
+  WatchRule,
+  WorldState,
+  WorkspaceProfile
+} from "../types/runtime-schema.js";
+
+interface LivePackControlPlane extends Pick<ControlPlane, "modelClient" | "surfaceRegistry"> {}
+
+interface LivePackActivationArgs {
+  rule: WatchRule;
+  workspace: WorkspaceProfile;
+  surfaceRegistry: SurfaceRegistry;
+  controlPlane: LivePackControlPlane;
+}
+
+interface LivePackObserveArgs extends LivePackActivationArgs {}
+
+interface LivePackDetectionArgs extends LivePackActivationArgs {
+  worldState: WorldState | null;
+  dedupeState?: Record<string, unknown>;
+}
+
+interface LivePackExtractContextArgs extends LivePackDetectionArgs {
+  detection: WatchDetection;
+}
+
+interface LivePackDraftArgs {
+  rule: WatchRule;
+  detection: WatchDetection;
+  controlPlane: LivePackControlPlane;
+}
+
+interface LivePackMarkHandledArgs {
+  rule: WatchRule;
+  task: TaskRecord;
+  controlPlane: LivePackControlPlane;
+}
+
+export interface LivePackDraftResponse {
+  replyText: string;
+  metadata: Record<string, unknown>;
+}
+
+export interface LivePack {
+  name: string;
+  info: LivePackInfo;
+  activate?(args: LivePackActivationArgs): Promise<void>;
+  observeInbox?(args: LivePackObserveArgs): Promise<WorldState | null>;
+  detectNewItems?(args: LivePackDetectionArgs): Promise<WatchDetection | null>;
+  extractContext?(args: LivePackExtractContextArgs): Promise<Partial<WatchDetection> | null>;
+  draftReply?(args: LivePackDraftArgs): Promise<LivePackDraftResponse>;
+  markHandled?(args: LivePackMarkHandledArgs): Promise<void>;
+}
 
 function uniqueStrings(values = []) {
   const seen = new Set();
@@ -181,7 +239,7 @@ function createVisualDesktopPack({
   defaultTriggerTexts?: string[];
   unreadTokens?: string[];
   ignoreTokens?: string[];
-}) {
+}): LivePack {
   return {
     name,
     info: {
@@ -195,6 +253,9 @@ function createVisualDesktopPack({
     async activate({ rule, workspace, surfaceRegistry }) {
       if (rule.appTarget && rule.preferredSurface === "desktop") {
         const desktop = surfaceRegistry.get("desktop");
+        if (!desktop) {
+          return;
+        }
         await desktop
           .act({
             task: { id: `watch-${rule.id}`, goal: rule.goal },
@@ -211,6 +272,9 @@ function createVisualDesktopPack({
     },
     async observeInbox({ rule, workspace, surfaceRegistry }) {
       const surface = surfaceRegistry.get(rule.preferredSurface ?? "desktop");
+      if (!surface) {
+        return null;
+      }
       return surface.observe({
         task: { id: `watch-${rule.id}`, goal: rule.goal },
         workspace,
@@ -218,7 +282,7 @@ function createVisualDesktopPack({
         label: `watch-${rule.id}`
       });
     },
-    async detectNewItems({ rule, worldState, dedupeState = {} as Record<string, any> }) {
+    async detectNewItems({ rule, worldState, dedupeState = {} }) {
       const lines = visibleLines(worldState);
       const matchedSignal = bestSignalMatch({
         worldState,
@@ -305,9 +369,16 @@ function createVisualDesktopPack({
 }
 
 export class LivePackRegistry {
-  surfaceRegistry: any;
-  packs: Map<string, any>;
-  constructor({ surfaceRegistry, extraPacks = {} as Record<string, any> }: { surfaceRegistry?: any; extraPacks?: Record<string, any> } = {}) {
+  surfaceRegistry: SurfaceRegistry | undefined;
+  packs: Map<string, LivePack>;
+
+  constructor({
+    surfaceRegistry,
+    extraPacks = {}
+  }: {
+    surfaceRegistry?: SurfaceRegistry;
+    extraPacks?: Record<string, LivePack>;
+  } = {}) {
     this.surfaceRegistry = surfaceRegistry;
     this.packs = new Map();
 
@@ -346,25 +417,25 @@ export class LivePackRegistry {
     }
 
     for (const [name, pack] of Object.entries(extraPacks ?? {})) {
-      this.register(name, { name, ...(pack as Record<string, any>) });
+      this.register(name, { name, ...pack });
     }
   }
 
-  register(name: string, pack: any) {
+  register(name: string, pack: LivePack): void {
     this.packs.set(name, pack);
   }
 
-  get(name: string) {
-    return this.packs.get(name);
+  get(name: string): LivePack | null {
+    return this.packs.get(name) ?? null;
   }
 
-  list() {
+  list(): string[] {
     return [...this.packs.keys()].sort();
   }
 
-  listInfo() {
+  listInfo(): LivePackInfo[] {
     return [...this.packs.values()]
-      .map((pack) => pack.info ?? { name: pack.name, family: "generic", surface: "desktop", supportsDrafts: false, supportsAutoSend: false, description: pack.name })
+      .map((pack) => pack.info)
       .sort((left, right) => String(left.name).localeCompare(String(right.name)));
   }
 }

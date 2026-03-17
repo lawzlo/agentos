@@ -32,13 +32,17 @@ import type { AgentOsConfig } from "../config.js";
 import type {
   ConnectorStatus,
   DraftRecord,
+  EventRecord,
   LivePackInfo,
+  RiskGateDecision,
   RuntimeStep,
   SkillDefinition,
   TaskRecord,
   TaskSnapshot,
   TaskSpec,
+  TeachRecording,
   TraceSnapshot,
+  WatchDetection,
   WatchHealth,
   WatchRule
 } from "../types/runtime-schema.js";
@@ -57,10 +61,20 @@ interface WatchDraftInput {
   watchRule?: WatchRule | null;
   taskSpec: TaskSpec;
   detection?: Record<string, unknown>;
-  riskDecision: Record<string, unknown>;
+  riskDecision: RiskGateDecision;
   replyText?: string | null;
   summary?: string | null;
   metadata?: Record<string, unknown>;
+}
+
+interface IncomingEvent {
+  id?: string;
+  type?: string;
+  source?: string;
+  taskId?: string | null;
+  payload?: Record<string, unknown> & {
+    taskSpec?: TaskSpec;
+  };
 }
 
 export class ControlPlane {
@@ -153,7 +167,7 @@ export class ControlPlane {
     ];
     this.livePackRegistry = new LivePackRegistry({
       surfaceRegistry: this.surfaceRegistry,
-      extraPacks: config.livePacks ?? {}
+      extraPacks: (config.livePacks ?? {}) as Record<string, import("./live-pack-registry.js").LivePack>
     });
     this.watchExecutionService = new WatchExecutionService({
       controlPlane: this,
@@ -287,17 +301,14 @@ export class ControlPlane {
       executionSteps: Array.isArray(task.result?.steps) ? task.result.steps : [],
       manualCorrections: Array.isArray(task.result?.manualCorrections) ? task.result.manualCorrections : [],
       manualTeachSteps: Array.isArray(task.result?.manualTeachSteps) ? task.result.manualTeachSteps : [],
-      teachRecording: (task.result?.teachRecording ?? null) as any
+      teachRecording: (task.result?.teachRecording ?? null) as TeachRecording | null
     });
 
     this.eventBus.broadcast("skill.saved", skill);
     return skill;
   }
 
-  saveTaskAsWatchRule(
-    taskId,
-    options = {}
-  ) {
+  saveTaskAsWatchRule(taskId: string, options: Record<string, unknown> = {}) {
     return this.watchService.saveTaskAsWatchRule(taskId, options);
   }
 
@@ -305,7 +316,7 @@ export class ControlPlane {
     return this.workspaceManager.listProfiles();
   }
 
-  prepareWorkspaceProfile(name, metadata = {}) {
+  prepareWorkspaceProfile(name: string, metadata: Record<string, unknown> = {}) {
     return this.workspaceManager.prepareProfile(name, metadata);
   }
 
@@ -387,7 +398,12 @@ export class ControlPlane {
 
   async #collectNativeDiagnostics(): Promise<NativeDiagnostics> {
     const desktopSurface = this.surfaceRegistry.get("desktop");
-    const bridge = desktopSurface?.bridge;
+    const bridge = (desktopSurface as { bridge?: Record<string, unknown> } | undefined)?.bridge as
+      | {
+          sidecarHealth?: () => Promise<SidecarHealthResult>;
+          getPermissionsStatus?: () => Promise<SidecarPermissionsResult | null>;
+        }
+      | undefined;
     if (!bridge || typeof bridge.sidecarHealth !== "function") {
       return {
         available: false,
@@ -485,10 +501,10 @@ export class ControlPlane {
     return this.credentialVault.getSecret(scope, secretKey);
   }
 
-  mergePersistedResult(taskId, nextResult = {}) {
+  mergePersistedResult(taskId: string, nextResult: Record<string, unknown> = {}) {
     const current = this.store.getTask(taskId);
-    const manualCorrections = current?.result?.manualCorrections ?? [];
-    const manualTeachSteps = current?.result?.manualTeachSteps ?? [];
+    const manualCorrections = Array.isArray(current?.result?.manualCorrections) ? current.result.manualCorrections : [];
+    const manualTeachSteps = Array.isArray(current?.result?.manualTeachSteps) ? current.result.manualTeachSteps : [];
 
     if (!manualCorrections.length && !manualTeachSteps.length) {
       return nextResult;
@@ -575,7 +591,10 @@ export class ControlPlane {
     const updated = this.store.updateTask(taskId, {
       result: {
         ...(task.result ?? {}),
-        manualTeachSteps: [...(task.result?.manualTeachSteps ?? []), normalizedStep]
+        manualTeachSteps: [
+          ...(Array.isArray(task.result?.manualTeachSteps) ? task.result.manualTeachSteps : []),
+          normalizedStep
+        ]
       }
     }) as TaskRecord | null;
 
@@ -720,8 +739,8 @@ export class ControlPlane {
     };
   }
 
-  async ingestEvent(event: Record<string, any>) {
-    const stored = this.store.createEvent(event);
+  async ingestEvent(event: IncomingEvent) {
+    const stored = this.store.createEvent(event as Record<string, unknown>);
     this.eventBus.broadcast("event.created", stored);
 
     if (event.payload?.taskSpec) {
@@ -730,7 +749,14 @@ export class ControlPlane {
         ...event.payload.taskSpec
       };
       const task = await this.createTask(taskSpec);
-      const linked = this.store.attachEventTask(stored.id, task.id);
+      const linked = this.store.attachEventTask(stored.id, task.id) as {
+        id: string;
+        type: string;
+        source: string;
+        task_id: string | null;
+        payload: string;
+        created_at: string;
+      };
       return {
         event: {
           id: linked.id,
@@ -749,10 +775,10 @@ export class ControlPlane {
 
   buildTaskSpecFromWatchRule(
     watchRule: WatchRule,
-    detection: Record<string, unknown> = {},
+    detection: WatchDetection = {},
     overrides: Record<string, unknown> = {}
   ): TaskSpec {
-    return this.watchExecutionService.buildTaskSpecFromWatchRule(watchRule as any, detection, overrides);
+    return this.watchExecutionService.buildTaskSpecFromWatchRule(watchRule, detection, overrides);
   }
 
   async draftWatchReply({
@@ -761,18 +787,18 @@ export class ControlPlane {
     pack
   }: {
     watchRule: WatchRule;
-    detection: Record<string, unknown>;
-    pack: unknown;
+    detection: WatchDetection;
+    pack: Parameters<WatchExecutionService["draftReply"]>[0]["pack"];
   }) {
-    return this.watchExecutionService.draftReply({ watchRule: watchRule as any, detection, pack });
+    return this.watchExecutionService.draftReply({ watchRule, detection, pack });
   }
 
   async createTaskFromWatchRule(
     watchRule: WatchRule,
-    detection: Record<string, unknown> = {},
+    detection: WatchDetection = {},
     options: Record<string, unknown> = {}
   ) {
-    return this.watchExecutionService.createTaskFromWatchRule(watchRule as any, detection, options);
+    return this.watchExecutionService.createTaskFromWatchRule(watchRule, detection, options);
   }
 
   async shutdown() {

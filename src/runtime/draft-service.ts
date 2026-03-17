@@ -1,12 +1,41 @@
 import { decorateDraft } from "./watch-presenters.js";
+import type { EventBus } from "./event-bus.js";
+import type { ControlPlaneStore } from "./store.js";
+import type { DecoratedDraftRecord } from "./watch-presenters.js";
+import type {
+  DraftRecord,
+  RiskGateDecision,
+  TaskSnapshot,
+  TaskSpec,
+  WatchRule
+} from "../types/runtime-schema.js";
+
+interface DraftCreateInput {
+  watchRule?: WatchRule | null;
+  taskSpec: TaskSpec;
+  detection?: Record<string, unknown>;
+  riskDecision: RiskGateDecision;
+  replyText?: string | null;
+  summary?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+interface DraftServiceOptions {
+  store: ControlPlaneStore;
+  eventBus: EventBus;
+  createTask: (taskSpec: TaskSpec) => Promise<{ id: string }>;
+  getTask: (taskId: string) => TaskSnapshot | null;
+  getWatchRule: (watchRuleId: string) => WatchRule | null;
+  decorateWatchRule: (watchRule: WatchRule | null) => WatchRule | null;
+}
 
 export class DraftService {
-  store: any;
-  eventBus: any;
-  createTask: any;
-  getTask: any;
-  getWatchRule: any;
-  decorateWatchRule: any;
+  store: ControlPlaneStore;
+  eventBus: EventBus;
+  createTask: DraftServiceOptions["createTask"];
+  getTask: DraftServiceOptions["getTask"];
+  getWatchRule: DraftServiceOptions["getWatchRule"];
+  decorateWatchRule: DraftServiceOptions["decorateWatchRule"];
 
   constructor({
     store,
@@ -15,7 +44,7 @@ export class DraftService {
     getTask,
     getWatchRule,
     decorateWatchRule
-  }: Record<string, any>) {
+  }: DraftServiceOptions) {
     this.store = store;
     this.eventBus = eventBus;
     this.createTask = createTask;
@@ -24,18 +53,18 @@ export class DraftService {
     this.decorateWatchRule = decorateWatchRule;
   }
 
-  decorate(draft: Record<string, any> | null) {
+  decorate(draft: DraftRecord | null): DecoratedDraftRecord | null {
     return decorateDraft(draft, {
       getWatchRule: this.getWatchRule,
       getTask: this.getTask
     });
   }
 
-  list(limit = 50) {
-    return this.store.listDrafts(limit).map((draft: Record<string, any>) => this.decorate(draft));
+  list(limit = 50): DecoratedDraftRecord[] {
+    return this.store.listDrafts(limit).map((draft) => this.decorate(draft)).filter(Boolean) as DecoratedDraftRecord[];
   }
 
-  get(draftId: string) {
+  get(draftId: string): DecoratedDraftRecord | null {
     return this.decorate(this.store.getDraft(draftId));
   }
 
@@ -47,7 +76,7 @@ export class DraftService {
     replyText = null,
     summary = null,
     metadata = {}
-  }: Record<string, any>) {
+  }: DraftCreateInput): DecoratedDraftRecord {
     const draft = this.store.createDraft({
       watchRuleId: watchRule?.id ?? null,
       livePack: watchRule?.livePack ?? null,
@@ -61,11 +90,14 @@ export class DraftService {
       metadata
     });
     const decorated = this.decorate(draft);
+    if (!decorated) {
+      throw new Error("Draft decoration failed after creation.");
+    }
     this.eventBus.broadcast("draft.created", decorated);
     return decorated;
   }
 
-  async approve(draftId: string) {
+  async approve(draftId: string): Promise<DecoratedDraftRecord | null> {
     const draft = this.store.getDraft(draftId);
     if (!draft) {
       throw new Error(`Draft not found: ${draftId}`);
@@ -105,7 +137,7 @@ export class DraftService {
     return decorated;
   }
 
-  reject(draftId: string, reason: string | null = null) {
+  reject(draftId: string, reason: string | null = null): DecoratedDraftRecord | null {
     const draft = this.store.getDraft(draftId);
     if (!draft) {
       throw new Error(`Draft not found: ${draftId}`);
