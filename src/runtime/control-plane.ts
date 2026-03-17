@@ -20,12 +20,12 @@ import { FileInboxConnector } from "./connectors/file-inbox.js";
 import { GroundingEngine } from "./grounding-engine.js";
 import { SkillRegistry } from "./skill-registry.js";
 import { ExecutionController } from "./execution-controller.js";
-import { ExecutionStoppedError } from "./errors.js";
 import { LivePackRegistry } from "./live-pack-registry.js";
 import { WatchScheduler } from "./watch-scheduler.js";
-import { normalizeWatchRule } from "./watch-rule-parser.js";
-import { deriveWatchProfileFromExecution, materializeWatchActionTemplate } from "./watch-profile.js";
-import { buildTeachRecording } from "./teach-recorder.js";
+import { WatchService } from "./watch-service.js";
+import { DraftService } from "./draft-service.js";
+import { WatchExecutionService } from "./watch-execution-service.js";
+import { RuntimeSupervisor } from "./runtime-supervisor.js";
 
 export class ControlPlane {
   config: any;
@@ -51,8 +51,10 @@ export class ControlPlane {
   connectors: any;
   livePackRegistry: any;
   watchScheduler: any;
-  queue: any;
-  running: any;
+  watchService: any;
+  draftService: any;
+  watchExecutionService: any;
+  runtimeSupervisor: any;
   constructor(config) {
     this.config = config;
     this.store = new ControlPlaneStore(config.dbPath);
@@ -116,25 +118,62 @@ export class ControlPlane {
       surfaceRegistry: this.surfaceRegistry,
       extraPacks: config.livePacks ?? {}
     });
-    this.watchScheduler = new WatchScheduler({
+    this.watchExecutionService = new WatchExecutionService({
       controlPlane: this,
       store: this.store,
       eventBus: this.eventBus,
       livePackRegistry: this.livePackRegistry
     });
-    this.queue = [];
-    this.running = false;
+    this.watchScheduler = new WatchScheduler({
+      store: this.store,
+      executionService: this.watchExecutionService
+    });
+    this.watchService = new WatchService({
+      store: this.store,
+      modelClient: this.modelClient,
+      watchScheduler: this.watchScheduler,
+      eventBus: this.eventBus,
+      livePackRegistry: this.livePackRegistry,
+      connectors: this.connectors,
+      config
+    });
+    this.draftService = new DraftService({
+      store: this.store,
+      eventBus: this.eventBus,
+      createTask: (taskSpec: Record<string, any>) => this.createTask(taskSpec),
+      getTask: (taskId: string) => this.getTask(taskId),
+      getWatchRule: (watchRuleId: string) => this.watchService.get(watchRuleId),
+      decorateWatchRule: (watchRule: Record<string, any>) => this.watchService.decorate(watchRule)
+    });
+    this.runtimeSupervisor = new RuntimeSupervisor({
+      controlPlane: this,
+      store: this.store,
+      traceStore: this.traceStore,
+      eventBus: this.eventBus,
+      executionController: this.executionController,
+      workspaceManager: this.workspaceManager,
+      policyEngine: this.policyEngine,
+      autonomy: this.autonomy,
+      planner: this.planner,
+      operator: this.operator,
+      verifier: this.verifier,
+      recovery: this.recovery,
+      memoryStore: this.memoryStore,
+      watchScheduler: this.watchScheduler,
+      connectors: this.connectors,
+      surfaceRegistry: this.surfaceRegistry
+    });
   }
 
   async start() {
     for (const connector of this.connectors) {
       await connector.start();
     }
-    await this.#restoreRuntimeState();
+    await this.runtimeSupervisor.restoreRuntimeState();
     await this.watchScheduler.start();
   }
 
-  #decorateTask(task) {
+  decorateTask(task) {
     if (!task) {
       return null;
     }
@@ -147,61 +186,6 @@ export class ControlPlane {
     };
   }
 
-  #buildWatchHealth(rule) {
-    if (!rule) {
-      return null;
-    }
-
-    const retryAfter = Number(rule.dedupeState?.retryAfter ?? 0);
-    const activeTaskId = String(rule.dedupeState?.activeTaskId ?? "").trim() || null;
-    const activeDraftId = String(rule.dedupeState?.activeDraftId ?? "").trim() || null;
-    const failureCount = Number(rule.dedupeState?.failureCount ?? 0);
-    const state = !rule.enabled || rule.status === "disabled"
-      ? "disabled"
-      : rule.status === "degraded"
-        ? "degraded"
-        : rule.status === "backoff"
-          ? "warning"
-          : "healthy";
-
-    return {
-      state,
-      failureCount,
-      retryAfter: retryAfter ? new Date(retryAfter).toISOString() : null,
-      retryAfterMs: retryAfter && retryAfter > Date.now() ? retryAfter - Date.now() : null,
-      activeTaskId,
-      activeDraftId,
-      lastHandledFingerprint: String(rule.dedupeState?.lastFingerprint ?? "").trim() || null,
-      summary:
-        rule.lastError ??
-        (String(rule.dedupeState?.lastSummary ?? "").trim() || null) ??
-        null
-    };
-  }
-
-  #decorateWatchRule(rule) {
-    if (!rule) {
-      return null;
-    }
-
-    return {
-      ...rule,
-      health: this.#buildWatchHealth(rule)
-    };
-  }
-
-  #decorateDraft(draft) {
-    if (!draft) {
-      return null;
-    }
-
-    return {
-      ...draft,
-      watch: draft.watchRuleId ? this.#decorateWatchRule(this.store.getWatchRule(draft.watchRuleId)) : null,
-      task: draft.taskId ? this.getTask(draft.taskId) : null
-    };
-  }
-
   listTasks(limit = 50) {
     return this.store.listTasks(limit).map((task) => ({
       ...task,
@@ -210,7 +194,7 @@ export class ControlPlane {
   }
 
   getTask(taskId) {
-    return this.#decorateTask(this.store.getTask(taskId));
+    return this.decorateTask(this.store.getTask(taskId));
   }
 
   getTrace(traceId) {
@@ -275,81 +259,9 @@ export class ControlPlane {
 
   saveTaskAsWatchRule(
     taskId,
-    {
-      watchRuleId = null,
-      goal = null,
-      preferredSurface = null,
-      workspaceName = null,
-      livePack = null,
-      appTarget = null,
-      skillName = null,
-      pollIntervalMs = null,
-      enabled = null,
-      triggerTexts = []
-    } = {}
+    options = {}
   ) {
-    const task = this.store.getTask(taskId);
-    if (!task) {
-      throw new Error(`Task not found: ${taskId}`);
-    }
-
-    if (task.status !== "completed") {
-      throw new Error("Only completed tasks can be saved as watch profiles.");
-    }
-
-    const existingWatchRule =
-      (watchRuleId ? this.store.getWatchRule(watchRuleId) : null) ??
-      (task.triggerSource?.startsWith("watch:") ? this.store.getWatchRule(task.triggerSource.slice("watch:".length)) : null);
-
-    const watchProfile = deriveWatchProfileFromExecution({
-      goal: task.goal,
-      taskId,
-      taskSpec: task.taskSpec,
-      planSteps: task.plan ?? [],
-      executionSteps: task.result?.steps ?? [],
-      manualTeachSteps: task.result?.manualTeachSteps ?? [],
-      manualCorrections: task.result?.manualCorrections ?? [],
-      result: task.result,
-      teachRecording: task.result?.teachRecording ?? null,
-      overrides: {
-        triggerTexts: triggerTexts.length ? triggerTexts : existingWatchRule?.watchProfile?.triggerTexts ?? [],
-        recoveryHints: existingWatchRule?.watchProfile?.recoveryHints ?? []
-      }
-    });
-
-    const normalized = normalizeWatchRule(
-      {
-        ...(existingWatchRule ?? {}),
-        id: existingWatchRule?.id ?? watchRuleId ?? undefined,
-        goal: goal ?? existingWatchRule?.goal ?? task.goal,
-        preferredSurface: preferredSurface ?? existingWatchRule?.preferredSurface ?? task.preferredSurface,
-        workspaceName: workspaceName ?? existingWatchRule?.workspaceName ?? task.taskSpec.workspaceName ?? null,
-        livePack: livePack ?? existingWatchRule?.livePack ?? null,
-        appTarget: appTarget ?? existingWatchRule?.appTarget ?? task.taskSpec.inputs?.desktopApp ?? null,
-        skillName: skillName ?? existingWatchRule?.skillName ?? null,
-        pollIntervalMs: pollIntervalMs ?? existingWatchRule?.pollIntervalMs ?? 15000,
-        enabled: enabled ?? existingWatchRule?.enabled ?? true,
-        watchProfile: {
-          ...(existingWatchRule?.watchProfile ?? {}),
-          ...watchProfile
-        },
-        taskInputs: {
-          ...(existingWatchRule?.taskInputs ?? {}),
-          ...(task.taskSpec.inputs ?? {}),
-          watchTemplateLearnedFromTaskId: taskId
-        },
-        lastError: null,
-        status: (enabled ?? existingWatchRule?.enabled ?? true) ? "watching" : "disabled"
-      },
-      {
-        modelConfigured: this.modelClient.isConfigured()
-      }
-    );
-    const watchRule = this.store.putWatchRule(normalized);
-    this.watchScheduler.sync(watchRule);
-    const decorated = this.#decorateWatchRule(watchRule);
-    this.eventBus.broadcast(existingWatchRule ? "watch.learned" : "watch.created", decorated);
-    return decorated;
+    return this.watchService.saveTaskAsWatchRule(taskId, options);
   }
 
   listWorkspaceProfiles() {
@@ -361,118 +273,47 @@ export class ControlPlane {
   }
 
   listWatchRules() {
-    return this.store.listWatchRules().map((rule) => this.#decorateWatchRule(rule));
+    return this.watchService.list();
   }
 
   getWatchRule(watchRuleId) {
-    return this.#decorateWatchRule(this.store.getWatchRule(watchRuleId));
+    return this.watchService.get(watchRuleId);
   }
 
   createWatchRule(spec) {
-    const normalized = normalizeWatchRule(spec, {
-      modelConfigured: this.modelClient.isConfigured()
-    });
-    const watchRule = this.store.putWatchRule(normalized);
-    this.watchScheduler.sync(watchRule);
-    const decorated = this.#decorateWatchRule(watchRule);
-    this.eventBus.broadcast("watch.created", decorated);
-    return decorated;
+    return this.watchService.create(spec);
   }
 
   updateWatchRule(watchRuleId, patch) {
-    const existing = this.store.getWatchRule(watchRuleId);
-    if (!existing) {
-      throw new Error(`Watch rule not found: ${watchRuleId}`);
-    }
-
-    const normalized = normalizeWatchRule(
-      {
-        ...existing,
-        ...patch,
-        id: watchRuleId,
-        taskInputs: patch.taskInputs ?? patch.inputs ?? existing.taskInputs
-      },
-      {
-        modelConfigured: this.modelClient.isConfigured()
-      }
-    );
-    const watchRule = this.store.putWatchRule(normalized);
-    this.watchScheduler.sync(watchRule);
-    const decorated = this.#decorateWatchRule(watchRule);
-    this.eventBus.broadcast("watch.updated", decorated);
-    return decorated;
+    return this.watchService.update(watchRuleId, patch);
   }
 
   enableWatchRule(watchRuleId) {
-    return this.updateWatchRule(watchRuleId, {
-      enabled: true,
-      status: "watching",
-      lastError: null
-    });
+    return this.watchService.enable(watchRuleId);
   }
 
   disableWatchRule(watchRuleId) {
-    const watchRule = this.updateWatchRule(watchRuleId, {
-      enabled: false,
-      status: "disabled"
-    });
-    this.watchScheduler.remove(watchRuleId);
-    return watchRule;
+    return this.watchService.disable(watchRuleId);
   }
 
   deleteWatchRule(watchRuleId) {
-    const deleted = this.store.deleteWatchRule(watchRuleId);
-    if (!deleted) {
-      throw new Error(`Watch rule not found: ${watchRuleId}`);
-    }
-    this.watchScheduler.remove(watchRuleId);
-    this.eventBus.broadcast("watch.deleted", { id: watchRuleId });
-    return true;
+    return this.watchService.delete(watchRuleId);
   }
 
   getWatchHealth(watchRuleId) {
-    const watchRule = this.store.getWatchRule(watchRuleId);
-    if (!watchRule) {
-      throw new Error(`Watch rule not found: ${watchRuleId}`);
-    }
-    return this.#buildWatchHealth(watchRule);
+    return this.watchService.getHealth(watchRuleId);
   }
 
   retryWatchRule(watchRuleId) {
-    const watchRule = this.store.getWatchRule(watchRuleId);
-    if (!watchRule) {
-      throw new Error(`Watch rule not found: ${watchRuleId}`);
-    }
-
-    const updated = this.store.putWatchRule({
-      ...watchRule,
-      status: watchRule.enabled ? "watching" : "disabled",
-      lastError: null,
-      dedupeState: {
-        ...(watchRule.dedupeState ?? {}),
-        failureCount: 0,
-        retryAfter: null,
-        backoffMs: 0,
-        activeDraftId: null,
-        activeTaskId: null,
-        lastFingerprint: null,
-        lastSummary: null,
-        lastContext: []
-      }
-    });
-    this.watchScheduler.sync(updated);
-    const decorated = this.#decorateWatchRule(updated);
-    this.eventBus.broadcast("watch.updated", decorated);
-    this.eventBus.broadcast("watch.retry_requested", decorated);
-    return decorated;
+    return this.watchService.retry(watchRuleId);
   }
 
   listDrafts(limit = 50) {
-    return this.store.listDrafts(limit).map((draft) => this.#decorateDraft(draft));
+    return this.draftService.list(limit);
   }
 
   getDraft(draftId) {
-    return this.#decorateDraft(this.store.getDraft(draftId));
+    return this.draftService.get(draftId);
   }
 
   createDraft({
@@ -484,134 +325,27 @@ export class ControlPlane {
     summary = null,
     metadata = {}
   }: Record<string, any>) {
-    const draft = this.store.createDraft({
-      watchRuleId: watchRule?.id ?? null,
-      livePack: watchRule?.livePack ?? null,
-      status: "pending",
-      summary,
-      replyText,
-      fingerprint: detection?.fingerprint ?? null,
+    return this.draftService.create({
+      watchRule,
       taskSpec,
       detection,
       riskDecision,
+      replyText,
+      summary,
       metadata
     });
-    const decorated = this.#decorateDraft(draft);
-    this.eventBus.broadcast("draft.created", decorated);
-    return decorated;
   }
 
   async approveDraft(draftId) {
-    const draft = this.store.getDraft(draftId);
-    if (!draft) {
-      throw new Error(`Draft not found: ${draftId}`);
-    }
-    if (draft.status !== "pending") {
-      throw new Error("Only pending drafts can be approved.");
-    }
-
-    const task = await this.createTask(draft.taskSpec);
-    const approved = this.store.updateDraft(draftId, {
-      status: "approved",
-      taskId: task.id,
-      approvedAt: new Date().toISOString()
-    });
-
-    if (draft.watchRuleId) {
-      const watchRule = this.store.getWatchRule(draft.watchRuleId);
-      if (watchRule) {
-        const updated = this.store.putWatchRule({
-          ...watchRule,
-          status: "watching",
-          lastError: null,
-          dedupeState: {
-            ...(watchRule.dedupeState ?? {}),
-            activeTaskId: task.id,
-            activeDraftId: null,
-            lastFingerprint: draft.fingerprint ?? watchRule.dedupeState?.lastFingerprint ?? null,
-            lastSummary: draft.summary ?? watchRule.dedupeState?.lastSummary ?? null
-          }
-        });
-        this.eventBus.broadcast("watch.updated", this.#decorateWatchRule(updated));
-      }
-    }
-
-    const decorated = this.#decorateDraft(approved);
-    this.eventBus.broadcast("draft.approved", decorated);
-    return decorated;
+    return this.draftService.approve(draftId);
   }
 
   rejectDraft(draftId, reason = null) {
-    const draft = this.store.getDraft(draftId);
-    if (!draft) {
-      throw new Error(`Draft not found: ${draftId}`);
-    }
-    if (draft.status !== "pending") {
-      throw new Error("Only pending drafts can be rejected.");
-    }
-
-    const rejected = this.store.updateDraft(draftId, {
-      status: "rejected",
-      rejectedAt: new Date().toISOString(),
-      metadata: {
-        ...(draft.metadata ?? {}),
-        rejectionReason: reason ?? null
-      }
-    });
-
-    if (draft.watchRuleId) {
-      const watchRule = this.store.getWatchRule(draft.watchRuleId);
-      if (watchRule) {
-        const updated = this.store.putWatchRule({
-          ...watchRule,
-          status: "watching",
-          lastError: null,
-          dedupeState: {
-            ...(watchRule.dedupeState ?? {}),
-            activeDraftId: null,
-            activeTaskId: null,
-            lastFingerprint: draft.fingerprint ?? watchRule.dedupeState?.lastFingerprint ?? null,
-            lastSummary: draft.summary ?? watchRule.dedupeState?.lastSummary ?? null
-          }
-        });
-        this.eventBus.broadcast("watch.updated", this.#decorateWatchRule(updated));
-      }
-    }
-
-    const decorated = this.#decorateDraft(rejected);
-    this.eventBus.broadcast("draft.rejected", decorated);
-    return decorated;
+    return this.draftService.reject(draftId, reason);
   }
 
   doctor() {
-    const watches = this.store.listWatchRules();
-    const drafts = this.store.listDrafts(200);
-    const degraded = watches.filter((rule) => ["degraded", "backoff"].includes(rule.status));
-    const pendingDrafts = drafts.filter((draft) => draft.status === "pending");
-    const warnings = [];
-    if (!this.config.browserExecutable) {
-      warnings.push("No managed browser executable detected.");
-    }
-    if (!this.modelClient.isConfigured()) {
-      warnings.push("Model client is not configured; live reply drafting uses heuristics.");
-    }
-    if (degraded.length) {
-      warnings.push(`${degraded.length} watch rule(s) are in backoff or degraded state.`);
-    }
-    if (pendingDrafts.length) {
-      warnings.push(`${pendingDrafts.length} pending draft(s) need approval or rejection.`);
-    }
-
-    return {
-      ok: warnings.length === 0,
-      warnings,
-      browserExecutable: this.config.browserExecutable ?? null,
-      modelConfigured: this.modelClient.isConfigured(),
-      livePackCount: this.livePackRegistry.list().length,
-      degradedWatchCount: degraded.length,
-      pendingDraftCount: pendingDrafts.length,
-      connectorCount: this.connectors.length
-    };
+    return this.watchService.doctor();
   }
 
   evaluatePolicy(taskSpec) {
@@ -630,7 +364,7 @@ export class ControlPlane {
     return this.credentialVault.getSecret(scope, secretKey);
   }
 
-  #mergePersistedResult(taskId, nextResult = {}) {
+  mergePersistedResult(taskId, nextResult = {}) {
     const current = this.store.getTask(taskId);
     const manualCorrections = current?.result?.manualCorrections ?? [];
     const manualTeachSteps = current?.result?.manualTeachSteps ?? [];
@@ -682,7 +416,7 @@ export class ControlPlane {
       });
     }
 
-    const snapshot = this.#decorateTask(updated);
+    const snapshot = this.decorateTask(updated);
     this.eventBus.broadcast("task.updated", snapshot);
     return snapshot;
   }
@@ -724,7 +458,7 @@ export class ControlPlane {
       });
     }
 
-    const snapshot = this.#decorateTask(updated);
+    const snapshot = this.decorateTask(updated);
     this.eventBus.broadcast("task.updated", snapshot);
     return snapshot;
   }
@@ -818,7 +552,7 @@ export class ControlPlane {
       });
     }
 
-    const snapshot = this.#decorateTask(updated);
+    const snapshot = this.decorateTask(updated);
     this.eventBus.broadcast("task.updated", snapshot);
     return snapshot;
   }
@@ -827,7 +561,7 @@ export class ControlPlane {
     const normalized = this.sentinel.normalize(taskSpec);
     const task = this.store.createTask(normalized);
     this.eventBus.broadcast("task.created", task);
-    this.#enqueue(task.id);
+    this.runtimeSupervisor.enqueue(task.id);
     return task;
   }
 
@@ -874,469 +608,19 @@ export class ControlPlane {
   }
 
   buildTaskSpecFromWatchRule(watchRule, detection: Record<string, any> = {}, overrides: Record<string, any> = {}) {
-    const detected = detection as Record<string, any>;
-    const runtimeInputs = {
-      ...(watchRule.taskInputs ?? {}),
-      ...(detected.inputs ?? {}),
-      watchRuleId: watchRule.id,
-      watchSummary: detected.summary ?? null,
-      ...(watchRule.preferredSurface === "desktop" && watchRule.appTarget ? { desktopApp: watchRule.appTarget } : {}),
-      ...(overrides.replyText && !detected.inputs?.typeText ? { typeText: overrides.replyText } : {}),
-      ...(overrides.autoSend != null ? { autoSend: overrides.autoSend } : {})
-    };
-    const actionTemplate =
-      !watchRule.skillName && watchRule.watchProfile?.actionTemplate?.length
-        ? materializeWatchActionTemplate(
-            watchRule.watchProfile.actionTemplate,
-            runtimeInputs,
-            watchRule.watchProfile?.metadata?.templateInputs ?? []
-          )
-        : null;
-    const baseTaskSpec = {
-      goal: detected.goal ?? `${watchRule.goal}${detected.summary ? `\n\nTrigger context: ${detected.summary}` : ""}`,
-      preferredSurface: watchRule.preferredSurface,
-      workspaceName: watchRule.workspaceName ?? `${watchRule.livePack}-live`,
-      skillName: watchRule.skillName ?? null,
-      triggerSource: `watch:${watchRule.id}`,
-      inputs: runtimeInputs,
-      ...(actionTemplate?.length ? { steps: actionTemplate } : {}),
-      executionMode:
-        actionTemplate?.length
-          ? "planned"
-          : watchRule.watchProfile?.executionMode ??
-            (watchRule.skillName ? "planned" : this.modelClient.isConfigured() ? "autonomous" : "planned")
-    };
-    const explicitTaskSpec = detected.taskSpec as Record<string, any> | null;
-    if (!explicitTaskSpec) {
-      return baseTaskSpec;
-    }
-
-    return {
-      ...baseTaskSpec,
-      ...explicitTaskSpec,
-      inputs: {
-        ...runtimeInputs,
-        ...(explicitTaskSpec.inputs ?? {})
-      },
-      steps: explicitTaskSpec.steps ?? baseTaskSpec.steps
-    };
+    return this.watchExecutionService.buildTaskSpecFromWatchRule(watchRule, detection, overrides);
   }
 
   async draftWatchReply({ watchRule, detection, pack }) {
-    if (detection?.replyText) {
-      return {
-        replyText: String(detection.replyText),
-        metadata: {
-          source: "detection"
-        }
-      };
-    }
-
-    if (typeof pack?.draftReply === "function") {
-      return pack.draftReply({
-        rule: watchRule,
-        detection,
-        controlPlane: this
-      });
-    }
-
-    const summary = String(detection?.summary ?? "").trim();
-    const context = Array.isArray(detection?.context) ? detection.context : [];
-    const chinese = /[\u4e00-\u9fff]/u.test(`${watchRule.goal} ${summary} ${context.join(" ")}`);
-    return {
-      replyText: chinese ? "收到，我会尽快处理。" : "Got it. I will follow up shortly.",
-      metadata: {
-        source: "fallback"
-      }
-    };
+    return this.watchExecutionService.draftReply({ watchRule, detection, pack });
   }
 
   async createTaskFromWatchRule(watchRule, detection = {}, options = {}) {
-    const taskSpec = this.buildTaskSpecFromWatchRule(watchRule, detection, options);
-    return this.createTask(taskSpec);
-  }
-
-  #enqueue(taskId) {
-    this.queue.push(taskId);
-    void this.#drain();
-  }
-
-  async #restoreRuntimeState() {
-    const queued = this.store.listTasksByStatuses(["queued"]);
-    for (const task of queued) {
-      this.#enqueue(task.id);
-    }
-
-    const interrupted = this.store.listTasksByStatuses(["planning", "running", "verifying", "paused", "takeover"]);
-    for (const task of interrupted) {
-      const updated = this.store.updateTask(task.id, {
-        status: "interrupted",
-        error: "Daemon restarted before task completion."
-      });
-      if (updated?.traceId) {
-        this.traceStore.finish(
-          updated.traceId,
-          "interrupted",
-          "Daemon restarted before task completion.",
-          this.#mergePersistedResult(task.id, { details: { reason: "daemon_restart" } })
-        );
-      }
-      this.eventBus.broadcast("task.updated", this.getTask(task.id));
-    }
-  }
-
-  async #waitForExecutionAccess({ taskId, traceId, phase, step = null }) {
-    const control = this.executionController.getState(taskId);
-    if (!control || control.mode === "agent") {
-      return;
-    }
-
-    const waitingTask = this.store.getTask(taskId);
-    const waitingStatus = control.mode === "takeover" ? "takeover" : "paused";
-    if (waitingTask && waitingTask.status !== waitingStatus) {
-      this.store.updateTask(taskId, {
-        status: waitingStatus,
-        error: control.mode === "takeover" ? control.reason : waitingTask.error
-      });
-      this.eventBus.broadcast("task.updated", this.getTask(taskId));
-    }
-
-    this.traceStore.log({
-      traceId,
-      taskId,
-      role: "operator",
-      type: "control.waiting",
-      stepId: step?.id ?? null,
-      message: `Execution is waiting in ${control.mode} mode.`,
-      payload: {
-        phase,
-        mode: control.mode,
-        source: control.source,
-        reason: control.reason
-      }
-    });
-
-    await this.executionController.waitForAgent(taskId);
-
-    const current = this.store.getTask(taskId);
-    if (current && !["completed", "failed"].includes(current.status)) {
-      this.store.updateTask(taskId, {
-        status: "running",
-        error: null
-      });
-      this.eventBus.broadcast("task.updated", this.getTask(taskId));
-    }
-
-    this.traceStore.log({
-      traceId,
-      taskId,
-      role: "operator",
-      type: "control.released",
-      stepId: step?.id ?? null,
-      message: "Execution resumed after manual control.",
-      payload: { phase }
-    });
-  }
-
-  async #requestRecoveryTakeover({ taskId, traceId, error, decision }) {
-    this.controlTask(taskId, "request_takeover", {
-      source: "recovery",
-      reason: `Recovery requested takeover: ${error.message}`
-    });
-
-    this.traceStore.log({
-      traceId,
-      taskId,
-      role: "recovery",
-      type: "recovery.takeover_requested",
-      message: "Recovery handed the task over for manual correction.",
-      payload: {
-        classification: decision.classification,
-        nextAction: decision.nextAction
-      }
-    });
-
-    await this.#waitForExecutionAccess({
-      taskId,
-      traceId,
-      phase: "recovery"
-    });
-  }
-
-  async #drain() {
-    if (this.running) {
-      return;
-    }
-
-    this.running = true;
-    while (this.queue.length) {
-      const taskId = this.queue.shift();
-      try {
-        await this.#runTask(taskId);
-      } catch (error) {
-        const task = this.store.updateTask(taskId, {
-          status: "failed",
-          error: error.message
-        });
-        this.eventBus.broadcast("task.updated", this.#decorateTask(task));
-      }
-    }
-    this.running = false;
-  }
-
-  async #runTask(taskId) {
-    let task = this.store.getTask(taskId);
-    if (!task) {
-      return;
-    }
-
-    this.executionController.registerTask(taskId);
-
-    try {
-      task = this.store.updateTask(taskId, { status: "planning" });
-      const workspace = await this.workspaceManager.prepare(taskId, task.taskSpec);
-      task = this.store.updateTask(taskId, { workspaceId: workspace.id });
-      const trace = this.traceStore.start(taskId, []);
-      task = this.store.updateTask(taskId, { traceId: trace.id });
-
-      this.traceStore.log({
-        traceId: trace.id,
-        taskId,
-        role: "sentinel",
-        type: "task.accepted",
-        message: "Sentinel accepted the task into the inbox.",
-        payload: { workspaceId: workspace.id, preferredSurface: task.preferredSurface }
-      });
-
-      const evaluation = this.policyEngine.evaluateTask(task.taskSpec);
-      this.traceStore.log({
-        traceId: trace.id,
-        taskId,
-        role: "sentinel",
-        type: "policy.evaluated",
-        message: "Policy baseline evaluated for the task.",
-        payload: evaluation
-      });
-
-      const maxAttempts = 3;
-      for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-        try {
-          await this.#waitForExecutionAccess({
-            taskId,
-            traceId: trace.id,
-            phase: "before_attempt"
-          });
-
-          task = this.store.updateTask(taskId, { status: "planning", error: null });
-          this.eventBus.broadcast("task.updated", this.getTask(taskId));
-
-          let result;
-          const controlGate = async ({ phase, step }) =>
-            this.#waitForExecutionAccess({
-              taskId,
-              traceId: trace.id,
-              phase,
-              step
-            });
-
-          if (this.autonomy.isEnabled(task.taskSpec)) {
-            this.store.updateTask(taskId, {
-              plan: [{ id: "autonomy", label: "Autonomous loop", surface: task.preferredSurface, action: "autonomy" }],
-              status: "running"
-            });
-            this.traceStore.log({
-              traceId: trace.id,
-              taskId,
-              role: "planner",
-              type: "plan.locked",
-              message: "Planner delegated the task to the autonomy loop.",
-              payload: {
-                executionMode: "autonomous",
-                maxSteps: task.taskSpec.autonomy?.maxSteps ?? 8
-              }
-            });
-
-            const execution = await this.autonomy.execute({
-              task: this.store.getTask(taskId),
-              workspace,
-              traceId: trace.id,
-              controlGate
-            });
-
-            result = {
-              verification: execution.verification,
-              outputs: execution.outputs,
-              steps: execution.stepResults,
-              summary: execution.summary
-            };
-          } else {
-            const plan = await this.planner.plan(task, trace.id);
-            this.store.updateTask(taskId, { plan, status: "running" });
-            this.store.updateTrace(trace.id, { plan });
-
-            this.traceStore.log({
-              traceId: trace.id,
-              taskId,
-              role: "planner",
-              type: "plan.locked",
-              message: "Planner locked the execution plan.",
-              payload: { stepCount: plan.length }
-            });
-
-            const execution = await this.operator.execute({
-              task: this.store.getTask(taskId),
-              plan,
-              workspace,
-              traceId: trace.id,
-              controlGate
-            });
-
-            await this.#waitForExecutionAccess({
-              taskId,
-              traceId: trace.id,
-              phase: "before_verify"
-            });
-
-            task = this.store.updateTask(taskId, { status: "verifying" });
-            this.eventBus.broadcast("task.updated", this.getTask(taskId));
-
-            const verification = await this.verifier.verify({
-              task: this.store.getTask(taskId),
-              plan,
-              execution,
-              workspace,
-              traceId: trace.id
-            });
-
-            result = {
-              verification,
-              outputs: execution.outputs,
-              steps: execution.stepResults
-            };
-          }
-
-          result = this.#mergePersistedResult(taskId, result);
-          result = {
-            ...result,
-            teachRecording: buildTeachRecording({
-              goal: task.goal,
-              taskSpec: task.taskSpec,
-              planSteps: this.store.getTask(taskId)?.plan ?? [],
-              executionSteps: result.steps ?? [],
-              manualTeachSteps: result.manualTeachSteps ?? [],
-              manualCorrections: result.manualCorrections ?? [],
-              result
-            })
-          };
-
-          task = this.store.updateTask(taskId, {
-            status: "completed",
-            result,
-            error: null
-          });
-          this.traceStore.finish(trace.id, "completed", "Task completed successfully.", result);
-          this.eventBus.broadcast("task.updated", this.getTask(taskId));
-
-          if (Object.keys(result.outputs ?? {}).length) {
-            this.memoryStore.remember("task-outputs", taskId, result.outputs);
-          }
-
-          if (task.taskSpec.saveSkillAs) {
-            this.saveTaskAsSkill(taskId, task.taskSpec.saveSkillAs);
-          }
-
-          if (task.taskSpec.saveWatchAs) {
-            this.saveTaskAsWatchRule(taskId, task.taskSpec.saveWatchAs);
-          }
-
-          if (task.triggerSource?.startsWith("watch:") && (task.result?.manualTeachSteps?.length || task.result?.manualCorrections?.length)) {
-            this.saveTaskAsWatchRule(taskId, {
-              watchRuleId: task.triggerSource.slice("watch:".length)
-            });
-          }
-
-          return;
-        } catch (error) {
-          if (error instanceof ExecutionStoppedError) {
-            task = this.store.updateTask(taskId, {
-              status: "failed",
-              error: error.message,
-              result: this.#mergePersistedResult(taskId, { details: error.details ?? null })
-            });
-            this.traceStore.finish(trace.id, task.status, error.message, task.result);
-            this.eventBus.broadcast("task.updated", this.getTask(taskId));
-            return;
-          }
-
-          const decision = this.recovery.handle({
-            taskId,
-            traceId: trace.id,
-            attempt,
-            error
-          });
-
-          if (decision.decision === "retry" && attempt < 1) {
-            this.traceStore.log({
-              traceId: trace.id,
-              taskId,
-              role: "recovery",
-              type: "recovery.retrying",
-              message: "Recovery requested a single retry.",
-              payload: {
-                attempt: attempt + 1,
-                nextAction: decision.nextAction
-              }
-            });
-
-            if (decision.nextAction === "wait_and_retry") {
-              await new Promise((resolve) => setTimeout(resolve, 300));
-            }
-            continue;
-          }
-
-          if ((decision.decision === "takeover" || (decision.decision === "retry" && attempt < maxAttempts - 1 && decision.classification !== "low_confidence"))) {
-            try {
-              await this.#requestRecoveryTakeover({
-                taskId,
-                traceId: trace.id,
-                error,
-                decision
-              });
-              continue;
-            } catch (controlError) {
-              task = this.store.updateTask(taskId, {
-                status: "failed",
-                error: controlError.message,
-                result: this.#mergePersistedResult(taskId, { details: controlError.details ?? null })
-              });
-              this.traceStore.finish(trace.id, task.status, controlError.message, task.result);
-              this.eventBus.broadcast("task.updated", this.getTask(taskId));
-              return;
-            }
-          }
-
-          task = this.store.updateTask(taskId, {
-            status: error.name === "PolicyError" || decision.decision === "takeover" ? "blocked" : "failed",
-            error: error.message,
-            result: this.#mergePersistedResult(taskId, { details: error.details ?? null, recovery: decision })
-          });
-          this.traceStore.finish(trace.id, task.status, error.message, task.result);
-          this.eventBus.broadcast("task.updated", this.getTask(taskId));
-          return;
-        }
-      }
-    } finally {
-      this.executionController.unregisterTask(taskId);
-    }
+    return this.watchExecutionService.createTaskFromWatchRule(watchRule, detection, options);
   }
 
   async shutdown() {
-    await this.watchScheduler.stop();
-    for (const connector of this.connectors) {
-      await connector.stop();
-    }
-    await this.surfaceRegistry.shutdown();
-    this.store.close();
+    await this.runtimeSupervisor.shutdown();
   }
 }
 
