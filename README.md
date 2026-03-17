@@ -1,5 +1,7 @@
 # AgentOS
 
+Languages: [English](./README.md) | [简体中文](./README.zh-CN.md) | [日本語](./README.ja.md) | [Español](./README.es.md)
+
 AgentOS is a local-first control plane for autonomous agents that operate browsers and desktop apps on behalf of a user. It is not a bare-metal operating system; it is an agent operating layer that runs on top of macOS or Windows and keeps task intake, workspaces, traces, artifacts, and policy in one local runtime.
 
 ## What is implemented
