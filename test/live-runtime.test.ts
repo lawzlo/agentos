@@ -1,13 +1,21 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import fs from "node:fs/promises";
 import { promisify } from "node:util";
 
 import { ControlPlaneStore } from "../src/runtime/store.js";
 import { LivePackRegistry } from "../src/runtime/live-pack-registry.js";
 import { SurfaceRegistry } from "../src/runtime/surface-registry.js";
 import type { WatchRule, WorkspaceProfile } from "../src/types/runtime-schema.js";
-import { createTempDir, startAgentServer, startMailFixtureServer, startSlackFixtureServer, waitForTask } from "./helpers.js";
+import {
+  createTempDir,
+  startAgentServer,
+  startDocsFilesFixtureServer,
+  startMailFixtureServer,
+  startSlackFixtureServer,
+  waitForTask
+} from "./helpers.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -489,6 +497,9 @@ test("doctor and packs endpoints expose live runtime diagnostics", async () => {
     assert.ok(packsPayload.packs.some((pack) => pack.name === "slack-browser"));
     assert.ok(packsPayload.packs.some((pack) => pack.name === "wechat-desktop"));
     assert.ok(packsPayload.packs.some((pack) => pack.name === "generic-mail-desktop"));
+    assert.ok(packsPayload.packs.some((pack) => pack.name === "google-drive-browser"));
+    assert.ok(packsPayload.packs.some((pack) => pack.name === "google-docs-browser"));
+    assert.ok(packsPayload.packs.some((pack) => pack.name === "feishu-docs-browser"));
   } finally {
     await server.close();
   }
@@ -914,6 +925,119 @@ test("mail browser watch rules infer the browser pack, draft replies, and can be
   } finally {
     await server.close();
     await mail.close();
+  }
+});
+
+test("google drive browser watch rules infer the browser pack and trigger upload workflows", async () => {
+  const dataDir = await createTempDir();
+  const fixture = await startDocsFilesFixtureServer();
+  const server = await startAgentServer({ dataDir });
+  const uploadFilePath = `${dataDir}/drive-watch.txt`;
+  await fs.writeFile(uploadFilePath, "Drive watch payload", "utf8");
+
+  try {
+    const createResponse = await fetch(`${server.baseUrl}/watches`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        goal: "Always watch Google Drive for pending uploads and process them.",
+        preferredSurface: "browser",
+        workspaceName: "drive-watch-main",
+        pollIntervalMs: 50,
+        inputs: {
+          startUrl: `${fixture.url}/google-drive`,
+          uploadTarget: "Upload to Drive",
+          uploadPath: uploadFilePath
+        }
+      })
+    });
+    const { watch } = await createResponse.json();
+    assert.equal(watch.livePack, "google-drive-browser");
+
+    const triggeredTask = await waitForWatchTask(server.baseUrl, watch.id);
+    const completed = await waitForTask(server.baseUrl, triggeredTask.id, (task) => task.status === "completed");
+    assert.equal(completed.status, "completed");
+
+    const state = await fixture.getState();
+    assert.equal(state.googleDriveUploadedFileName, "drive-watch.txt");
+    assert.equal(state.googleDriveUploadedFileContent, "Drive watch payload");
+  } finally {
+    await server.close();
+    await fixture.close();
+  }
+});
+
+test("google docs browser watch rules infer the browser pack and trigger document edit workflows", async () => {
+  const dataDir = await createTempDir();
+  const fixture = await startDocsFilesFixtureServer();
+  const server = await startAgentServer({ dataDir });
+
+  try {
+    const createResponse = await fetch(`${server.baseUrl}/watches`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        goal: "Always watch Google Docs for documents that need updates.",
+        preferredSurface: "browser",
+        workspaceName: "google-docs-watch-main",
+        pollIntervalMs: 50,
+        inputs: {
+          startUrl: `${fixture.url}/google-docs`,
+          documentTarget: "Google Docs editor",
+          documentText: "Google Docs watch update from AgentOS",
+          saveTarget: "Save Google Doc"
+        }
+      })
+    });
+    const { watch } = await createResponse.json();
+    assert.equal(watch.livePack, "google-docs-browser");
+
+    const triggeredTask = await waitForWatchTask(server.baseUrl, watch.id);
+    const completed = await waitForTask(server.baseUrl, triggeredTask.id, (task) => task.status === "completed");
+    assert.equal(completed.status, "completed");
+
+    const state = await fixture.getState();
+    assert.equal(state.googleDocsDocument, "Google Docs watch update from AgentOS");
+  } finally {
+    await server.close();
+    await fixture.close();
+  }
+});
+
+test("feishu docs browser watch rules infer the browser pack and trigger document edit workflows", async () => {
+  const dataDir = await createTempDir();
+  const fixture = await startDocsFilesFixtureServer();
+  const server = await startAgentServer({ dataDir });
+
+  try {
+    const createResponse = await fetch(`${server.baseUrl}/watches`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        goal: "一直盯飞书文档，有待处理文档就更新。",
+        preferredSurface: "browser",
+        workspaceName: "feishu-docs-watch-main",
+        pollIntervalMs: 50,
+        inputs: {
+          startUrl: `${fixture.url}/feishu-docs`,
+          documentTarget: "飞书文档编辑区",
+          documentText: "飞书文档 Watch 更新内容",
+          saveTarget: "保存到飞书"
+        }
+      })
+    });
+    const { watch } = await createResponse.json();
+    assert.equal(watch.livePack, "feishu-docs-browser");
+
+    const triggeredTask = await waitForWatchTask(server.baseUrl, watch.id);
+    const completed = await waitForTask(server.baseUrl, triggeredTask.id, (task) => task.status === "completed");
+    assert.equal(completed.status, "completed");
+
+    const state = await fixture.getState();
+    assert.equal(state.feishuDocsDocument, "飞书文档 Watch 更新内容");
+  } finally {
+    await server.close();
+    await fixture.close();
   }
 });
 

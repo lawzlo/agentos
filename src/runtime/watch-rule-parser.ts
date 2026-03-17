@@ -109,6 +109,33 @@ function inferPack(
     };
   }
 
+  if (/(google drive|drive)/iu.test(text)) {
+    return {
+      livePack: "google-drive-browser",
+      preferredSurface: "browser",
+      appTarget: input.appTarget ?? null,
+      triggerTexts: ["pending upload", "upload request", "shared with you", "needs review"]
+    };
+  }
+
+  if (/(google docs|docs\.google|google doc)/iu.test(text)) {
+    return {
+      livePack: "google-docs-browser",
+      preferredSurface: "browser",
+      appTarget: input.appTarget ?? null,
+      triggerTexts: ["needs update", "review doc", "document update requested"]
+    };
+  }
+
+  if (/(feishu|飞书文档|飞书 docs|lark docs)/iu.test(text)) {
+    return {
+      livePack: "feishu-docs-browser",
+      preferredSurface: "browser",
+      appTarget: input.appTarget ?? null,
+      triggerTexts: ["待处理文档", "需要更新", "飞书文档待办", "review doc"]
+    };
+  }
+
   return {
     livePack: "generic-desktop",
     preferredSurface: input.preferredSurface ?? "desktop",

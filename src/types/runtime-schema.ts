@@ -378,7 +378,7 @@ export interface AutonomyExecutionResult extends ExecutionSummary {
 
 export interface LivePackInfo {
   name: string;
-  family: "chat" | "mail" | "generic";
+  family: "chat" | "mail" | "generic" | "docs" | "files";
   surface: "desktop" | "browser";
   supportsDrafts: boolean;
   supportsAutoSend: boolean;

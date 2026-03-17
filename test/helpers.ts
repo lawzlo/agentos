@@ -399,6 +399,7 @@ export async function startDocsFilesFixtureServer() {
           <body>
             <main>
               <h1>Google Drive</h1>
+              <button id="drive-pending-item" type="button">Pending upload: Shared roadmap.pdf</button>
               <label for="drive-upload-input">Upload to Drive</label>
               <input id="drive-upload-input" type="file" aria-label="Upload to Drive" />
               <p id="drive-upload-status">Drive uploaded: ${state.googleDriveUploadedFileName || "none"}</p>
@@ -433,6 +434,7 @@ export async function startDocsFilesFixtureServer() {
           <body>
             <main>
               <h1>Google Docs</h1>
+              <button id="google-docs-pending-item" type="button">Needs update: Weekly brief</button>
               <label for="google-docs-editor">Google Docs editor</label>
               <textarea id="google-docs-editor" placeholder="Google Docs editor">${state.googleDocsDocument}</textarea>
               <button id="google-docs-save" type="button">Save Google Doc</button>
@@ -462,6 +464,7 @@ export async function startDocsFilesFixtureServer() {
           <body>
             <main>
               <h1>Feishu Docs</h1>
+              <button id="feishu-docs-pending-item" type="button">待处理文档: 项目周报</button>
               <label for="feishu-docs-editor">飞书文档编辑区</label>
               <textarea id="feishu-docs-editor" placeholder="飞书文档编辑区">${state.feishuDocsDocument}</textarea>
               <button id="feishu-docs-save" type="button">保存到飞书</button>

@@ -55,6 +55,12 @@ const WECHAT_UI_CHROME_PATTERN =
   /^(wechat|微信|搜索|search|send|发送|reply|回复|聊天信息|聊天记录|通讯录|contacts|发现|moments|我|me|文件传输助手|表情|图片|文件|语音消息)$/iu;
 const MAIL_UI_CHROME_PATTERN =
   /^(mail|email|gmail|outlook|邮件|inbox|收件箱|已发送|sent|drafts|草稿|spam|archive|归档|trash|垃圾箱|delete|删除|search|搜索|compose|撰写|reply|回复|send|发送)$/iu;
+const GOOGLE_DRIVE_UI_CHROME_PATTERN =
+  /^(google drive|my drive|priority|recent|shared with me|shared drives|starred|trash|upload to drive|drive uploaded|search)$/iu;
+const GOOGLE_DOCS_UI_CHROME_PATTERN =
+  /^(google docs|google docs editor|save google doc|saved in google docs|share|comment|format|insert|tools|extensions)$/iu;
+const FEISHU_DOCS_UI_CHROME_PATTERN =
+  /^(feishu docs|飞书文档编辑区|保存到飞书|已保存到飞书|分享|评论|工具栏|更多)$/iu;
 
 function createWatchTask(rule: WatchRule): TaskRecord {
   const timestamp = new Date().toISOString();
@@ -638,8 +644,40 @@ function normalizeMailSummary(value: string): string {
     .trim();
 }
 
+function normalizeDocsSummary(value: string, prefixes: string[] = []): string {
+  let summary = String(value ?? "")
+    .replace(/^[●•]\s*/u, "")
+    .replace(/^\(\d+\)\s*/u, "")
+    .replace(/\s+\(\d+\)$/u, "")
+    .trim();
+
+  for (const prefix of prefixes) {
+    const pattern = new RegExp(`^${prefix}\\s*[:：-]?\\s*`, "iu");
+    summary = summary.replace(pattern, "").trim();
+  }
+
+  return summary;
+}
+
 function isMailUiChrome(text: string): boolean {
   return MAIL_UI_CHROME_PATTERN.test(String(text ?? "").trim());
+}
+
+function isDriveUiChrome(text: string): boolean {
+  return GOOGLE_DRIVE_UI_CHROME_PATTERN.test(String(text ?? "").trim());
+}
+
+function isGoogleDocsUiChrome(text: string): boolean {
+  return GOOGLE_DOCS_UI_CHROME_PATTERN.test(String(text ?? "").trim());
+}
+
+function isFeishuDocsUiChrome(text: string): boolean {
+  return FEISHU_DOCS_UI_CHROME_PATTERN.test(String(text ?? "").trim());
+}
+
+function inferBrowserPageUrl(worldState: WorldState | null): string | null {
+  const url = String(((worldState?.appContext ?? {}) as { url?: unknown }).url ?? "").trim();
+  return /^https?:\/\//u.test(url) ? url : null;
 }
 
 function scoreMailCandidate({
@@ -826,6 +864,124 @@ function buildSlackReplySteps(surface: LivePackSurface): RuntimeStep[] {
       checkpoint: false
     }
   ];
+}
+
+function createDocumentPack({
+  name,
+  family,
+  description,
+  skillName,
+  defaultTriggerTexts,
+  summaryPrefixes,
+  ignoreUiChrome,
+  defaultInputs
+}: {
+  name: string;
+  family: "docs" | "files";
+  description: string;
+  skillName: string;
+  defaultTriggerTexts: string[];
+  summaryPrefixes: string[];
+  ignoreUiChrome: (text: string) => boolean;
+  defaultInputs: Record<string, string>;
+}): LivePack {
+  return {
+    name,
+    info: {
+      name,
+      family,
+      surface: "browser",
+      supportsDrafts: false,
+      supportsAutoSend: false,
+      description
+    },
+    async activate({ rule, workspace, surfaceRegistry }) {
+      const adapter = surfaceRegistry.get("browser");
+      if (!adapter) {
+        return;
+      }
+
+      const watchTask = createWatchTask(rule);
+      const watchWorkspace = profileAsWorkspace(rule, workspace);
+      const startUrl = String(rule.taskInputs?.startUrl ?? rule.taskInputs?.url ?? rule.appTarget ?? "").trim();
+      if (/^https?:\/\//u.test(startUrl)) {
+        await adapter.act({
+          task: watchTask,
+          step: {
+            id: `watch-goto-${rule.id}`,
+            action: "goto",
+            surface: "browser",
+            params: { url: startUrl, waitUntil: "domcontentloaded", timeoutMs: 15000 }
+          },
+          workspace: watchWorkspace,
+          traceId: null,
+          outputs: {}
+        });
+        return;
+      }
+
+      await adapter
+        .focus({
+          task: watchTask,
+          workspace: watchWorkspace,
+          traceId: null
+        })
+        .catch(() => null);
+    },
+    async observeInbox(args) {
+      return observeWatchSurface({ ...args, surface: "browser" });
+    },
+    async detectNewItems({ rule, worldState, dedupeState = {} }) {
+      const matchedSignal = bestSignalMatch({
+        worldState,
+        triggerTexts: [...defaultTriggerTexts, ...(rule.watchProfile?.triggerTexts ?? [])],
+        ignoreTokens: Object.values(defaultInputs)
+      });
+      const matchedText = String(matchedSignal?.text ?? "").trim();
+      const summary = normalizeDocsSummary(matchedText, summaryPrefixes);
+      if (!matchedSignal || !summary || ignoreUiChrome(summary)) {
+        return null;
+      }
+
+      const context = contextForSignal(worldState, matchedSignal).filter((line) => !ignoreUiChrome(line));
+      const itemFingerprint = fingerprint(
+        `${name}:${rule.workspaceName ?? "default"}:${summary}:${context.join("|")}`
+      );
+      if (dedupeState.lastFingerprint === itemFingerprint) {
+        return null;
+      }
+
+      const runtimeInputs = Object.fromEntries(
+        Object.entries(defaultInputs).map(([key, value]) => [key, String(rule.taskInputs?.[key] ?? value)])
+      );
+      if (!String(runtimeInputs.startUrl ?? "").trim()) {
+        runtimeInputs.startUrl = inferBrowserPageUrl(worldState) ?? "";
+      }
+
+      return {
+        fingerprint: itemFingerprint,
+        summary,
+        goal: `${rule.goal}\n\nDetected item: ${summary}`,
+        text: summary,
+        context,
+        inputs: {
+          watchItemText: matchedText || summary,
+          watchSummary: summary,
+          watchContext: context.join("\n"),
+          ...runtimeInputs
+        },
+        taskSpec: {
+          preferredSurface: "browser",
+          skillName,
+          executionMode: "planned"
+        },
+        metadata: {
+          surface: "browser",
+          skillName
+        }
+      };
+    }
+  };
 }
 
 async function observeWatchSurface({
@@ -1610,6 +1766,50 @@ export class LivePackRegistry {
         name: "generic-mail-browser",
         surface: "browser",
         description: "Generic browser mail watcher that detects unread threads, extracts context, and drafts approval-first replies."
+      }),
+      createDocumentPack({
+        name: "google-drive-browser",
+        family: "files",
+        description: "Google Drive browser watcher that detects pending file intake and triggers upload workflows.",
+        skillName: "google-drive-upload-file",
+        defaultTriggerTexts: ["pending upload", "upload request", "shared with you", "needs review"],
+        summaryPrefixes: ["pending upload", "upload request", "shared with you", "needs review"],
+        ignoreUiChrome: isDriveUiChrome,
+        defaultInputs: {
+          startUrl: "https://drive.google.com",
+          uploadTarget: "Upload to Drive",
+          uploadPath: "workspace/sample.txt"
+        }
+      }),
+      createDocumentPack({
+        name: "google-docs-browser",
+        family: "docs",
+        description: "Google Docs browser watcher that detects documents needing updates and triggers edit workflows.",
+        skillName: "google-docs-edit-document",
+        defaultTriggerTexts: ["needs update", "review doc", "document update requested"],
+        summaryPrefixes: ["needs update", "review doc", "document update requested"],
+        ignoreUiChrome: isGoogleDocsUiChrome,
+        defaultInputs: {
+          startUrl: "https://docs.google.com",
+          documentTarget: "Google Docs editor",
+          documentText: "Updated Google Docs text",
+          saveTarget: "Save Google Doc"
+        }
+      }),
+      createDocumentPack({
+        name: "feishu-docs-browser",
+        family: "docs",
+        description: "Feishu Docs browser watcher that detects pending document updates and triggers edit workflows.",
+        skillName: "feishu-docs-edit-document",
+        defaultTriggerTexts: ["待处理文档", "需要更新", "飞书文档待办", "review doc"],
+        summaryPrefixes: ["待处理文档", "需要更新", "飞书文档待办", "review doc"],
+        ignoreUiChrome: isFeishuDocsUiChrome,
+        defaultInputs: {
+          startUrl: "https://feishu.cn/docx",
+          documentTarget: "飞书文档编辑区",
+          documentText: "更新后的飞书文档内容",
+          saveTarget: "保存到飞书"
+        }
       })
     ]) {
       this.register(pack.name, pack);
