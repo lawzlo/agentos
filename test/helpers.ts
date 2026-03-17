@@ -323,7 +323,11 @@ export async function startDocsFilesFixtureServer() {
   const state = {
     uploadedFileName: "",
     uploadedFileContent: "",
-    savedDocument: "Initial draft"
+    savedDocument: "Initial draft",
+    googleDriveUploadedFileName: "",
+    googleDriveUploadedFileContent: "",
+    googleDocsDocument: "Google Docs draft",
+    feishuDocsDocument: "飞书初稿"
   };
 
   const server = http.createServer(async (req, res) => {
@@ -388,6 +392,98 @@ export async function startDocsFilesFixtureServer() {
       return;
     }
 
+    if (req.method === "GET" && url.pathname === "/google-drive") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(`<!doctype html>
+        <html>
+          <body>
+            <main>
+              <h1>Google Drive</h1>
+              <label for="drive-upload-input">Upload to Drive</label>
+              <input id="drive-upload-input" type="file" aria-label="Upload to Drive" />
+              <p id="drive-upload-status">Drive uploaded: ${state.googleDriveUploadedFileName || "none"}</p>
+              <script>
+                const uploadInput = document.getElementById("drive-upload-input");
+                const uploadStatus = document.getElementById("drive-upload-status");
+                uploadInput.addEventListener("change", async () => {
+                  const file = uploadInput.files[0];
+                  if (!file) {
+                    uploadStatus.textContent = "Drive uploaded: none";
+                    return;
+                  }
+                  const content = await file.text();
+                  await fetch("/api/google-drive/upload", {
+                    method: "POST",
+                    headers: { "content-type": "application/json" },
+                    body: JSON.stringify({ name: file.name, content })
+                  });
+                  uploadStatus.textContent = "Drive uploaded: " + file.name;
+                });
+              </script>
+            </main>
+          </body>
+        </html>`);
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/google-docs") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(`<!doctype html>
+        <html>
+          <body>
+            <main>
+              <h1>Google Docs</h1>
+              <label for="google-docs-editor">Google Docs editor</label>
+              <textarea id="google-docs-editor" placeholder="Google Docs editor">${state.googleDocsDocument}</textarea>
+              <button id="google-docs-save" type="button">Save Google Doc</button>
+              <p id="google-docs-status">Saved in Google Docs: ${state.googleDocsDocument}</p>
+              <script>
+                const editor = document.getElementById("google-docs-editor");
+                const status = document.getElementById("google-docs-status");
+                document.getElementById("google-docs-save").addEventListener("click", async () => {
+                  await fetch("/api/google-docs/save", {
+                    method: "POST",
+                    headers: { "content-type": "application/json" },
+                    body: JSON.stringify({ text: editor.value })
+                  });
+                  status.textContent = "Saved in Google Docs: " + editor.value;
+                });
+              </script>
+            </main>
+          </body>
+        </html>`);
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/feishu-docs") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(`<!doctype html>
+        <html>
+          <body>
+            <main>
+              <h1>Feishu Docs</h1>
+              <label for="feishu-docs-editor">飞书文档编辑区</label>
+              <textarea id="feishu-docs-editor" placeholder="飞书文档编辑区">${state.feishuDocsDocument}</textarea>
+              <button id="feishu-docs-save" type="button">保存到飞书</button>
+              <p id="feishu-docs-status">已保存到飞书: ${state.feishuDocsDocument}</p>
+              <script>
+                const editor = document.getElementById("feishu-docs-editor");
+                const status = document.getElementById("feishu-docs-status");
+                document.getElementById("feishu-docs-save").addEventListener("click", async () => {
+                  await fetch("/api/feishu-docs/save", {
+                    method: "POST",
+                    headers: { "content-type": "application/json" },
+                    body: JSON.stringify({ text: editor.value })
+                  });
+                  status.textContent = "已保存到飞书: " + editor.value;
+                });
+              </script>
+            </main>
+          </body>
+        </html>`);
+      return;
+    }
+
     if (req.method === "GET" && url.pathname === "/files/report.txt") {
       res.writeHead(200, {
         "content-type": "text/plain; charset=utf-8",
@@ -410,6 +506,19 @@ export async function startDocsFilesFixtureServer() {
       return;
     }
 
+    if (req.method === "POST" && url.pathname === "/api/google-drive/upload") {
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      }
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      state.googleDriveUploadedFileName = String(body.name ?? "");
+      state.googleDriveUploadedFileContent = String(body.content ?? "");
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
     if (req.method === "POST" && url.pathname === "/api/document") {
       const chunks: Buffer[] = [];
       for await (const chunk of req) {
@@ -417,6 +526,30 @@ export async function startDocsFilesFixtureServer() {
       }
       const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
       state.savedDocument = String(body.text ?? "");
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/google-docs/save") {
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      }
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      state.googleDocsDocument = String(body.text ?? "");
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/feishu-docs/save") {
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      }
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      state.feishuDocsDocument = String(body.text ?? "");
       res.writeHead(204);
       res.end();
       return;

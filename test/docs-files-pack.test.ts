@@ -5,6 +5,19 @@ import path from "node:path";
 
 import { createTempDir, startAgentServer, startDocsFilesFixtureServer, waitForTask } from "./helpers.js";
 
+async function waitForFixtureState(fixture, matcher, timeoutMs = 5000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const state = await fixture.getState();
+    if (matcher(state)) {
+      return state;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+
+  throw new Error("Timed out waiting for fixture state.");
+}
+
 test("browser download workflow can save a file into the managed workspace downloads directory", async () => {
   const dataDir = await createTempDir();
   const fixture = await startDocsFilesFixtureServer();
@@ -70,10 +83,123 @@ test("browser docs/files heuristic flow can upload a local file and save an edit
     const completed = await waitForTask(server.baseUrl, task.id, (current) => current.status === "completed");
     assert.equal(completed.status, "completed");
 
-    const state = await fixture.getState();
+    const state = await waitForFixtureState(fixture, (current) => current.uploadedFileName === "sample-upload.txt");
     assert.equal(state.uploadedFileName, "sample-upload.txt");
     assert.equal(state.uploadedFileContent, "Upload from AgentOS");
     assert.equal(state.savedDocument, "Updated project brief from AgentOS");
+  } finally {
+    await fixture.close();
+    await server.close();
+  }
+});
+
+test("google drive builtin skill uploads a file through the specialized browser workflow", async () => {
+  const dataDir = await createTempDir();
+  const fixture = await startDocsFilesFixtureServer();
+  const server = await startAgentServer({ dataDir });
+  const uploadFilePath = path.join(dataDir, "drive-upload.txt");
+  await fs.writeFile(uploadFilePath, "Drive upload payload", "utf8");
+
+  try {
+    const createResponse = await fetch(`${server.baseUrl}/tasks`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        goal: "Upload the prepared file into Google Drive.",
+        preferredSurface: "browser",
+        skillName: "google-drive-upload-file",
+        workspaceName: "drive-main",
+        inputs: {
+          startUrl: `${fixture.url}/google-drive`,
+          uploadTarget: "Upload to Drive",
+          uploadPath: uploadFilePath
+        }
+      })
+    });
+    const { task } = await createResponse.json();
+
+    const completed = await waitForTask(server.baseUrl, task.id, (current) => current.status === "completed");
+    assert.equal(completed.status, "completed");
+
+    const state = await waitForFixtureState(fixture, (current) => current.googleDriveUploadedFileName === "drive-upload.txt");
+    assert.equal(state.googleDriveUploadedFileName, "drive-upload.txt");
+    assert.equal(state.googleDriveUploadedFileContent, "Drive upload payload");
+  } finally {
+    await fixture.close();
+    await server.close();
+  }
+});
+
+test("google docs builtin skill edits and saves a document through the specialized browser workflow", async () => {
+  const dataDir = await createTempDir();
+  const fixture = await startDocsFilesFixtureServer();
+  const server = await startAgentServer({ dataDir });
+
+  try {
+    const createResponse = await fetch(`${server.baseUrl}/tasks`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        goal: "Update the shared Google Docs brief.",
+        preferredSurface: "browser",
+        skillName: "google-docs-edit-document",
+        workspaceName: "google-docs-main",
+        inputs: {
+          startUrl: `${fixture.url}/google-docs`,
+          documentTarget: "Google Docs editor",
+          documentText: "Google Docs content updated by AgentOS",
+          saveTarget: "Save Google Doc"
+        }
+      })
+    });
+    const { task } = await createResponse.json();
+
+    const completed = await waitForTask(server.baseUrl, task.id, (current) => current.status === "completed");
+    assert.equal(completed.status, "completed");
+
+    const state = await waitForFixtureState(
+      fixture,
+      (current) => current.googleDocsDocument === "Google Docs content updated by AgentOS"
+    );
+    assert.equal(state.googleDocsDocument, "Google Docs content updated by AgentOS");
+  } finally {
+    await fixture.close();
+    await server.close();
+  }
+});
+
+test("feishu docs builtin skill edits and saves a document through the specialized browser workflow", async () => {
+  const dataDir = await createTempDir();
+  const fixture = await startDocsFilesFixtureServer();
+  const server = await startAgentServer({ dataDir });
+
+  try {
+    const createResponse = await fetch(`${server.baseUrl}/tasks`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        goal: "更新飞书文档并保存。",
+        preferredSurface: "browser",
+        skillName: "feishu-docs-edit-document",
+        workspaceName: "feishu-docs-main",
+        inputs: {
+          startUrl: `${fixture.url}/feishu-docs`,
+          documentTarget: "飞书文档编辑区",
+          documentText: "飞书文档已由 AgentOS 更新",
+          saveTarget: "保存到飞书"
+        }
+      })
+    });
+    const { task } = await createResponse.json();
+
+    const completed = await waitForTask(server.baseUrl, task.id, (current) => current.status === "completed");
+    assert.equal(completed.status, "completed");
+
+    const state = await waitForFixtureState(
+      fixture,
+      (current) => current.feishuDocsDocument === "飞书文档已由 AgentOS 更新"
+    );
+    assert.equal(state.feishuDocsDocument, "飞书文档已由 AgentOS 更新");
   } finally {
     await fixture.close();
     await server.close();

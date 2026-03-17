@@ -156,6 +156,142 @@ export const BUILTIN_SKILLS = [
     }
   },
   {
+    name: "google-drive-upload-file",
+    surfaceScope: "browser",
+    triggerTerms: ["google drive upload file", "upload file to google drive", "drive upload"],
+    anchors: [{ text: "Google Drive", role: "workspace" }, { text: "Upload to Drive", role: "button" }],
+    actionTemplate: [
+      {
+        label: "Open Google Drive page",
+        surface: "browser",
+        action: "goto",
+        params: {
+          url: "{{startUrl}}"
+        },
+        checkpoint: false
+      },
+      {
+        label: "Upload to Google Drive",
+        surface: "browser",
+        action: "upload",
+        params: {
+          targetQuery: "{{uploadTarget}}",
+          path: "{{uploadPath}}"
+        },
+        checkpoint: false
+      }
+    ],
+    successCriteria: [{ type: "textVisible", value: "Drive uploaded" }],
+    recoveryHints: ["drive upload target moved", "drive upload input hidden"],
+    metadata: {
+      pack: "google-drive",
+      builtin: true,
+      skillInputs: [
+        { key: "startUrl", defaultValue: "https://drive.google.com" },
+        { key: "uploadTarget", defaultValue: "Upload to Drive" },
+        { key: "uploadPath", defaultValue: "workspace/sample.txt" }
+      ]
+    }
+  },
+  {
+    name: "google-docs-edit-document",
+    surfaceScope: "browser",
+    triggerTerms: ["google docs edit document", "edit google doc", "update google docs document"],
+    anchors: [{ text: "Google Docs", role: "workspace" }, { text: "Google Docs editor", role: "document" }],
+    actionTemplate: [
+      {
+        label: "Open Google Docs page",
+        surface: "browser",
+        action: "goto",
+        params: {
+          url: "{{startUrl}}"
+        },
+        checkpoint: false
+      },
+      {
+        label: "Update Google Docs text",
+        surface: "browser",
+        action: "typeIntoTarget",
+        params: {
+          targetQuery: "{{documentTarget}}",
+          text: "{{documentText}}",
+          clear: true
+        },
+        checkpoint: false
+      },
+      {
+        label: "Save Google Docs document",
+        surface: "browser",
+        action: "clickTarget",
+        params: {
+          targetQuery: "{{saveTarget}}"
+        },
+        checkpoint: false
+      }
+    ],
+    successCriteria: [{ type: "textVisible", value: "Saved in Google Docs" }],
+    recoveryHints: ["google docs editor changed", "save button moved"],
+    metadata: {
+      pack: "google-docs",
+      builtin: true,
+      skillInputs: [
+        { key: "startUrl", defaultValue: "https://docs.google.com" },
+        { key: "documentTarget", defaultValue: "Google Docs editor" },
+        { key: "documentText", defaultValue: "Updated Google Docs text" },
+        { key: "saveTarget", defaultValue: "Save Google Doc" }
+      ]
+    }
+  },
+  {
+    name: "feishu-docs-edit-document",
+    surfaceScope: "browser",
+    triggerTerms: ["feishu docs edit document", "edit feishu doc", "飞书文档 编辑"],
+    anchors: [{ text: "Feishu Docs", role: "workspace" }, { text: "飞书文档编辑区", role: "document" }],
+    actionTemplate: [
+      {
+        label: "Open Feishu Docs page",
+        surface: "browser",
+        action: "goto",
+        params: {
+          url: "{{startUrl}}"
+        },
+        checkpoint: false
+      },
+      {
+        label: "Update Feishu document text",
+        surface: "browser",
+        action: "typeIntoTarget",
+        params: {
+          targetQuery: "{{documentTarget}}",
+          text: "{{documentText}}",
+          clear: true
+        },
+        checkpoint: false
+      },
+      {
+        label: "Save Feishu document",
+        surface: "browser",
+        action: "clickTarget",
+        params: {
+          targetQuery: "{{saveTarget}}"
+        },
+        checkpoint: false
+      }
+    ],
+    successCriteria: [{ type: "textVisible", value: "已保存到飞书" }],
+    recoveryHints: ["feishu editor changed", "save button moved"],
+    metadata: {
+      pack: "feishu-docs",
+      builtin: true,
+      skillInputs: [
+        { key: "startUrl", defaultValue: "https://feishu.cn/docx" },
+        { key: "documentTarget", defaultValue: "飞书文档编辑区" },
+        { key: "documentText", defaultValue: "更新后的飞书文档内容" },
+        { key: "saveTarget", defaultValue: "保存到飞书" }
+      ]
+    }
+  },
+  {
     name: "local-organize-file",
     surfaceScope: "desktop",
     triggerTerms: ["organize file", "move file", "sort downloaded file"],

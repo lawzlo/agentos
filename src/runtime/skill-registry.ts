@@ -216,6 +216,7 @@ export class SkillRegistry {
 
   matchSkill({ goal = "", preferredSurface = "any" }) {
     const query = goal.toLowerCase();
+    const queryTokens = query.split(/\s+/).map((token) => token.trim()).filter(Boolean);
     const skills = this.store.listSkills();
     const ranked = skills
       .filter((skill) => skill.surfaceScope === "any" || preferredSurface === "auto" || skill.surfaceScope === preferredSurface)
@@ -226,12 +227,20 @@ export class SkillRegistry {
             return 0;
           }
           if (query === normalized) {
-            return 3;
+            return 4;
           }
           if (query.includes(normalized) || normalized.includes(query)) {
-            return 2;
+            return 3;
           }
-          return normalized.split(/\s+/).some((token) => query.includes(token)) ? 1 : 0;
+          const tokens = normalized
+            .split(/\s+/)
+            .map((token) => token.trim())
+            .filter((token) => token.length >= 3);
+          if (!tokens.length) {
+            return 0;
+          }
+          const overlap = tokens.filter((token) => queryTokens.includes(token)).length;
+          return overlap >= Math.min(2, tokens.length) ? 2 : 0;
         });
 
         return {
@@ -239,7 +248,7 @@ export class SkillRegistry {
           score: Math.max(...scores)
         };
       })
-      .filter((entry) => entry.score > 0)
+      .filter((entry) => entry.score >= 2)
       .sort((left, right) => right.score - left.score);
 
     return ranked[0]?.skill ?? null;
