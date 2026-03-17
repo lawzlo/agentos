@@ -431,3 +431,87 @@ test("cli learn sources ls exposes filesystem learning source kinds", async () =
     await server.close();
   }
 });
+
+test("events can create tasks through embedded taskSpec", async () => {
+  const dataDir = await createTempDir();
+  const server = await startAgentServer({ dataDir });
+
+  try {
+    const eventPayload = {
+      type: "automation.request",
+      source: "test-suite",
+      payload: {
+        taskSpec: {
+          goal: "Process automated event task",
+          preferredSurface: "desktop",
+          steps: [
+            {
+              label: "Pause",
+              surface: "desktop",
+              action: "wait",
+              params: {
+                ms: 50
+              },
+              checkpoint: false
+            }
+          ]
+        }
+      }
+    };
+
+    const eventResponse = await fetchJson<{
+      event: { id: string; taskId: string | null };
+      task: { id: string } | null;
+    }>(`${server.baseUrl}/events`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(eventPayload)
+    });
+
+    assert.ok(eventResponse.task?.id);
+    assert.equal(eventResponse.event.taskId, eventResponse.task!.id);
+
+    const completedTask = await waitForTask(server.baseUrl, eventResponse.task.id, (task) => task.status === "completed");
+    assert.equal(completedTask.goal.includes("Process automated event task"), true);
+  } finally {
+    await server.close();
+  }
+});
+
+test("memory search respects limit parameter", async () => {
+  const dataDir = await createTempDir();
+  const learnRoot = path.join(dataDir, "learn-root");
+  await fs.mkdir(learnRoot, { recursive: true });
+  const payloadText = "agentos marker token";
+  await fs.writeFile(path.join(learnRoot, "a.txt"), `first ${payloadText}`, "utf8");
+  await fs.writeFile(path.join(learnRoot, "b.txt"), `second ${payloadText}`, "utf8");
+  await fs.writeFile(path.join(learnRoot, "c.txt"), `third ${payloadText}`, "utf8");
+  const server = await startAgentServer({
+    dataDir,
+    learning: {
+      metadataRoots: [learnRoot],
+      contentRoots: [learnRoot],
+      excludedPaths: [],
+      scanIntervalMs: 100,
+      maxFilesPerScan: 100,
+      maxDepth: 4
+    }
+  });
+
+  try {
+    const limited = await waitForValue(
+      async () => fetchJson<{ chunks: Array<{ content: string }> }>(
+        `${server.baseUrl}/memory/search?q=${encodeURIComponent(payloadText)}&limit=2`
+      ),
+      (result) => result.chunks.length === 2
+    );
+    assert.equal(limited.chunks.length, 2);
+
+    const full = await fetchJson<{ chunks: Array<{ content: string }> }>(
+      `${server.baseUrl}/memory/search?q=${encodeURIComponent(payloadText)}&limit=10`
+    );
+    assert.ok(full.chunks.length >= 3);
+  } finally {
+    await server.close();
+  }
+});

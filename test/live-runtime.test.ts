@@ -1505,3 +1505,31 @@ test("watch deletion removes the rule and subsequent lookups return 404", async 
     await server.close();
   }
 });
+
+test("unknown watch rule endpoints return 404", async () => {
+  const dataDir = await createTempDir();
+  const server = await startAgentServer({ dataDir });
+
+  try {
+    const missingId = "no-such-watch-rule";
+
+    const inspectResponse = await fetch(`${server.baseUrl}/watches/${missingId}`);
+    assert.equal(inspectResponse.status, 404);
+    const inspectPayload = await inspectResponse.json();
+    assert.equal(inspectPayload.error, "Watch rule not found");
+
+    const healthResponse = await fetch(`${server.baseUrl}/watches/${missingId}/health`);
+    assert.equal(healthResponse.status, 404);
+    const healthPayload = await healthResponse.json();
+    assert.match(healthPayload.error, /Watch rule not found/);
+
+    const enableResponse = await fetch(`${server.baseUrl}/watches/${missingId}/enable`, {
+      method: "POST"
+    });
+    assert.equal(enableResponse.status, 404);
+    const enablePayload = await enableResponse.json();
+    assert.match(enablePayload.error, /Watch rule not found/);
+  } finally {
+    await server.close();
+  }
+});

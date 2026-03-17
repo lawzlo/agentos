@@ -56,3 +56,40 @@ test("normalizeWatchRule keeps explicit livePack and clamps poll interval", asyn
   assert.equal(watch.appTarget, null);
   assert.equal(watch.id, undefined);
 });
+
+test("normalizeWatchRule uses model capability to infer autonomous execution mode", async () => {
+  const watch = normalizeWatchRule(
+    {
+      goal: "Watch Slack for unanswered mentions"
+    },
+    { modelConfigured: true }
+  );
+
+  assert.equal(watch.watchProfile.executionMode, "autonomous");
+});
+
+test("normalizeWatchRule preserves explicit execution mode and trigger texts", async () => {
+  const watch = normalizeWatchRule({
+    goal: "Inspect my daily inbox for priority mail",
+    watchProfile: {
+      executionMode: "autonomous",
+      triggerTexts: ["inbox", "reply needed"]
+    }
+  });
+
+  assert.equal(watch.watchProfile.executionMode, "autonomous");
+  assert.deepEqual(watch.watchProfile.triggerTexts, ["inbox", "reply needed"]);
+});
+
+test("normalizeWatchRule maps preferred browser mail goal to browser live pack", async () => {
+  const watch = normalizeWatchRule({
+    goal: "Check unread email and handle follow-up actions.",
+    preferredSurface: "browser",
+    skillName: "mail-follow-up"
+  });
+
+  assert.equal(watch.livePack, "generic-mail-browser");
+  assert.equal(watch.preferredSurface, "browser");
+  assert.equal(watch.appTarget, null);
+  assert.equal(watch.watchProfile.executionMode, "planned");
+});
