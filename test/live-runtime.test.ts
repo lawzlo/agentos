@@ -4,7 +4,10 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import { ControlPlaneStore } from "../src/runtime/store.js";
-import { createTempDir, startAgentServer, waitForTask } from "./helpers.js";
+import { LivePackRegistry } from "../src/runtime/live-pack-registry.js";
+import { SurfaceRegistry } from "../src/runtime/surface-registry.js";
+import type { WatchRule, WorkspaceProfile } from "../src/types/runtime-schema.js";
+import { createTempDir, startAgentServer, startSlackFixtureServer, waitForTask } from "./helpers.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -482,10 +485,238 @@ test("doctor and packs endpoints expose live runtime diagnostics", async () => {
 
     const packsPayload = await (await fetch(`${server.baseUrl}/packs`)).json();
     assert.ok(packsPayload.packs.some((pack) => pack.name === "slack-desktop"));
+    assert.ok(packsPayload.packs.some((pack) => pack.name === "slack-browser"));
     assert.ok(packsPayload.packs.some((pack) => pack.name === "generic-mail-desktop"));
   } finally {
     await server.close();
   }
+});
+
+test("slack browser watch rules infer the browser pack and auto-send low-risk replies", async () => {
+  const dataDir = await createTempDir();
+  const slack = await startSlackFixtureServer();
+  const server = await startAgentServer({ dataDir });
+
+  try {
+    const createResponse = await fetch(`${server.baseUrl}/watches`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        goal: "Always watch Slack and reply to unread threads",
+        preferredSurface: "browser",
+        workspaceName: "slack-browser-main",
+        pollIntervalMs: 50,
+        inputs: {
+          startUrl: `${slack.url}/slack`
+        }
+      })
+    });
+    const { watch } = await createResponse.json();
+    assert.equal(watch.livePack, "slack-browser");
+
+    const triggeredTask = await waitForWatchTask(server.baseUrl, watch.id);
+    const completed = await waitForTask(server.baseUrl, triggeredTask.id, (task) => task.status === "completed");
+    assert.equal(completed.status, "completed");
+
+    const state = await slack.getState();
+    assert.equal(state.sentReplies.length, 1);
+    assert.equal(state.sentReplies[0].message, "Got it. I will follow up shortly.");
+
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const tasksPayload = await (await fetch(`${server.baseUrl}/tasks`)).json();
+    assert.equal(tasksPayload.tasks.filter((task) => task.triggerSource === `watch:${watch.id}`).length, 1);
+  } finally {
+    await server.close();
+    await slack.close();
+  }
+});
+
+test("slack browser watch rules draft high-risk replies instead of auto-sending", async () => {
+  const dataDir = await createTempDir();
+  const slack = await startSlackFixtureServer({
+    threadTitle: "Invoice follow-up",
+    messages: ["Customer: Please pay invoice 123 today."]
+  });
+  const server = await startAgentServer({ dataDir });
+
+  try {
+    const createResponse = await fetch(`${server.baseUrl}/watches`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        goal: "Always watch Slack and reply to unread threads",
+        preferredSurface: "browser",
+        workspaceName: "slack-browser-main",
+        pollIntervalMs: 50,
+        inputs: {
+          startUrl: `${slack.url}/slack`
+        }
+      })
+    });
+    const { watch } = await createResponse.json();
+    assert.equal(watch.livePack, "slack-browser");
+
+    const pendingDraft = await waitForDraft(
+      server.baseUrl,
+      (draft) => draft.watchRuleId === watch.id && draft.livePack === "slack-browser" && draft.status === "pending"
+    );
+    assert.equal(pendingDraft.riskDecision.action, "draft");
+
+    const state = await slack.getState();
+    assert.equal(state.sentReplies.length, 0);
+
+    const watchPending = await waitForWatchRule(server.baseUrl, watch.id, (current) => current.status === "awaiting_approval");
+    assert.equal(watchPending.health.activeDraftId, pendingDraft.id);
+  } finally {
+    await server.close();
+    await slack.close();
+  }
+});
+
+test("slack desktop pack can detect unread threads and build reply steps from a desktop world state", async () => {
+  let opened = false;
+  const initialWorldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-slack",
+    appContext: {
+      appName: "Slack",
+      windows: [{ title: "Slack" }]
+    },
+    capture: null,
+    ocrBlocks: [],
+    interactionCandidates: [
+      {
+        id: "thread-acme",
+        surface: "desktop",
+        kind: "text",
+        text: "Unread: Acme renewal",
+        role: "text",
+        bounds: { x: 10, y: 10, width: 140, height: 24, centerX: 80, centerY: 22 },
+        confidence: 0.8,
+        sourceHints: { source: "ocr" },
+        isInteractive: true
+      }
+    ],
+    visibleText: "Slack\nUnread threads\nUnread: Acme renewal\nCustomer: Can you share pricing?",
+    recentActions: [],
+    summary: "Slack unread sidebar",
+    timestamp: new Date().toISOString()
+  };
+  const threadWorldState = {
+    ...initialWorldState,
+    interactionCandidates: [
+      {
+        id: "thread-acme",
+        surface: "desktop",
+        kind: "text",
+        text: "Acme renewal",
+        role: "text",
+        bounds: { x: 10, y: 10, width: 140, height: 24, centerX: 80, centerY: 22 },
+        confidence: 0.8,
+        sourceHints: { source: "ocr" },
+        isInteractive: true
+      },
+      {
+        id: "compose",
+        surface: "desktop",
+        kind: "text",
+        text: "Message",
+        role: "textbox",
+        bounds: { x: 10, y: 200, width: 240, height: 32, centerX: 130, centerY: 216 },
+        confidence: 0.8,
+        sourceHints: { source: "ocr", placeholder: "Message" },
+        isInteractive: true
+      },
+      {
+        id: "send",
+        surface: "desktop",
+        kind: "text",
+        text: "Send",
+        role: "button",
+        bounds: { x: 260, y: 200, width: 60, height: 32, centerX: 290, centerY: 216 },
+        confidence: 0.8,
+        sourceHints: { source: "ocr" },
+        isInteractive: true
+      }
+    ],
+    visibleText: "Slack\nConversation: Acme renewal\nCustomer: Can you share pricing?\nTeammate: Keep it short.\nMessage\nSend"
+  };
+  const fakeSurface = {
+    async observe() {
+      return opened ? threadWorldState : initialWorldState;
+    },
+    async act({ step }) {
+      if (step.action === "clickTarget") {
+        opened = true;
+      }
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("slack-desktop");
+  const rule: WatchRule = {
+    id: "watch-slack-desktop",
+    goal: "Always watch Slack and reply to unread threads",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "slack-desktop-main",
+    skillName: null,
+    appTarget: "Slack",
+    livePack: "slack-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-slack",
+    name: "slack-desktop-main",
+    rootPath: "/tmp/slack-desktop-main",
+    profilePath: "/tmp/slack-desktop-main/profile",
+    downloadsPath: "/tmp/slack-desktop-main/downloads",
+    artifactsPath: "/tmp/slack-desktop-main/artifacts",
+    scratchPath: "/tmp/slack-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: initialWorldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {} as never
+  });
+  assert.equal(detection?.summary, "Acme renewal");
+
+  const context = await pack?.extractContext?.({
+    rule,
+    worldState: initialWorldState as never,
+    detection: detection as never,
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: { isConfigured: () => false }
+    } as never
+  });
+  assert.equal(context?.inputs?.typeTarget, "Message");
+  assert.equal(context?.inputs?.sendTarget, "Send");
+  assert.equal(Array.isArray(context?.taskSpec?.steps), true);
+  assert.equal(context?.taskSpec?.steps?.[0]?.action, "clickTarget");
+  assert.equal(context?.taskSpec?.steps?.[2]?.params?.text, "{{typeText}}");
 });
 
 test("daemon startup requeues queued tasks and marks in-flight tasks as interrupted", async () => {

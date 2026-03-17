@@ -154,7 +154,7 @@ export class PolicyEngine {
       };
     }
 
-    if (["slack-desktop", "wechat-desktop"].includes(livePack)) {
+    if (["slack-desktop", "slack-browser", "wechat-desktop"].includes(livePack)) {
       return {
         policy: "allow",
         riskLevel,

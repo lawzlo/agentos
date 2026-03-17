@@ -62,9 +62,15 @@ function inferPack(
   "livePack" | "preferredSurface" | "appTarget"
 > & { triggerTexts: string[] } {
   if (input.livePack) {
+    const inferredSurface =
+      input.livePack === "slack-browser"
+        ? "browser"
+        : input.livePack.endsWith("-desktop")
+          ? "desktop"
+          : (input.preferredSurface ?? "desktop");
     return {
       livePack: input.livePack,
-      preferredSurface: input.preferredSurface ?? "desktop",
+      preferredSurface: inferredSurface,
       appTarget: input.appTarget ?? null,
       triggerTexts: input.watchProfile?.triggerTexts ?? []
     };
@@ -73,10 +79,11 @@ function inferPack(
   const text = String(goal).toLowerCase();
 
   if (/(slack)/iu.test(text)) {
+    const preferredSurface = input.preferredSurface ?? "desktop";
     return {
-      livePack: "slack-desktop",
-      preferredSurface: input.preferredSurface ?? "desktop",
-      appTarget: input.appTarget ?? "Slack",
+      livePack: preferredSurface === "browser" ? "slack-browser" : "slack-desktop",
+      preferredSurface,
+      appTarget: preferredSurface === "browser" ? input.appTarget ?? null : (input.appTarget ?? "Slack"),
       triggerTexts: ["unread", "new message", "new messages", "未读"]
     };
   }

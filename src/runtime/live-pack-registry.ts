@@ -2,7 +2,9 @@ import crypto from "node:crypto";
 import type { ControlPlane } from "./control-plane.js";
 import type { SurfaceRegistry } from "./surface-registry.js";
 import type {
+  InteractionCandidate,
   LivePackInfo,
+  RuntimeStep,
   TaskRecord,
   WatchDetection,
   WatchRule,
@@ -42,6 +44,13 @@ interface LivePackMarkHandledArgs {
   task: TaskRecord;
   controlPlane: LivePackControlPlane;
 }
+
+type LivePackSurface = "browser" | "desktop";
+
+const SEND_PATTERN = /(send|reply|submit|发送|回复|提交)/iu;
+const UNREAD_PATTERN = /(unread|mention|new message|new messages|未读|新消息)/iu;
+const SLACK_UI_CHROME_PATTERN =
+  /^(search|compose|home|later|activity|more|threads|drafts|canvas|huddle|send|reply|message|messages|slack|搜索|撰写|发送|回复|消息)$/iu;
 
 function createWatchTask(rule: WatchRule): TaskRecord {
   const timestamp = new Date().toISOString();
@@ -93,9 +102,9 @@ export interface LivePack {
   markHandled?(args: LivePackMarkHandledArgs): Promise<void>;
 }
 
-function uniqueStrings(values = []) {
+function uniqueStrings(values: unknown[] = []): string[] {
   const seen = new Set();
-  const result = [];
+  const result: string[] = [];
 
   for (const value of values) {
     const normalized = String(value ?? "").trim();
@@ -115,12 +124,19 @@ function uniqueStrings(values = []) {
   return result;
 }
 
-function normalizeTokens(values = []) {
+function normalizeTokens(values: unknown[] = []): string[] {
   return uniqueStrings(values).map((entry) => entry.toLowerCase());
 }
 
-function collectSignals(worldState) {
-  const signals = [];
+function collectSignals(worldState: WorldState | null) {
+  const signals: Array<{
+    text: string;
+    source: string;
+    interactive: boolean;
+    role: string | null;
+    index: number;
+    score: number;
+  }> = [];
 
   for (const [index, candidate] of (worldState?.interactionCandidates ?? []).entries()) {
     const text = String(candidate?.text ?? "").trim();
@@ -172,7 +188,10 @@ function collectSignals(worldState) {
     });
   }
 
-  for (const [index, windowInfo] of (worldState?.appContext?.windows ?? []).entries()) {
+  const windows = Array.isArray((worldState?.appContext as { windows?: unknown } | null)?.windows)
+    ? (((worldState?.appContext as { windows?: unknown[] } | null)?.windows ?? []) as Array<Record<string, unknown>>)
+    : [];
+  for (const [index, windowInfo] of windows.entries()) {
     const text = String(windowInfo?.title ?? "").trim();
     if (!text) {
       continue;
@@ -191,15 +210,15 @@ function collectSignals(worldState) {
   return signals;
 }
 
-function visibleLines(worldState) {
+function visibleLines(worldState: WorldState | null): string[] {
   return uniqueStrings(collectSignals(worldState).map((signal) => signal.text)).slice(0, 120);
 }
 
-function fingerprint(value) {
+function fingerprint(value: unknown): string {
   return crypto.createHash("sha1").update(String(value ?? "")).digest("hex");
 }
 
-function matchTriggerText(lines, triggerTexts = []) {
+function matchTriggerText(lines: string[], triggerTexts: unknown[] = []): string | null {
   const loweredTriggers = triggerTexts.map((entry) => String(entry).toLowerCase()).filter(Boolean);
   if (!loweredTriggers.length) {
     return lines[0] ?? null;
@@ -215,6 +234,11 @@ function bestSignalMatch({
   triggerTexts = [],
   unreadTokens = [],
   ignoreTokens = []
+}: {
+  worldState: WorldState | null;
+  triggerTexts?: unknown[];
+  unreadTokens?: unknown[];
+  ignoreTokens?: unknown[];
 }) {
   const triggerTokens = normalizeTokens(triggerTexts);
   const unreadMatches = normalizeTokens(unreadTokens);
@@ -244,13 +268,16 @@ function bestSignalMatch({
         score
       };
     })
-    .filter(Boolean)
+    .filter((signal): signal is NonNullable<typeof signal> => Boolean(signal))
     .sort((left, right) => right.score - left.score);
 
   return ranked[0] ?? null;
 }
 
-function contextForSignal(worldState, signal) {
+function contextForSignal(
+  worldState: WorldState | null,
+  signal: { text?: string } | null
+): string[] {
   const lines = visibleLines(worldState);
   const index = lines.findIndex((line) => line === signal?.text);
   if (index === -1) {
@@ -258,6 +285,454 @@ function contextForSignal(worldState, signal) {
   }
 
   return uniqueStrings(lines.slice(Math.max(0, index - 1), index + 2)).slice(0, 3);
+}
+
+function draftHeuristicReply({
+  family,
+  goal,
+  summary,
+  context
+}: {
+  family: "chat" | "mail" | "generic";
+  goal: string;
+  summary: string;
+  context: string[];
+}): LivePackDraftResponse {
+  const combinedContext = [summary, ...context].filter(Boolean).join("\n");
+  const chinese = /[\u4e00-\u9fff]/u.test(`${goal} ${combinedContext}`);
+  const replyText =
+    family === "mail"
+      ? chinese
+        ? "收到你的邮件，我会尽快处理并回复。"
+        : "Thanks for your email. I received it and will follow up shortly."
+      : chinese
+        ? "收到，我会尽快处理。"
+        : "Got it. I will follow up shortly.";
+  return {
+    replyText,
+    metadata: {
+      confidence: null,
+      rationale: "heuristic fallback",
+      source: "heuristic"
+    }
+  };
+}
+
+function candidateHintStrings(candidate: InteractionCandidate | null | undefined): string[] {
+  if (!candidate) {
+    return [];
+  }
+  const hints = (candidate.sourceHints ?? {}) as Record<string, unknown>;
+  return uniqueStrings([
+    candidate.text,
+    hints.ariaLabel,
+    hints.placeholder,
+    hints.title,
+    hints.name,
+    hints.roleDescription
+  ]);
+}
+
+function candidateHintText(candidate: InteractionCandidate | null | undefined): string {
+  return candidateHintStrings(candidate).join(" ").trim();
+}
+
+function normalizeSlackSummary(value: string): string {
+  return String(value ?? "")
+    .replace(/^[●•]\s*/u, "")
+    .replace(/^(unread thread|unread|mention|new message|new messages|未读|新消息)\s*[:：-]?\s*/iu, "")
+    .replace(/\s+\(\d+\)$/u, "")
+    .trim();
+}
+
+function isSlackUiChrome(text: string): boolean {
+  return SLACK_UI_CHROME_PATTERN.test(String(text ?? "").trim());
+}
+
+function scoreSlackCandidate({
+  candidate,
+  worldState
+}: {
+  candidate: InteractionCandidate;
+  worldState: WorldState | null;
+}): number | null {
+  const hintText = candidateHintText(candidate);
+  const summary = normalizeSlackSummary(candidate.text || hintText);
+  if (!summary || isSlackUiChrome(summary) || SEND_PATTERN.test(summary)) {
+    return null;
+  }
+
+  let score = candidate.isInteractive ? 12 : 4;
+  if (candidate.role === "link" || candidate.role === "button") {
+    score += 4;
+  }
+  if (UNREAD_PATTERN.test(hintText)) {
+    score += 30;
+  }
+
+  const lines = visibleLines(worldState);
+  for (const [index, line] of lines.entries()) {
+    if (!UNREAD_PATTERN.test(line)) {
+      continue;
+    }
+    const nearby = lines.slice(index + 1, index + 6).some((entry) => entry.includes(summary) || summary.includes(entry));
+    if (nearby) {
+      score += 15;
+      break;
+    }
+  }
+
+  if (summary.length >= 4 && summary.length <= 80) {
+    score += 3;
+  }
+  if (/^[#@]/u.test(summary)) {
+    score += 1;
+  }
+
+  return score;
+}
+
+function findSlackUnreadCandidate(worldState: WorldState | null): InteractionCandidate | null {
+  const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
+  const ranked = candidates
+    .map((candidate) => ({ candidate, score: scoreSlackCandidate({ candidate, worldState }) }))
+    .filter((entry): entry is { candidate: InteractionCandidate; score: number } => Number.isFinite(entry.score))
+    .sort((left, right) => right.score - left.score);
+  return ranked[0]?.candidate ?? null;
+}
+
+function defaultLocalizedTarget(surface: LivePackSurface, kind: "compose" | "send", worldState: WorldState | null): string {
+  const chinese = /[\u4e00-\u9fff]/u.test(String(worldState?.visibleText ?? ""));
+  if (kind === "compose") {
+    return chinese ? "消息" : "Message";
+  }
+  return chinese || surface === "desktop" ? "发送" : "Send";
+}
+
+function pickSlackComposeQuery(worldState: WorldState | null, surface: LivePackSurface): string {
+  const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
+  const composeCandidate =
+    candidates.find((candidate) => {
+      const hintText = candidateHintText(candidate);
+      return (
+        candidate.role === "textbox" ||
+        /(message|reply|消息|回复)/iu.test(hintText) ||
+        /(message|reply|消息|回复)/iu.test(candidate.text)
+      );
+    }) ?? null;
+
+  if (!composeCandidate) {
+    return defaultLocalizedTarget(surface, "compose", worldState);
+  }
+
+  const hints = (composeCandidate.sourceHints ?? {}) as Record<string, unknown>;
+  return (
+    String(hints.placeholder ?? hints.ariaLabel ?? composeCandidate.text ?? "").trim() ||
+    defaultLocalizedTarget(surface, "compose", worldState)
+  );
+}
+
+function pickSlackSendQuery(worldState: WorldState | null, surface: LivePackSurface): string {
+  const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
+  const sendCandidate =
+    candidates.find((candidate) => {
+      const hintText = candidateHintText(candidate);
+      return candidate.role === "button" && (SEND_PATTERN.test(hintText) || SEND_PATTERN.test(candidate.text));
+    }) ?? null;
+
+  if (!sendCandidate) {
+    return defaultLocalizedTarget(surface, "send", worldState);
+  }
+
+  return (
+    String(sendCandidate.text ?? "").trim() ||
+    String(((sendCandidate.sourceHints ?? {}) as Record<string, unknown>).ariaLabel ?? "").trim() ||
+    defaultLocalizedTarget(surface, "send", worldState)
+  );
+}
+
+function extractSlackThreadContext(worldState: WorldState | null, summary: string): string[] {
+  const lines = visibleLines(worldState).filter((line) => !isSlackUiChrome(line));
+  const normalizedSummary = normalizeSlackSummary(summary);
+  const summaryIndex = lines.findIndex((line) => normalizeSlackSummary(line) === normalizedSummary);
+  const pool = summaryIndex === -1 ? lines : lines.slice(summaryIndex + 1);
+  return uniqueStrings(
+    pool.filter((line) => {
+      const normalized = normalizeSlackSummary(line);
+      return normalized && normalized !== normalizedSummary && !UNREAD_PATTERN.test(line) && !SEND_PATTERN.test(line);
+    })
+  ).slice(0, 4);
+}
+
+function buildSlackReplySteps(surface: LivePackSurface): RuntimeStep[] {
+  return [
+    {
+      label: "Open unread Slack thread",
+      surface,
+      action: "clickTarget",
+      params: { targetQuery: "{{openTarget}}" },
+      checkpoint: false
+    },
+    {
+      label: "Wait for Slack composer",
+      surface,
+      action: "waitForTarget",
+      params: { targetQuery: "{{typeTarget}}", timeoutMs: 5000 },
+      checkpoint: false
+    },
+    {
+      label: "Type Slack reply",
+      surface,
+      action: "typeIntoTarget",
+      params: { targetQuery: "{{typeTarget}}", text: "{{typeText}}", clear: false },
+      checkpoint: false
+    },
+    {
+      label: "Send Slack reply",
+      surface,
+      action: "clickTarget",
+      params: { targetQuery: "{{sendTarget}}" },
+      checkpoint: false
+    }
+  ];
+}
+
+async function observeWatchSurface({
+  rule,
+  workspace,
+  surfaceRegistry,
+  surface
+}: LivePackObserveArgs & { surface: LivePackSurface }): Promise<WorldState | null> {
+  const adapter = surfaceRegistry.get(surface);
+  if (!adapter) {
+    return null;
+  }
+
+  return (await adapter.observe({
+    task: createWatchTask(rule),
+    workspace: profileAsWorkspace(rule, workspace),
+    traceId: null,
+    label: `watch-${rule.id}`
+  })) as WorldState;
+}
+
+async function openSlackThreadForContext({
+  rule,
+  workspace,
+  surfaceRegistry,
+  surface,
+  detection
+}: LivePackExtractContextArgs & { surface: LivePackSurface }): Promise<WorldState | null> {
+  const adapter = surfaceRegistry.get(surface);
+  if (!adapter) {
+    return null;
+  }
+
+  const openTarget = String(detection.inputs?.openTarget ?? detection.summary ?? "").trim();
+  if (!openTarget) {
+    return null;
+  }
+
+  const openCandidate = (detection.metadata?.openCandidate ?? null) as Record<string, unknown> | null;
+  await adapter.act({
+    task: createWatchTask(rule),
+    step: {
+      id: `slack-open-${rule.id}`,
+      label: "Open Slack thread",
+      surface,
+      action: "clickTarget",
+      params: {
+        targetQuery: openTarget,
+        ...(openCandidate ? { target: openCandidate } : {})
+      }
+    },
+    workspace: profileAsWorkspace(rule, workspace),
+    traceId: null,
+    outputs: {}
+  });
+
+  if (surface === "browser") {
+    await adapter.act({
+      task: createWatchTask(rule),
+      step: {
+        id: `slack-open-wait-${rule.id}`,
+        label: "Wait for Slack thread",
+        surface,
+        action: "wait",
+        params: { ms: 100 }
+      },
+      workspace: profileAsWorkspace(rule, workspace),
+      traceId: null,
+      outputs: {}
+    });
+  }
+
+  return observeWatchSurface({
+    rule,
+    workspace,
+    surfaceRegistry,
+    controlPlane: {} as LivePackControlPlane,
+    surface
+  });
+}
+
+function createSlackPack({
+  name,
+  surface,
+  description
+}: {
+  name: string;
+  surface: LivePackSurface;
+  description: string;
+}): LivePack {
+  return {
+    name,
+    info: {
+      name,
+      family: "chat",
+      surface,
+      supportsDrafts: true,
+      supportsAutoSend: true,
+      description
+    },
+    async activate({ rule, workspace, surfaceRegistry }) {
+      const adapter = surfaceRegistry.get(surface);
+      if (!adapter) {
+        return;
+      }
+
+      const watchTask = createWatchTask(rule);
+      const watchWorkspace = profileAsWorkspace(rule, workspace);
+      if (surface === "desktop") {
+        const appName = rule.appTarget ?? "Slack";
+        await adapter
+          .act({
+            task: watchTask,
+            step: {
+              id: `watch-focus-${rule.id}`,
+              action: "focusApp",
+              surface,
+              params: { name: appName }
+            },
+            workspace: watchWorkspace,
+            traceId: null,
+            outputs: {}
+          })
+          .catch(() => null);
+        return;
+      }
+
+      const startUrl = String(rule.taskInputs?.startUrl ?? rule.taskInputs?.url ?? rule.appTarget ?? "").trim();
+      if (/^https?:\/\//u.test(startUrl)) {
+        await adapter.act({
+          task: watchTask,
+          step: {
+            id: `watch-goto-${rule.id}`,
+            action: "goto",
+            surface,
+            params: { url: startUrl, waitUntil: "domcontentloaded", timeoutMs: 15000 }
+          },
+          workspace: watchWorkspace,
+          traceId: null,
+          outputs: {}
+        });
+      } else {
+        await adapter.focus({
+          task: watchTask,
+          workspace: watchWorkspace,
+          traceId: null
+        }).catch(() => null);
+      }
+    },
+    async observeInbox(args) {
+      return observeWatchSurface({ ...args, surface });
+    },
+    async detectNewItems({ rule, worldState, dedupeState = {} }) {
+      const candidate = findSlackUnreadCandidate(worldState);
+      if (!candidate) {
+        return null;
+      }
+
+      const summary = normalizeSlackSummary(candidate.text || candidateHintText(candidate));
+      if (!summary) {
+        return null;
+      }
+
+      const context = contextForSignal(worldState, { text: candidate.text || summary });
+      const itemFingerprint = fingerprint(
+        `${name}:${surface}:${rule.workspaceName ?? "default"}:${summary}:${context.join("|")}`
+      );
+      if (dedupeState.lastFingerprint === itemFingerprint) {
+        return null;
+      }
+
+      return {
+        fingerprint: itemFingerprint,
+        summary,
+        text: summary,
+        context,
+        inputs: {
+          watchItemText: summary,
+          watchSummary: summary,
+          watchContext: context.join("\n"),
+          openTarget: String(candidate.text ?? summary).trim() || summary
+        },
+        metadata: {
+          openCandidate: candidate,
+          surface
+        }
+      };
+    },
+    async extractContext(args) {
+      const threadState = await openSlackThreadForContext({ ...args, surface });
+      const composeTarget = pickSlackComposeQuery(threadState, surface);
+      const sendTarget = pickSlackSendQuery(threadState, surface);
+      const summary = String(args.detection.summary ?? "").trim();
+      const context = extractSlackThreadContext(threadState, summary);
+      return {
+        summary,
+        context,
+        inputs: {
+          ...(args.detection.inputs ?? {}),
+          watchContext: context.join("\n"),
+          openTarget: String(args.detection.inputs?.openTarget ?? summary).trim() || summary,
+          typeTarget: composeTarget,
+          sendTarget
+        },
+        taskSpec: {
+          preferredSurface: surface,
+          steps: buildSlackReplySteps(surface)
+        }
+      };
+    },
+    async draftReply({ rule, detection, controlPlane }) {
+      const summary = String(detection?.summary ?? "").trim();
+      const context = Array.isArray(detection?.context) ? detection.context : [];
+      if (controlPlane.modelClient.isConfigured()) {
+        const drafted = await controlPlane.modelClient.draftReply({
+          goal: rule.goal,
+          livePack: name,
+          summary,
+          context
+        });
+        return {
+          replyText: String(drafted.replyText ?? "").trim(),
+          metadata: {
+            confidence: drafted.confidence ?? null,
+            rationale: drafted.rationale ?? null,
+            source: "model"
+          }
+        };
+      }
+
+      return draftHeuristicReply({
+        family: "chat",
+        goal: rule.goal,
+        summary,
+        context
+      });
+    }
+  };
 }
 
 function createVisualDesktopPack({
@@ -366,7 +841,6 @@ function createVisualDesktopPack({
     async draftReply({ rule, detection, controlPlane }) {
       const summary = String(detection?.summary ?? "").trim();
       const context = Array.isArray(detection?.context) ? detection.context : [];
-      const combinedContext = [summary, ...context].filter(Boolean).join("\n");
       if (controlPlane.modelClient.isConfigured()) {
         const drafted = await controlPlane.modelClient.draftReply({
           goal: rule.goal,
@@ -384,23 +858,12 @@ function createVisualDesktopPack({
         };
       }
 
-      const chinese = /[\u4e00-\u9fff]/u.test(`${rule.goal} ${combinedContext}`);
-      const replyText =
-        family === "mail"
-          ? chinese
-            ? "收到你的邮件，我会尽快处理并回复。"
-            : "Thanks for your email. I received it and will follow up shortly."
-          : chinese
-            ? "收到，我会尽快处理。"
-            : "Got it. I will follow up shortly.";
-      return {
-        replyText,
-        metadata: {
-          confidence: null,
-          rationale: "heuristic fallback",
-          source: "heuristic"
-        }
-      };
+      return draftHeuristicReply({
+        family,
+        goal: rule.goal,
+        summary,
+        context
+      });
     }
   };
 }
@@ -425,13 +888,15 @@ export class LivePackRegistry {
         family: "generic",
         description: "Generic desktop watcher with OCR-based trigger detection."
       }),
-      createVisualDesktopPack({
+      createSlackPack({
         name: "slack-desktop",
-        family: "chat",
-        description: "Slack desktop watcher that detects unread threads and drafts short replies.",
-        defaultTriggerTexts: ["unread", "new message", "new messages", "未读", "mention"],
-        unreadTokens: ["unread", "new message", "new messages", "未读", "mention"],
-        ignoreTokens: ["send", "reply", "search", "compose", "发送", "回复", "搜索"]
+        surface: "desktop",
+        description: "Slack desktop watcher that detects unread threads, extracts context, and sends low-risk replies."
+      }),
+      createSlackPack({
+        name: "slack-browser",
+        surface: "browser",
+        description: "Slack browser watcher that detects unread threads, extracts context, and sends low-risk replies."
       }),
       createVisualDesktopPack({
         name: "wechat-desktop",

@@ -257,6 +257,7 @@ export interface WatchDetection {
   taskSpec?: Partial<TaskSpec> | null;
   replyText?: string | null;
   context?: string[];
+  metadata?: Record<string, unknown>;
 }
 
 export interface TeachTemplateInput {

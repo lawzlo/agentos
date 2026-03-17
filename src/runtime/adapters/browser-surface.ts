@@ -60,9 +60,14 @@ export class BrowserSurfaceAdapter extends SurfaceAdapter {
     this.contexts = new Map();
   }
 
+  #contextKey(workspace: WorkspaceRecord): string {
+    return workspace.profilePath || workspace.id;
+  }
+
   async #getContext(workspace: WorkspaceRecord): Promise<BrowserContext> {
-    if (this.contexts.has(workspace.id)) {
-      return this.contexts.get(workspace.id);
+    const contextKey = this.#contextKey(workspace);
+    if (this.contexts.has(contextKey)) {
+      return this.contexts.get(contextKey);
     }
 
     if (!this.browserExecutable) {
@@ -78,7 +83,7 @@ export class BrowserSurfaceAdapter extends SurfaceAdapter {
       args: ["--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check"]
     });
 
-    this.contexts.set(workspace.id, context);
+    this.contexts.set(contextKey, context);
     return context;
   }
 

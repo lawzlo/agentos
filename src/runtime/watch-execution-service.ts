@@ -130,6 +130,12 @@ export class WatchExecutionService {
       return baseTaskSpec;
     }
 
+    const templateInputs =
+      ((watchRule.watchProfile?.metadata as { templateInputs?: TeachTemplateInput[] } | undefined)?.templateInputs ?? []);
+    const explicitSteps = Array.isArray(explicitTaskSpec.steps)
+      ? materializeWatchActionTemplate(explicitTaskSpec.steps, runtimeInputs, templateInputs)
+      : baseTaskSpec.steps;
+
     return {
       ...baseTaskSpec,
       ...explicitTaskSpec,
@@ -137,7 +143,7 @@ export class WatchExecutionService {
         ...runtimeInputs,
         ...(explicitTaskSpec.inputs ?? {})
       },
-      steps: explicitTaskSpec.steps ?? baseTaskSpec.steps
+      steps: explicitSteps
     };
   }
 

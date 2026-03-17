@@ -151,7 +151,7 @@ ALLOW_UNSIGNED_PACKAGE=1 npm run package:macos
 - Tasks can opt into a persistent named workspace with `workspaceName`.
 - Saved skills can be listed or installed through the local API and invoked with `skillName`.
 - Teach Mode can save a successful run into a reusable skill either during task submission with `saveSkillAs` or later through `POST /skills/from-task`.
-- Standing tasks are stored as watch rules. The runtime currently ships bundled live packs for `slack-desktop`, `wechat-desktop`, `generic-mail-desktop`, and `generic-desktop`.
+- Standing tasks are stored as watch rules. The runtime currently ships bundled live packs for `slack-desktop`, `slack-browser`, `wechat-desktop`, `generic-mail-desktop`, and `generic-desktop`.
 - Live packs now expose pack metadata through `/packs`, and `agentos doctor` summarizes degraded watches and pending drafts.
 - `agentos doctor --bundle` writes a local diagnostic bundle under `.agentos/daemon/bundles/`.
 - `agentos version` and `GET /version` expose the runtime, native protocol, store schema, and install layout contract versions.
