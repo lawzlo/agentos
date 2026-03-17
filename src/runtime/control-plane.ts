@@ -25,6 +25,7 @@ import { LivePackRegistry } from "./live-pack-registry.js";
 import { WatchScheduler } from "./watch-scheduler.js";
 import { normalizeWatchRule } from "./watch-rule-parser.js";
 import { deriveWatchProfileFromExecution, materializeWatchActionTemplate } from "./watch-profile.js";
+import { buildTeachRecording } from "./teach-recorder.js";
 
 export class ControlPlane {
   config: any;
@@ -205,7 +206,8 @@ export class ControlPlane {
       planSteps: task.plan ?? [],
       executionSteps: task.result?.steps ?? [],
       manualCorrections: task.result?.manualCorrections ?? [],
-      manualTeachSteps: task.result?.manualTeachSteps ?? []
+      manualTeachSteps: task.result?.manualTeachSteps ?? [],
+      teachRecording: task.result?.teachRecording ?? null
     });
 
     this.eventBus.broadcast("skill.saved", skill);
@@ -249,6 +251,7 @@ export class ControlPlane {
       manualTeachSteps: task.result?.manualTeachSteps ?? [],
       manualCorrections: task.result?.manualCorrections ?? [],
       result: task.result,
+      teachRecording: task.result?.teachRecording ?? null,
       overrides: {
         triggerTexts: triggerTexts.length ? triggerTexts : existingWatchRule?.watchProfile?.triggerTexts ?? [],
         recoveryHints: existingWatchRule?.watchProfile?.recoveryHints ?? []
@@ -921,6 +924,18 @@ export class ControlPlane {
           }
 
           result = this.#mergePersistedResult(taskId, result);
+          result = {
+            ...result,
+            teachRecording: buildTeachRecording({
+              goal: task.goal,
+              taskSpec: task.taskSpec,
+              planSteps: this.store.getTask(taskId)?.plan ?? [],
+              executionSteps: result.steps ?? [],
+              manualTeachSteps: result.manualTeachSteps ?? [],
+              manualCorrections: result.manualCorrections ?? [],
+              result
+            })
+          };
 
           task = this.store.updateTask(taskId, {
             status: "completed",

@@ -1,4 +1,5 @@
 import { BUILTIN_SKILLS } from "./builtin-skills.js";
+import type { TeachRecording } from "../types/runtime-schema.js";
 
 function normalizeSkill(skill) {
   return {
@@ -235,27 +236,35 @@ export class SkillRegistry {
     planSteps = [],
     executionSteps = [],
     manualCorrections = [],
-    manualTeachSteps = []
+    manualTeachSteps = [],
+    teachRecording = null as TeachRecording | null
   }) {
     const taskInputs = ((taskSpec as Record<string, any>).inputs ?? {}) as Record<string, any>;
-    const rawActionTemplate = buildActionTemplate({ planSteps, executionSteps }).concat(
-      manualTeachSteps.map((step) => ({
-        label: step.label,
-        surface: step.surface,
-        action: step.action,
-        params: cloneValue(step.params ?? {}),
-        saveAs: step.saveAs ?? null,
-        expect: cloneValue(step.expect ?? null),
-        checkpoint: step.checkpoint ?? true
-      }))
-    );
-    const skillInputs = collectSkillInputs(taskSpec);
-    const actionTemplate = rawActionTemplate.map((step) => ({
-      ...step,
-      params: parameterizeValue(step.params, skillInputs),
-      expect: parameterizeValue(step.expect, skillInputs)
-    }));
-    const anchors = deriveAnchors({ planSteps, executionSteps });
+    const rawActionTemplate =
+      teachRecording?.actionTemplate?.length
+        ? cloneValue(teachRecording.actionTemplate)
+        : buildActionTemplate({ planSteps, executionSteps }).concat(
+            manualTeachSteps.map((step) => ({
+              label: step.label,
+              surface: step.surface,
+              action: step.action,
+              params: cloneValue(step.params ?? {}),
+              saveAs: step.saveAs ?? null,
+              expect: cloneValue(step.expect ?? null),
+              checkpoint: step.checkpoint ?? true
+            }))
+          );
+    const skillInputs =
+      teachRecording?.templateInputs?.length ? cloneValue(teachRecording.templateInputs) : collectSkillInputs(taskSpec);
+    const actionTemplate =
+      teachRecording?.actionTemplate?.length
+        ? rawActionTemplate
+        : rawActionTemplate.map((step) => ({
+            ...step,
+            params: parameterizeValue(step.params, skillInputs),
+            expect: parameterizeValue(step.expect, skillInputs)
+          }));
+    const anchors = uniqueAnchors([...(teachRecording?.anchors ?? []), ...deriveAnchors({ planSteps, executionSteps })]);
     const surfaces = uniqueStrings(actionTemplate.map((step) => step.surface));
     const normalizedSurfaceScope =
       surfaceScope && surfaceScope !== "auto"
@@ -264,12 +273,14 @@ export class SkillRegistry {
           ? surfaces[0]
           : "any";
     const triggerTerms = uniqueStrings([
+      ...(teachRecording?.triggerTerms ?? []),
       goal,
       ...(taskInputs.clickTarget ? [taskInputs.clickTarget] : []),
       ...(taskInputs.typeTarget ? [taskInputs.typeTarget] : []),
       ...anchors.map((anchor) => anchor.text)
     ]).slice(0, 8);
     const recoveryHints = uniqueStrings([
+      ...(teachRecording?.recoveryHints ?? []),
       ...manualCorrections.map((entry) => entry?.note),
       ...(result?.recovery?.classification ? [`recovery:${result.recovery.classification}`] : [])
     ]).slice(0, 8);
@@ -289,7 +300,8 @@ export class SkillRegistry {
         executionMode: (taskSpec as Record<string, any>).executionMode ?? "planned",
         manualCorrectionsCount: manualCorrections.length,
         manualTeachStepsCount: manualTeachSteps.length,
-        skillInputs
+        skillInputs,
+        teachRecordingSummary: teachRecording?.summary ?? null
       }
     });
   }

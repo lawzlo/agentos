@@ -897,6 +897,68 @@ test("completed tasks can be saved as skills after the run finishes", async () =
   }
 });
 
+test("completed tasks generate teach recordings that learned skills can reuse", async () => {
+  const dataDir = await createTempDir();
+  const fixture = await startFixtureServer();
+  const server = await startAgentServer({ dataDir });
+
+  try {
+    const createResponse = await fetch(`${server.baseUrl}/tasks`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        goal: "Learn a reusable recording from the browser workflow",
+        preferredSurface: "browser",
+        saveSkillAs: "teach-recorded-browser-flow",
+        inputs: {
+          startUrl: fixture.url,
+          typeTarget: "name",
+          typeText: "Teach Recorder"
+        },
+        steps: [
+          {
+            label: "Open demo page",
+            surface: "browser",
+            action: "goto",
+            params: { url: fixture.url }
+          },
+          {
+            label: "Type name into the form",
+            surface: "browser",
+            action: "typeIntoTarget",
+            params: { targetQuery: "name", text: "Teach Recorder", clear: true }
+          },
+          {
+            label: "Submit the form",
+            surface: "browser",
+            action: "clickTarget",
+            params: { targetQuery: "submit" }
+          }
+        ]
+      })
+    });
+    const { task } = await createResponse.json();
+
+    const completed = await waitForTask(server.baseUrl, task.id, (current) => current.status === "completed");
+    assert.ok(completed.result.teachRecording);
+    assert.equal(completed.result.teachRecording.summary.stepCount, 3);
+    assert.ok(completed.result.teachRecording.templateInputs.some((entry) => entry.key === "typeText"));
+    assert.ok(
+      completed.result.teachRecording.actionTemplate.some(
+        (step) => step.action === "typeIntoTarget" && step.params.text === "{{typeText}}"
+      )
+    );
+
+    const skillResponse = await fetch(`${server.baseUrl}/skills/teach-recorded-browser-flow`);
+    const skillPayload = await skillResponse.json();
+    assert.equal(skillPayload.skill.metadata.teachRecordingSummary.stepCount, 3);
+    assert.deepEqual(skillPayload.skill.actionTemplate, completed.result.teachRecording.actionTemplate);
+  } finally {
+    await fixture.close();
+    await server.close();
+  }
+});
+
 test("named workspace profiles are reusable across tasks", async () => {
   const dataDir = await createTempDir();
   const server = await startAgentServer({ dataDir });

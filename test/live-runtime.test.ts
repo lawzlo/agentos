@@ -23,6 +23,20 @@ async function waitForWatchTask(baseUrl, watchRuleId, timeoutMs = 10000) {
   throw new Error(`Timed out waiting for watch task from ${watchRuleId}`);
 }
 
+async function waitForWatchRule(baseUrl, watchRuleId, matcher, timeoutMs = 10000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const response = await fetch(`${baseUrl}/watches/${watchRuleId}`);
+    const payload = await response.json();
+    if (matcher(payload.watch)) {
+      return payload.watch;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+
+  throw new Error(`Timed out waiting for watch rule ${watchRuleId}`);
+}
+
 test("watch rules trigger deduped tasks and can be enabled or disabled", async () => {
   const dataDir = await createTempDir();
   const fakeLivePack = {
@@ -178,6 +192,125 @@ test("completed tasks can be taught into watch profiles and replayed by a live r
     const completedTriggeredTask = await waitForTask(server.baseUrl, triggeredTask.id, (task) => task.status === "completed");
     assert.equal(completedTriggeredTask.status, "completed");
     assert.equal(completedTriggeredTask.plan[0].action, "wait");
+  } finally {
+    await server.close();
+  }
+});
+
+test("watch packs can enrich detected items with context before creating a task", async () => {
+  const dataDir = await createTempDir();
+  const fakeLivePack = {
+    async detectNewItems({ dedupeState }) {
+      if (dedupeState.lastFingerprint === "context-item-1") {
+        return null;
+      }
+
+      return {
+        fingerprint: "context-item-1",
+        summary: "Thread A",
+        inputs: {
+          watchItemText: "Thread A"
+        }
+      };
+    },
+    async extractContext() {
+      return {
+        inputs: {
+          watchContext: "Customer asked about pricing",
+          typeText: "Following up from watch"
+        }
+      };
+    }
+  };
+  const server = await startAgentServer({
+    dataDir,
+    livePacks: {
+      "context-live": fakeLivePack
+    }
+  });
+
+  try {
+    await fetch(`${server.baseUrl}/skills/context-watch-skill`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        surfaceScope: "desktop",
+        triggerTerms: ["context watch"],
+        anchors: [],
+        actionTemplate: [
+          {
+            label: "Wait briefly",
+            surface: "desktop",
+            action: "wait",
+            params: { ms: 20 },
+            checkpoint: false
+          }
+        ],
+        successCriteria: [],
+        recoveryHints: []
+      })
+    });
+
+    const createResponse = await fetch(`${server.baseUrl}/watches`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        goal: "Always watch the contextual inbox and react",
+        livePack: "context-live",
+        preferredSurface: "desktop",
+        skillName: "context-watch-skill",
+        workspaceName: "context-main",
+        pollIntervalMs: 50
+      })
+    });
+    const { watch } = await createResponse.json();
+
+    const triggeredTask = await waitForWatchTask(server.baseUrl, watch.id);
+    const completed = await waitForTask(server.baseUrl, triggeredTask.id, (task) => task.status === "completed");
+    assert.equal(completed.taskSpec.inputs.watchItemText, "Thread A");
+    assert.equal(completed.taskSpec.inputs.watchContext, "Customer asked about pricing");
+    assert.equal(completed.taskSpec.inputs.typeText, "Following up from watch");
+  } finally {
+    await server.close();
+  }
+});
+
+test("watch failures enter backoff and record retry metadata", async () => {
+  const dataDir = await createTempDir();
+  const fakeLivePack = {
+    async detectNewItems() {
+      throw new Error("watch source unavailable");
+    }
+  };
+  const server = await startAgentServer({
+    dataDir,
+    livePacks: {
+      "broken-live": fakeLivePack
+    }
+  });
+
+  try {
+    const createResponse = await fetch(`${server.baseUrl}/watches`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        goal: "Always watch the broken inbox",
+        livePack: "broken-live",
+        preferredSurface: "desktop",
+        pollIntervalMs: 1000
+      })
+    });
+    const { watch } = await createResponse.json();
+
+    const backedOff = await waitForWatchRule(
+      server.baseUrl,
+      watch.id,
+      (current) => current.status === "backoff" && Number(current.dedupeState?.failureCount ?? 0) >= 1
+    );
+    assert.equal(backedOff.status, "backoff");
+    assert.match(backedOff.lastError, /watch source unavailable/);
+    assert.ok(Number(backedOff.dedupeState.backoffMs) >= 1000);
+    assert.ok(Number(backedOff.dedupeState.retryAfter) > Date.now());
   } finally {
     await server.close();
   }

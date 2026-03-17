@@ -109,7 +109,37 @@ export interface WatchProfile {
   actionTemplate?: RuntimeStep[];
   recoveryHints?: string[];
   executionMode?: "planned" | "autonomous";
+  liveHints?: {
+    openTargetQuery?: string | null;
+    composeTargetQuery?: string | null;
+    sendTargetQuery?: string | null;
+    waitText?: string | null;
+    dynamicInputKeys?: string[];
+  };
   metadata?: Record<string, unknown>;
+}
+
+export interface TeachTemplateInput {
+  key: string;
+  label: string;
+  defaultValue: string;
+}
+
+export interface TeachRecording {
+  version: number;
+  recordedAt: string;
+  actionTemplate: RuntimeStep[];
+  anchors: Array<{ text: string; role: string }>;
+  templateInputs: TeachTemplateInput[];
+  triggerTerms: string[];
+  recoveryHints: string[];
+  summary: {
+    sourceGoal: string;
+    stepCount: number;
+    surfaces: string[];
+    manualTeachStepsCount: number;
+    manualCorrectionsCount: number;
+  };
 }
 
 export interface SkillDefinition {

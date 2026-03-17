@@ -1,3 +1,5 @@
+import type { TeachRecording } from "../types/runtime-schema.js";
+
 function cloneValue(value) {
   if (value == null) {
     return value;
@@ -136,7 +138,8 @@ function collectWatchInputs(taskSpec: Record<string, any> = {}) {
     ["waitUrl", "Wait For URL"],
     ["captureLabel", "Capture Label"],
     ["watchItemText", "Watch Item Text"],
-    ["watchSummary", "Watch Summary"]
+    ["watchSummary", "Watch Summary"],
+    ["watchContext", "Watch Context"]
   ];
 
   return fields
@@ -203,6 +206,32 @@ export function materializeWatchActionTemplate(actionTemplate = [], runtimeInput
   }));
 }
 
+function deriveLiveHints(actionTemplate = [], templateInputs = [], taskInputs: Record<string, any> = {}) {
+  const targetSteps = actionTemplate.filter((step) => ["clickTarget", "focusTarget", "typeIntoTarget"].includes(step?.action));
+  const sendPattern = /(send|reply|submit|发送|回复|提交)/iu;
+  const openStep =
+    targetSteps.find((step) => {
+      const text = String(step?.params?.targetQuery ?? step?.params?.target?.text ?? "").trim();
+      return text && !sendPattern.test(text);
+    }) ?? targetSteps[0] ?? null;
+  const composeStep = targetSteps.find((step) => step?.action === "typeIntoTarget") ?? null;
+  const sendStep =
+    [...targetSteps]
+      .reverse()
+      .find((step) => {
+        const text = String(step?.params?.targetQuery ?? step?.params?.target?.text ?? "").trim();
+        return sendPattern.test(text);
+      }) ?? null;
+
+  return {
+    openTargetQuery: openStep?.params?.targetQuery ?? openStep?.params?.target?.text ?? null,
+    composeTargetQuery: composeStep?.params?.targetQuery ?? composeStep?.params?.target?.text ?? taskInputs.typeTarget ?? null,
+    sendTargetQuery: sendStep?.params?.targetQuery ?? sendStep?.params?.target?.text ?? null,
+    waitText: String(taskInputs.waitText ?? "").trim() || null,
+    dynamicInputKeys: templateInputs.map((entry) => entry.key)
+  };
+}
+
 export function deriveWatchProfileFromExecution({
   goal,
   taskId,
@@ -212,23 +241,36 @@ export function deriveWatchProfileFromExecution({
   manualTeachSteps = [],
   manualCorrections = [],
   result = null,
+  teachRecording = null as TeachRecording | null,
   overrides = {} as Record<string, any>
 }) {
   const taskInputs = ((taskSpec as Record<string, any>).inputs ?? {}) as Record<string, any>;
-  const rawActionTemplate = buildActionTemplate({
-    planSteps,
-    executionSteps,
-    manualTeachSteps
-  });
-  const templateInputs = collectWatchInputs(taskSpec);
-  const actionTemplate = rawActionTemplate.map((step) => ({
-    ...step,
-    params: parameterizeValue(step.params, templateInputs),
-    expect: parameterizeValue(step.expect, templateInputs)
-  }));
-  const anchors = deriveAnchors({ planSteps, executionSteps, manualTeachSteps });
+  const rawActionTemplate =
+    teachRecording?.actionTemplate?.length
+      ? cloneValue(teachRecording.actionTemplate)
+      : buildActionTemplate({
+          planSteps,
+          executionSteps,
+          manualTeachSteps
+        });
+  const templateInputs = teachRecording?.templateInputs?.length
+    ? cloneValue(teachRecording.templateInputs)
+    : collectWatchInputs(taskSpec);
+  const actionTemplate =
+    teachRecording?.actionTemplate?.length
+      ? rawActionTemplate
+      : rawActionTemplate.map((step) => ({
+          ...step,
+          params: parameterizeValue(step.params, templateInputs),
+          expect: parameterizeValue(step.expect, templateInputs)
+        }));
+  const anchors = uniqueAnchors([
+    ...(teachRecording?.anchors ?? []),
+    ...deriveAnchors({ planSteps, executionSteps, manualTeachSteps })
+  ]);
   const triggerTexts = uniqueStrings([
     ...(overrides.triggerTexts ?? []),
+    ...(teachRecording?.triggerTerms ?? []),
     ...(taskInputs.waitText ? [taskInputs.waitText] : []),
     ...(taskInputs.clickTarget ? [taskInputs.clickTarget] : []),
     ...(taskInputs.watchItemText ? [taskInputs.watchItemText] : []),
@@ -237,6 +279,7 @@ export function deriveWatchProfileFromExecution({
   ]).slice(0, 10);
   const recoveryHints = uniqueStrings([
     ...(overrides.recoveryHints ?? []),
+    ...(teachRecording?.recoveryHints ?? []),
     ...manualCorrections.map((entry) => entry?.note),
     ...(result?.recovery?.classification ? [`recovery:${result.recovery.classification}`] : [])
   ]).slice(0, 10);
@@ -247,12 +290,14 @@ export function deriveWatchProfileFromExecution({
     actionTemplate,
     recoveryHints,
     executionMode: "planned",
+    liveHints: deriveLiveHints(actionTemplate, templateInputs, taskInputs),
     metadata: {
       learnedFromTaskId: taskId ?? null,
       sourceGoal: goal,
       manualCorrectionsCount: manualCorrections.length,
       manualTeachStepsCount: manualTeachSteps.length,
-      templateInputs
+      templateInputs,
+      teachRecordingSummary: teachRecording?.summary ?? null
     }
   };
 }

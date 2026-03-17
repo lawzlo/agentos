@@ -30,6 +30,15 @@ function isActiveTask(task?: TaskLike | null): boolean {
   return !["completed", "failed", "blocked", "interrupted"].includes(task.status);
 }
 
+function clearWatchFailureState(dedupeState: Record<string, unknown> = {}) {
+  return {
+    ...dedupeState,
+    failureCount: 0,
+    retryAfter: null,
+    backoffMs: 0
+  };
+}
+
 export class WatchScheduler {
   controlPlane: any;
   store: any;
@@ -111,6 +120,11 @@ export class WatchScheduler {
       return;
     }
 
+    const retryAfter = Number(rule.dedupeState?.retryAfter ?? 0);
+    if (retryAfter && retryAfter > Date.now()) {
+      return;
+    }
+
     const pack = this.livePackRegistry.get(rule.livePack);
     if (!pack) {
       const degraded = this.store.putWatchRule({
@@ -132,10 +146,32 @@ export class WatchScheduler {
           ...rule,
           lastObservedAt: nowIso(),
           lastError: null,
-          status: "watching"
+          status: "watching",
+          dedupeState: clearWatchFailureState({
+            ...(rule.dedupeState ?? {}),
+            activeTaskId
+          })
         });
         this.eventBus.broadcast("watch.updated", updated);
         return;
+      }
+
+      if (activeTaskId && activeTask?.status === "completed" && rule.dedupeState?.lastHandledTaskId !== activeTaskId) {
+        await pack.markHandled?.({
+          rule,
+          task: activeTask,
+          controlPlane: this.controlPlane
+        });
+
+        const acknowledged = this.store.putWatchRule({
+          ...rule,
+          dedupeState: {
+            ...(rule.dedupeState ?? {}),
+            lastHandledTaskId: activeTaskId,
+            activeTaskId: null
+          }
+        });
+        this.eventBus.broadcast("watch.updated", acknowledged);
       }
 
       const workspaceName = rule.workspaceName ?? `${rule.livePack}-live`;
@@ -161,7 +197,7 @@ export class WatchScheduler {
           })
         : null;
 
-      const detection = await pack.detectNewItems?.({
+      let detection = await pack.detectNewItems?.({
         rule,
         worldState,
         dedupeState: rule.dedupeState ?? {},
@@ -169,17 +205,44 @@ export class WatchScheduler {
         controlPlane: this.controlPlane
       });
 
+      if (detection && pack.extractContext) {
+        const context = await pack.extractContext({
+          rule,
+          detection,
+          worldState,
+          workspace,
+          controlPlane: this.controlPlane,
+          surfaceRegistry: this.controlPlane.surfaceRegistry
+        });
+        const mergedTaskSpec =
+          detection.taskSpec || context?.taskSpec
+            ? {
+                ...(detection.taskSpec ?? {}),
+                ...(context?.taskSpec ?? {})
+              }
+            : undefined;
+        detection = {
+          ...detection,
+          ...context,
+          inputs: {
+            ...(detection.inputs ?? {}),
+            ...(context?.inputs ?? {})
+          },
+          ...(mergedTaskSpec ? { taskSpec: mergedTaskSpec } : {})
+        };
+      }
+
       if (!detection) {
         const updated = this.store.putWatchRule({
           ...rule,
           lastObservedAt: nowIso(),
           lastError: null,
           status: "watching",
-          dedupeState: {
+          dedupeState: clearWatchFailureState({
             ...(rule.dedupeState ?? {}),
             failureCount: 0,
             activeTaskId: null
-          }
+          })
         });
         this.eventBus.broadcast("watch.updated", updated);
         return;
@@ -192,13 +255,14 @@ export class WatchScheduler {
         lastTriggeredAt: nowIso(),
         lastError: null,
         status: "watching",
-        dedupeState: {
+        dedupeState: clearWatchFailureState({
           ...(rule.dedupeState ?? {}),
           lastFingerprint: detection.fingerprint ?? detection.summary ?? task.id,
           lastSummary: detection.summary ?? null,
+          lastContext: detection.context ?? [],
           activeTaskId: task.id,
           failureCount: 0
-        }
+        })
       });
       this.eventBus.broadcast("watch.triggered", {
         rule: updated,
@@ -208,17 +272,24 @@ export class WatchScheduler {
     } catch (error) {
       const current = this.store.getWatchRule(ruleId) as WatchRuleLike | null;
       const failureCount = Number(current?.dedupeState?.failureCount ?? 0) + 1;
+      const backoffMs = Math.min(Math.max((current ?? rule).pollIntervalMs * 2 ** Math.max(failureCount - 1, 0), (current ?? rule).pollIntervalMs), 300000);
       const updated = this.store.putWatchRule({
         ...(current ?? rule),
         lastObservedAt: nowIso(),
         lastError: error instanceof Error ? error.message : String(error),
-        status: failureCount >= 2 ? "degraded" : "watching",
+        status: failureCount >= 3 ? "degraded" : "backoff",
         dedupeState: {
           ...((current ?? rule).dedupeState ?? {}),
-          failureCount
+          failureCount,
+          backoffMs,
+          retryAfter: Date.now() + backoffMs
         }
       });
       this.eventBus.broadcast("watch.updated", updated);
+      this.eventBus.broadcast("watch.backoff", {
+        rule: updated,
+        backoffMs
+      });
       this.eventBus.broadcast("watch.error", {
         rule: updated,
         error: error instanceof Error ? error.message : String(error)
