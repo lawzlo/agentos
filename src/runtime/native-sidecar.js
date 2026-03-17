@@ -10,8 +10,6 @@ export class NativeSidecarClient {
     executablePath;
     args;
     manifestPath;
-    helperExecutable;
-    helperSourcePath;
     child;
     readline;
     pending;
@@ -20,13 +18,11 @@ export class NativeSidecarClient {
     disabled;
     unavailableReason;
     stderr;
-    constructor({ dataDir, executablePath = process.env.AGENTOS_NATIVE_SIDECAR, args = [], manifestPath = path.join(process.cwd(), "rust", "agentos-native", "Cargo.toml"), helperExecutable = null, helperSourcePath = null } = {}) {
+    constructor({ dataDir, executablePath = process.env.AGENTOS_NATIVE_SIDECAR, args = [], manifestPath = path.join(process.cwd(), "rust", "agentos-native", "Cargo.toml") } = {}) {
         this.dataDir = dataDir ?? path.join(process.cwd(), ".agentos");
         this.executablePath = executablePath ?? null;
         this.args = args;
         this.manifestPath = manifestPath;
-        this.helperExecutable = helperExecutable;
-        this.helperSourcePath = helperSourcePath;
         this.child = null;
         this.readline = null;
         this.pending = new Map();
@@ -111,13 +107,7 @@ export class NativeSidecarClient {
                 cwd: process.cwd(),
                 env: {
                     ...process.env,
-                    AGENTOS_DATA_DIR: this.dataDir,
-                    ...(this.helperExecutable
-                        ? { AGENTOS_MAC_HELPER_EXECUTABLE: this.helperExecutable }
-                        : {}),
-                    ...(this.helperSourcePath
-                        ? { AGENTOS_MAC_HELPER_SOURCE: this.helperSourcePath }
-                        : {})
+                    AGENTOS_DATA_DIR: this.dataDir
                 },
                 stdio: ["pipe", "pipe", "pipe"]
             });
@@ -158,7 +148,7 @@ export class NativeSidecarClient {
                     pending.resolve(payload.result);
                     return;
                 }
-                pending.reject(new Error(payload.error ?? "Rust sidecar request failed."));
+                pending.reject(new Error(("error" in payload ? payload.error : null) ?? "Rust sidecar request failed."));
             });
             this.child = child;
             this.readline = rl;

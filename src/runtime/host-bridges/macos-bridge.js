@@ -1,33 +1,26 @@
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { MacOSHelper } from "./macos-helper.js";
 import { NativeSidecarClient } from "../native-sidecar.js";
 const execFileAsync = promisify(execFile);
 function escapeAppleScript(text) {
     return String(text).replaceAll("\\", "\\\\").replaceAll("\"", "\\\"");
 }
 export class MacOSHostBridge {
-    helper;
     sidecar;
     constructor(options = {}) {
-        const helperExecutable = options.helperExecutable ?? process.env.AGENTOS_MAC_HELPER_EXECUTABLE;
-        const sourcePath = options.sourcePath ??
-            path.join(process.cwd(), "native", "macos", "AgentOSHelper.swift");
         const dataDir = options.dataDir ?? path.join(process.cwd(), ".agentos");
-        this.helper = new MacOSHelper({
-            dataDir,
-            helperExecutable,
-            sourcePath
-        });
         this.sidecar = new NativeSidecarClient({
             dataDir,
-            helperExecutable,
-            helperSourcePath: sourcePath
+            executablePath: options.sidecarExecutablePath ?? process.env.AGENTOS_NATIVE_SIDECAR,
+            args: options.sidecarArgs ?? []
         });
     }
     async captureScreen(filePath) {
-        return this.#requestSidecar("capture_screen", { filePath }, () => this.helper.run("capture-screen", [filePath]));
+        return this.#requestSidecar("capture_screen", { filePath }, async () => {
+            await execFileAsync("screencapture", ["-x", filePath]);
+            return { filePath };
+        });
     }
     async launchApp(name) {
         return this.#requestSidecar("launch_app", { name }, async () => {
@@ -45,38 +38,40 @@ export class MacOSHostBridge {
         });
     }
     async getFrontmostApp() {
-        return this.#requestSidecar("frontmost_app", {}, () => this.helper.run("frontmost-app"));
+        return this.#requestSidecar("frontmost_app", {}, async () => {
+            const { stdout } = await execFileAsync("osascript", [
+                "-e",
+                'tell application "System Events" to get name of first application process whose frontmost is true'
+            ]);
+            return { appName: stdout.trim() };
+        });
     }
     async getPermissionsStatus() {
-        await this.helper.ensureBuilt();
-        return this.#requestSidecar("permissions_status", {}, () => this.helper.run("permissions-status"));
+        return this.#requestSidecar("permissions_status", {}, null);
     }
     async listWindows() {
-        await this.helper.ensureBuilt();
-        return this.#requestSidecar("list_windows", {}, () => this.helper.run("list-windows"));
+        return this.#requestSidecar("list_windows", {}, null);
     }
     async typeText(text) {
-        return this.#requestSidecar("type_text", { text }, () => this.helper.run("type-text", [text]));
+        return this.#requestSidecar("type_text", { text }, null);
     }
     async pressKey(key, modifiers = []) {
-        return this.#requestSidecar("key_press", { key, modifiers }, () => this.helper.run("key-press", [key, modifiers.join(",")]));
+        return this.#requestSidecar("key_press", { key, modifiers }, null);
     }
     async clickAt(x, y) {
-        return this.#requestSidecar("click_at", { x, y }, () => this.helper.run("click-at", [x, y]));
+        return this.#requestSidecar("click_at", { x, y }, null);
     }
     async moveMouse(x, y) {
-        return this.#requestSidecar("move_mouse", { x, y }, () => this.helper.run("move-mouse", [x, y]));
+        return this.#requestSidecar("move_mouse", { x, y }, null);
     }
     async scroll(dx, dy) {
-        return this.#requestSidecar("scroll", { dx, dy }, () => this.helper.run("scroll", [dx, dy]));
+        return this.#requestSidecar("scroll", { dx, dy }, null);
     }
     async ocrImage(filePath) {
-        await this.helper.ensureBuilt();
-        return this.#requestSidecar("ocr_image", { filePath }, () => this.helper.run("ocr-image", [filePath]));
+        return this.#requestSidecar("ocr_image", { filePath }, null);
     }
     async findText(filePath, query) {
-        await this.helper.ensureBuilt();
-        return this.#requestSidecar("find_text", { filePath, query }, () => this.helper.run("find-text", [filePath, query]));
+        return this.#requestSidecar("find_text", { filePath, query }, null);
     }
     async sidecarHealth() {
         return this.sidecar.request("health", {});

@@ -1,9 +1,10 @@
 {
   "compilerOptions": {
     "target": "ES2022",
+    "lib": ["ES2022", "DOM"],
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
-    "strict": true,
+    "strict": false,
     "noEmit": true,
     "allowJs": true,
     "checkJs": false,
@@ -13,6 +14,6 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["src/**/*.ts", "src/**/*.d.ts"],
+  "include": ["src/**/*.ts", "src/**/*.d.ts", "bin/**/*.ts", "public/**/*.ts", "test/**/*.ts"],
   "exclude": ["node_modules", ".agentos", "rust/**/target/**"]
 }

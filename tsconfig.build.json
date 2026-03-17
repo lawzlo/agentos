@@ -5,18 +5,6 @@
     "allowJs": false,
     "checkJs": false
   },
-  "include": [
-    "src/config.ts",
-    "src/daemon-state.ts",
-    "src/runtime/id.ts",
-    "src/runtime/world-state.ts",
-    "src/runtime/native-sidecar.ts",
-    "src/runtime/watch-scheduler.ts",
-    "src/runtime/watch-rule-parser.ts",
-    "src/runtime/host-bridges/macos-helper.ts",
-    "src/runtime/host-bridges/macos-bridge.ts",
-    "src/runtime/host-bridges/windows-bridge.ts",
-    "src/types/**/*.ts"
-  ],
+  "include": ["src/**/*.ts", "bin/**/*.ts", "public/**/*.ts", "test/**/*.ts"],
   "exclude": ["node_modules", ".agentos", "rust/**/target/**"]
 }

@@ -1,5 +1,9 @@
+import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+
+import { NativeSidecarClient } from "../native-sidecar.js";
+import type { SidecarFindTextResult, SidecarListWindowsResult, SidecarOcrResult, SidecarPermissionsResult } from "../../types/native-sidecar.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -143,18 +147,38 @@ $observations = foreach ($line in $result.Lines) {
 export interface WindowsHostBridgeOptions {
   platform?: string;
   runPowerShell?: PowerShellRunner;
+  dataDir?: string;
+  sidecarExecutablePath?: string | null;
+  sidecarArgs?: string[];
+  sidecarEnabled?: boolean;
 }
 
 export class WindowsHostBridge {
   platform: string;
   runPowerShell: PowerShellRunner;
+  sidecar: NativeSidecarClient | null;
 
   constructor({
     platform = process.platform,
-    runPowerShell = defaultRunner
+    runPowerShell = defaultRunner,
+    dataDir,
+    sidecarExecutablePath = process.env.AGENTOS_NATIVE_SIDECAR,
+    sidecarArgs = [],
+    sidecarEnabled
   }: WindowsHostBridgeOptions = {}) {
     this.platform = platform;
     this.runPowerShell = runPowerShell;
+    const shouldUseSidecar =
+      sidecarEnabled ??
+      (Boolean(sidecarExecutablePath) ||
+        (platform === process.platform && process.platform === "win32"));
+    this.sidecar = shouldUseSidecar
+      ? new NativeSidecarClient({
+          dataDir: dataDir ?? path.join(process.cwd(), ".agentos"),
+          executablePath: sidecarExecutablePath,
+          args: sidecarArgs
+        })
+      : null;
   }
 
   #assertSupported(): void {
@@ -171,9 +195,33 @@ export class WindowsHostBridge {
     return stdout.trim() ? (JSON.parse(stdout) as T) : ({} as T);
   }
 
+  async #requestSidecar<TResult>(
+    method: string,
+    params: Record<string, unknown>,
+    fallback: (() => Promise<TResult>) | null
+  ): Promise<TResult> {
+    if (this.sidecar && (await this.sidecar.isAvailable())) {
+      try {
+        return await this.sidecar.request<TResult>(method, params);
+      } catch {
+        if (fallback) {
+          return fallback();
+        }
+        throw new Error(`Rust sidecar request failed for ${method}.`);
+      }
+    }
+
+    if (!fallback) {
+      throw new Error(`No fallback is available for ${method}.`);
+    }
+
+    return fallback();
+  }
+
   async captureScreen(filePath: string): Promise<{ filePath: string }> {
     this.#assertSupported();
-    const script = `
+    return this.#requestSidecar("capture_screen", { filePath }, () => {
+      const script = `
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
@@ -183,31 +231,37 @@ $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bound
 $bitmap.Save('${escapePowerShellString(filePath)}')
 @{ filePath = '${escapePowerShellString(filePath)}' } | ConvertTo-Json -Compress
 `;
-    return this.#runJson(script);
+      return this.#runJson(script);
+    });
   }
 
   async launchApp(name: string): Promise<{ launched: string }> {
     this.#assertSupported();
-    const escaped = escapePowerShellString(name);
-    return this.#runJson(`
+    return this.#requestSidecar("launch_app", { name }, () => {
+      const escaped = escapePowerShellString(name);
+      return this.#runJson(`
 Start-Process -FilePath '${escaped}'
 @{ launched = '${escaped}' } | ConvertTo-Json -Compress
 `);
+    });
   }
 
   async focusApp(name: string): Promise<{ focused: boolean; name: string }> {
     this.#assertSupported();
-    const escaped = escapePowerShellString(name);
-    return this.#runJson(`
+    return this.#requestSidecar("focus_app", { name }, () => {
+      const escaped = escapePowerShellString(name);
+      return this.#runJson(`
 $shell = New-Object -ComObject WScript.Shell
 $focused = [bool]$shell.AppActivate('${escaped}')
 @{ focused = $focused; name = '${escaped}' } | ConvertTo-Json -Compress
 `);
+    });
   }
 
   async getFrontmostApp(): Promise<Record<string, unknown>> {
     this.#assertSupported();
-    return this.#runJson(`
+    return this.#requestSidecar("frontmost_app", {}, () =>
+      this.#runJson(`
 Add-Type @"
 using System;
 using System.Text;
@@ -232,21 +286,23 @@ $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
   windowTitle = $builder.ToString()
   mainWindowTitle = if ($process) { $process.MainWindowTitle } else { $builder.ToString() }
 } | ConvertTo-Json -Compress
-`);
+`)
+    );
   }
 
-  async getPermissionsStatus(): Promise<Record<string, unknown>> {
+  async getPermissionsStatus(): Promise<SidecarPermissionsResult | Record<string, unknown>> {
     this.#assertSupported();
-    return {
+    return this.#requestSidecar<SidecarPermissionsResult>("permissions_status", {}, async () => ({
       accessibility: true,
       screenRecording: true,
       note: "Windows desktop automation does not require separate Accessibility or Screen Recording consent like macOS."
-    };
+    }));
   }
 
-  async listWindows(): Promise<{ windows: unknown[] }> {
+  async listWindows(): Promise<SidecarListWindowsResult> {
     this.#assertSupported();
-    return this.#runJson(`
+    return this.#requestSidecar<SidecarListWindowsResult>("list_windows", {}, () =>
+      this.#runJson(`
 Add-Type @"
 using System;
 using System.Text;
@@ -298,17 +354,20 @@ $callback = [AgentOSWindowEnumerator+EnumWindowsProc]{
 }
 [void][AgentOSWindowEnumerator]::EnumWindows($callback, [IntPtr]::Zero)
 @{ windows = @($windows) } | ConvertTo-Json -Compress -Depth 8
-`);
+`)
+    );
   }
 
   async typeText(text: string): Promise<{ typed: number; text: string }> {
     this.#assertSupported();
-    const sendText = escapeSendKeysText(text);
-    return this.#runJson(`
+    return this.#requestSidecar("type_text", { text }, () => {
+      const sendText = escapeSendKeysText(text);
+      return this.#runJson(`
 Add-Type -AssemblyName System.Windows.Forms
 [System.Windows.Forms.SendKeys]::SendWait('${escapePowerShellString(sendText)}')
 @{ typed = ${String(text).length}; text = '${escapePowerShellString(text)}' } | ConvertTo-Json -Compress
 `);
+    });
   }
 
   async pressKey(
@@ -316,19 +375,22 @@ Add-Type -AssemblyName System.Windows.Forms
     modifiers: string[] = []
   ): Promise<{ pressed: boolean; key: string; modifiers: string[] }> {
     this.#assertSupported();
-    const sequence = `${normalizeModifierPrefix(modifiers)}${normalizeKeyToken(key)}`;
-    const escapedKey = escapePowerShellString(String(key));
-    const serializedModifiers = modifiers.map((modifier) => `'${escapePowerShellString(modifier)}'`).join(", ");
-    return this.#runJson(`
+    return this.#requestSidecar("key_press", { key, modifiers }, () => {
+      const sequence = `${normalizeModifierPrefix(modifiers)}${normalizeKeyToken(key)}`;
+      const escapedKey = escapePowerShellString(String(key));
+      const serializedModifiers = modifiers.map((modifier) => `'${escapePowerShellString(modifier)}'`).join(", ");
+      return this.#runJson(`
 Add-Type -AssemblyName System.Windows.Forms
 [System.Windows.Forms.SendKeys]::SendWait('${escapePowerShellString(sequence)}')
 @{ pressed = $true; key = '${escapedKey}'; modifiers = @(${serializedModifiers}) } | ConvertTo-Json -Compress
 `);
+    });
   }
 
   async moveMouse(x: number, y: number): Promise<{ ok: boolean; x: number; y: number }> {
     this.#assertSupported();
-    return this.#runJson(`
+    return this.#requestSidecar("move_mouse", { x, y }, () =>
+      this.#runJson(`
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
@@ -338,12 +400,14 @@ public static class AgentOSMouse {
 "@
 [void][AgentOSMouse]::SetCursorPos(${Math.round(x)}, ${Math.round(y)})
 @{ ok = $true; x = ${Math.round(x)}; y = ${Math.round(y)} } | ConvertTo-Json -Compress
-`);
+`)
+    );
   }
 
   async clickAt(x: number, y: number): Promise<{ ok: boolean; x: number; y: number }> {
     this.#assertSupported();
-    return this.#runJson(`
+    return this.#requestSidecar("click_at", { x, y }, () =>
+      this.#runJson(`
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
@@ -356,12 +420,14 @@ public static class AgentOSMouse {
 [AgentOSMouse]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
 [AgentOSMouse]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
 @{ ok = $true; x = ${Math.round(x)}; y = ${Math.round(y)} } | ConvertTo-Json -Compress
-`);
+`)
+    );
   }
 
   async scroll(dx: number, dy: number): Promise<{ ok: boolean; dx: number; dy: number }> {
     this.#assertSupported();
-    return this.#runJson(`
+    return this.#requestSidecar("scroll", { dx, dy }, () =>
+      this.#runJson(`
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
@@ -371,51 +437,57 @@ public static class AgentOSMouse {
 "@
 [AgentOSMouse]::mouse_event(0x0800, 0, 0, ${Math.round(dy)}, [UIntPtr]::Zero)
 @{ ok = $true; dx = ${Math.round(dx)}; dy = ${Math.round(dy)} } | ConvertTo-Json -Compress
-`);
+`)
+    );
   }
 
-  async ocrImage(filePath: string): Promise<{ observations: unknown[] }> {
+  async ocrImage(filePath: string): Promise<SidecarOcrResult> {
     this.#assertSupported();
-    return this.#runJson(createWindowsOcrScript(filePath));
+    return this.#requestSidecar<SidecarOcrResult>("ocr_image", { filePath }, () =>
+      this.#runJson(createWindowsOcrScript(filePath))
+    );
   }
 
-  async findText(filePath: string, query: string): Promise<Record<string, unknown>> {
+  async findText(filePath: string, query: string): Promise<SidecarFindTextResult | Record<string, unknown>> {
     this.#assertSupported();
-    const ocr = await this.ocrImage(filePath);
-    const observations = Array.isArray(ocr.observations) ? ocr.observations : [];
-    const queryLower = String(query ?? "").toLowerCase();
-    const ranked = observations
-      .map((observation) => {
-        const text = String((observation as Record<string, unknown>).text ?? "");
-        const lowered = text.toLowerCase();
-        let score = 0;
-        if (lowered === queryLower) {
-          score = 2;
-        } else if (lowered.includes(queryLower)) {
-          score = 1;
-        }
+    return this.#requestSidecar<SidecarFindTextResult>("find_text", { filePath, query }, async () => {
+      const ocr = await this.ocrImage(filePath);
+      const observations = Array.isArray(ocr.observations) ? ocr.observations : [];
+      const queryLower = String(query ?? "").toLowerCase();
+      const ranked = observations
+        .map((observation) => {
+          const candidate = observation as unknown as Record<string, unknown>;
+          const text = String(candidate.text ?? "");
+          const lowered = text.toLowerCase();
+          let score = 0;
+          if (lowered === queryLower) {
+            score = 2;
+          } else if (lowered.includes(queryLower)) {
+            score = 1;
+          }
 
-        return { score, observation };
-      })
-      .filter((entry) => entry.score > 0)
-      .sort((left, right) => {
-        if (left.score !== right.score) {
-          return right.score - left.score;
-        }
-        const leftConfidence = Number((left.observation as Record<string, unknown>).confidence ?? 0);
-        const rightConfidence = Number((right.observation as Record<string, unknown>).confidence ?? 0);
-        return rightConfidence - leftConfidence;
-      });
+          return { score, observation };
+        })
+        .filter((entry) => entry.score > 0)
+        .sort((left, right) => {
+          if (left.score !== right.score) {
+            return right.score - left.score;
+          }
+          const leftConfidence = Number((left.observation as unknown as Record<string, unknown>).confidence ?? 0);
+          const rightConfidence = Number((right.observation as unknown as Record<string, unknown>).confidence ?? 0);
+          return rightConfidence - leftConfidence;
+        });
 
-    if (!ranked.length) {
-      return { found: false, count: observations.length };
-    }
+      if (!ranked.length) {
+        return { found: false, count: observations.length };
+      }
 
-    return {
-      found: true,
-      match: ranked[0].observation,
-      count: observations.length
-    };
+      return {
+        found: true,
+        match: ranked[0].observation,
+        count: observations.length
+      };
+    });
   }
 
   async runCommand(command: string, cwd = process.cwd()): Promise<PowerShellResult> {
@@ -423,5 +495,7 @@ public static class AgentOSMouse {
     return this.runPowerShell(command, { cwd });
   }
 
-  async shutdown(): Promise<void> {}
+  async shutdown(): Promise<void> {
+    await this.sidecar?.shutdown();
+  }
 }
