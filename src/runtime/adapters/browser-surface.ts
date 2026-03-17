@@ -1,3 +1,4 @@
+import fs from "node:fs/promises";
 import path from "node:path";
 import { chromium } from "playwright-core";
 import type { BrowserContext, Locator, Page } from "playwright-core";
@@ -37,6 +38,15 @@ async function locateElement(page, params) {
   }
 
   throw new Error("Browser action requires params.selector or params.text");
+}
+
+function resolveWorkspacePath(workspace: WorkspaceRecord, targetPath: unknown): string {
+  const raw = String(targetPath ?? "").trim();
+  if (!raw) {
+    throw new Error("File path is required.");
+  }
+
+  return path.isAbsolute(raw) ? raw : path.resolve(workspace.rootPath, raw);
 }
 
 export class BrowserSurfaceAdapter extends SurfaceAdapter {
@@ -204,6 +214,18 @@ export class BrowserSurfaceAdapter extends SurfaceAdapter {
     return true;
   }
 
+  async #locatorForAction(page: Page, params: Record<string, unknown>): Promise<Locator | null> {
+    if (params.target) {
+      return this.#resolveLocatorFromTarget(page, params.target as Record<string, unknown>);
+    }
+
+    if (params.selector || params.text) {
+      return locateElement(page, params);
+    }
+
+    return null;
+  }
+
   async discover({ workspace }) {
     const page = await this.#page(workspace);
     return {
@@ -310,9 +332,46 @@ export class BrowserSurfaceAdapter extends SurfaceAdapter {
           return { text: (await locator.textContent())?.trim() ?? "" };
         }
         case "upload": {
-          const locator = await locateElement(page, params);
-          await locator.setInputFiles(params.path);
-          return { uploaded: params.path };
+          const locator = await this.#locatorForAction(page, params);
+          if (!locator) {
+            throw new Error("Browser upload requires a target, selector, or text.");
+          }
+          const filePaths = Array.isArray(params.paths)
+            ? params.paths.map((entry) => resolveWorkspacePath(workspace, entry))
+            : [resolveWorkspacePath(workspace, params.path)];
+          await locator.setInputFiles(filePaths);
+          return { uploaded: filePaths.length === 1 ? filePaths[0] : filePaths, uploadedPaths: filePaths };
+        }
+        case "download": {
+          const locator = await this.#locatorForAction(page, params);
+          const timeoutMs = Number(params.timeoutMs ?? 15000);
+          const fileNameOverride = String(params.fileName ?? "").trim();
+          const destinationOverride = params.path ? resolveWorkspacePath(workspace, params.path) : null;
+          const [download] = await Promise.all([
+            page.waitForEvent("download", { timeout: timeoutMs }),
+            (async () => {
+              if (locator) {
+                await locator.click({ timeout: timeoutMs });
+                return;
+              }
+
+              const clicked = await this.#clickByBounds(page, (params.target as { bounds?: { centerX?: number; centerY?: number } } | undefined)?.bounds);
+              if (!clicked) {
+                throw new Error(`Could not resolve download target ${String((params.target as { id?: string } | undefined)?.id ?? params.targetQuery ?? "unknown")}`);
+              }
+            })()
+          ]);
+          const suggestedFileName = download.suggestedFilename();
+          const destinationPath =
+            destinationOverride ?? path.join(workspace.downloadsPath, fileNameOverride || suggestedFileName);
+          await fs.mkdir(path.dirname(destinationPath), { recursive: true });
+          await download.saveAs(destinationPath);
+          return {
+            filePath: destinationPath,
+            fileName: path.basename(destinationPath),
+            suggestedFileName,
+            url: download.url()
+          };
         }
         case "evaluate":
           return {
@@ -450,6 +509,16 @@ export class BrowserSurfaceAdapter extends SurfaceAdapter {
       details.selectorText = content;
       if (content !== selectorText.equals) {
         return { ok: false, details };
+      }
+    }
+
+    if (typeof check.fileExists === "string" && check.fileExists) {
+      const filePath = resolveWorkspacePath(workspace, check.fileExists);
+      try {
+        await fs.access(filePath);
+        details.fileExists = true;
+      } catch {
+        return { ok: false, details: { ...details, fileExists: false, filePath } };
       }
     }
 

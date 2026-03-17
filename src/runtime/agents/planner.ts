@@ -63,6 +63,10 @@ export function describeStep(step: RuntimeStep): string {
       return "Wait for the page to settle";
     case "capture":
       return "Capture a screenshot";
+    case "download":
+      return `Download from "${params.targetQuery ?? target?.text ?? step.label}"`;
+    case "upload":
+      return `Upload a file via "${params.targetQuery ?? target?.text ?? step.label}"`;
     case "launchApp":
       return `Open ${params.name}`;
     case "focusApp":
@@ -189,6 +193,74 @@ function heuristicPlan(taskSpec: TaskSpec): RuntimeStep[] {
           surface: "browser",
           action: "typeIntoTarget",
           params: { targetQuery: String(inputs.typeTarget), text: String(inputs.typeText), clear: true }
+        },
+        steps.length
+      )
+    );
+  }
+
+  if (defaultSurface === "browser" && inputs.downloadTarget) {
+    steps.push(
+      normalizeStep(
+        {
+          label: `Download via ${inputs.downloadTarget}`,
+          surface: "browser",
+          action: "download",
+          params: {
+            targetQuery: String(inputs.downloadTarget),
+            ...(inputs.downloadPath ? { path: String(inputs.downloadPath) } : {}),
+            ...(inputs.downloadFileName ? { fileName: String(inputs.downloadFileName) } : {})
+          },
+          saveAs: "download"
+        },
+        steps.length
+      )
+    );
+  }
+
+  if (defaultSurface === "browser" && inputs.uploadTarget && inputs.uploadPath) {
+    steps.push(
+      normalizeStep(
+        {
+          label: `Upload via ${inputs.uploadTarget}`,
+          surface: "browser",
+          action: "upload",
+          params: {
+            targetQuery: String(inputs.uploadTarget),
+            path: String(inputs.uploadPath)
+          }
+        },
+        steps.length
+      )
+    );
+  }
+
+  if (defaultSurface === "browser" && inputs.documentTarget && inputs.documentText) {
+    steps.push(
+      normalizeStep(
+        {
+          label: `Edit ${inputs.documentTarget}`,
+          surface: "browser",
+          action: "typeIntoTarget",
+          params: {
+            targetQuery: String(inputs.documentTarget),
+            text: String(inputs.documentText),
+            clear: true
+          }
+        },
+        steps.length
+      )
+    );
+  }
+
+  if (defaultSurface === "browser" && inputs.saveTarget) {
+    steps.push(
+      normalizeStep(
+        {
+          label: `Save via ${inputs.saveTarget}`,
+          surface: "browser",
+          action: "clickTarget",
+          params: { targetQuery: String(inputs.saveTarget) }
         },
         steps.length
       )
@@ -336,6 +408,77 @@ function heuristicPlan(taskSpec: TaskSpec): RuntimeStep[] {
     );
   }
 
+  if (defaultSurface === "desktop" && inputs.writeFilePath && inputs.writeText != null) {
+    steps.push(
+      normalizeStep(
+        {
+          label: `Write ${inputs.writeFilePath}`,
+          surface: "desktop",
+          action: "writeFileText",
+          params: { path: String(inputs.writeFilePath), text: String(inputs.writeText) }
+        },
+        steps.length
+      )
+    );
+  }
+
+  if (defaultSurface === "desktop" && inputs.appendFilePath && inputs.appendText != null) {
+    steps.push(
+      normalizeStep(
+        {
+          label: `Append ${inputs.appendFilePath}`,
+          surface: "desktop",
+          action: "appendFileText",
+          params: { path: String(inputs.appendFilePath), text: String(inputs.appendText) }
+        },
+        steps.length
+      )
+    );
+  }
+
+  if (defaultSurface === "desktop" && inputs.moveFileFrom && inputs.moveFileTo) {
+    steps.push(
+      normalizeStep(
+        {
+          label: `Move ${inputs.moveFileFrom}`,
+          surface: "desktop",
+          action: "moveFile",
+          params: { from: String(inputs.moveFileFrom), to: String(inputs.moveFileTo) }
+        },
+        steps.length
+      )
+    );
+  }
+
+  if (defaultSurface === "desktop" && inputs.copyFileFrom && inputs.copyFileTo) {
+    steps.push(
+      normalizeStep(
+        {
+          label: `Copy ${inputs.copyFileFrom}`,
+          surface: "desktop",
+          action: "copyFile",
+          params: { from: String(inputs.copyFileFrom), to: String(inputs.copyFileTo) }
+        },
+        steps.length
+      )
+    );
+  }
+
+  if (defaultSurface === "desktop" && inputs.readFilePath) {
+    steps.push(
+      normalizeStep(
+        {
+          label: `Read ${inputs.readFilePath}`,
+          surface: "desktop",
+          action: "readFileText",
+          params: { path: String(inputs.readFilePath) },
+          saveAs: "fileContent"
+        },
+        steps.length
+      )
+    );
+  }
+
   if (defaultSurface === "desktop" && inputs.sendTarget && inputs.autoSend === true) {
     steps.push(
       normalizeStep(
@@ -417,6 +560,14 @@ export class PlannerAgent {
       };
     }
 
+    if (Array.isArray(task.taskSpec.steps) && task.taskSpec.steps.length) {
+      return {
+        steps: task.taskSpec.steps.map((step, index) => normalizeStep(step, index)),
+        source: "explicit_steps",
+        summary: "Run the exact steps you provided."
+      };
+    }
+
     const matchedSkill = this.skillRegistry?.matchSkill({
       goal: task.goal,
       preferredSurface: task.preferredSurface
@@ -427,14 +578,6 @@ export class PlannerAgent {
         source: "matched_skill",
         summary: `Reuse the matched skill ${matchedSkill.name}.`,
         skillName: matchedSkill.name
-      };
-    }
-
-    if (Array.isArray(task.taskSpec.steps) && task.taskSpec.steps.length) {
-      return {
-        steps: task.taskSpec.steps.map((step, index) => normalizeStep(step, index)),
-        source: "explicit_steps",
-        summary: "Run the exact steps you provided."
       };
     }
 

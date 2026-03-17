@@ -319,6 +319,133 @@ export async function startMailFixtureServer({
   };
 }
 
+export async function startDocsFilesFixtureServer() {
+  const state = {
+    uploadedFileName: "",
+    uploadedFileContent: "",
+    savedDocument: "Initial draft"
+  };
+
+  const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+
+    if (req.method === "GET" && url.pathname === "/docs") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(`<!doctype html>
+        <html>
+          <body>
+            <main>
+              <h1>Docs and Files Workspace</h1>
+              <a id="download-link" href="/files/report.txt" download>Download report</a>
+
+              <section>
+                <label for="upload-input">Upload file</label>
+                <input id="upload-input" type="file" aria-label="Upload file" />
+                <p id="upload-status">Uploaded: ${state.uploadedFileName || "none"}</p>
+              </section>
+
+              <section>
+                <label for="doc-editor">Document editor</label>
+                <textarea id="doc-editor" placeholder="Document editor">${state.savedDocument}</textarea>
+                <button id="save-doc" type="button">Save document</button>
+                <p id="doc-status">Saved: ${state.savedDocument}</p>
+              </section>
+
+              <script>
+                const uploadInput = document.getElementById("upload-input");
+                const uploadStatus = document.getElementById("upload-status");
+                const docEditor = document.getElementById("doc-editor");
+                const docStatus = document.getElementById("doc-status");
+                const saveButton = document.getElementById("save-doc");
+
+                uploadInput.addEventListener("change", async () => {
+                  const file = uploadInput.files[0];
+                  if (!file) {
+                    uploadStatus.textContent = "Uploaded: none";
+                    return;
+                  }
+                  const content = await file.text();
+                  await fetch("/api/upload", {
+                    method: "POST",
+                    headers: { "content-type": "application/json" },
+                    body: JSON.stringify({ name: file.name, content })
+                  });
+                  uploadStatus.textContent = "Uploaded: " + file.name;
+                });
+
+                saveButton.addEventListener("click", async () => {
+                  await fetch("/api/document", {
+                    method: "POST",
+                    headers: { "content-type": "application/json" },
+                    body: JSON.stringify({ text: docEditor.value })
+                  });
+                  docStatus.textContent = "Saved: " + docEditor.value;
+                });
+              </script>
+            </main>
+          </body>
+        </html>`);
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/files/report.txt") {
+      res.writeHead(200, {
+        "content-type": "text/plain; charset=utf-8",
+        "content-disposition": 'attachment; filename="report.txt"'
+      });
+      res.end("Quarterly report\nLine 2");
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/upload") {
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      }
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      state.uploadedFileName = String(body.name ?? "");
+      state.uploadedFileContent = String(body.content ?? "");
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/document") {
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      }
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      state.savedDocument = String(body.text ?? "");
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/state") {
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify(state));
+      return;
+    }
+
+    res.writeHead(404);
+    res.end();
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, () => resolve()));
+  const address = server.address() as AddressInfo;
+  return {
+    url: `http://127.0.0.1:${address.port}`,
+    async getState() {
+      const response = await fetch(`http://127.0.0.1:${address.port}/api/state`);
+      return response.json();
+    },
+    async close() {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  };
+}
+
 export async function startAgentServer({ dataDir, ...overrides }) {
   const app = await createAgentServer({
     port: 0,

@@ -18,6 +18,15 @@ function pickBridge(options) {
   return null;
 }
 
+function resolveWorkspacePath(workspace, targetPath) {
+  const raw = String(targetPath ?? "").trim();
+  if (!raw) {
+    throw new Error("File path is required.");
+  }
+
+  return path.isAbsolute(raw) ? raw : path.resolve(workspace.rootPath, raw);
+}
+
 export class DesktopSurfaceAdapter extends SurfaceAdapter {
   artifactStore: any;
   bridge: any;
@@ -115,8 +124,46 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
   }
 
   async act({ task, step, workspace, traceId }) {
-    const bridge = this.#requireBridge();
     const params = step.params ?? {};
+
+    switch (step.action) {
+      case "readFileText": {
+        const filePath = resolveWorkspacePath(workspace, params.path);
+        return { path: filePath, text: await fs.readFile(filePath, "utf8") };
+      }
+      case "writeFileText": {
+        const filePath = resolveWorkspacePath(workspace, params.path);
+        await fs.mkdir(path.dirname(filePath), { recursive: true });
+        await fs.writeFile(filePath, String(params.text ?? ""), "utf8");
+        return { path: filePath, written: true };
+      }
+      case "appendFileText": {
+        const filePath = resolveWorkspacePath(workspace, params.path);
+        await fs.mkdir(path.dirname(filePath), { recursive: true });
+        await fs.appendFile(filePath, String(params.text ?? ""), "utf8");
+        return { path: filePath, appended: true };
+      }
+      case "moveFile": {
+        const fromPath = resolveWorkspacePath(workspace, params.from);
+        const toPath = resolveWorkspacePath(workspace, params.to);
+        await fs.mkdir(path.dirname(toPath), { recursive: true });
+        await fs.rename(fromPath, toPath);
+        return { fromPath, toPath, moved: true };
+      }
+      case "copyFile": {
+        const fromPath = resolveWorkspacePath(workspace, params.from);
+        const toPath = resolveWorkspacePath(workspace, params.to);
+        await fs.mkdir(path.dirname(toPath), { recursive: true });
+        await fs.copyFile(fromPath, toPath);
+        return { fromPath, toPath, copied: true };
+      }
+      case "listFiles": {
+        const dirPath = resolveWorkspacePath(workspace, params.path ?? ".");
+        return { path: dirPath, entries: await fs.readdir(dirPath) };
+      }
+    }
+
+    const bridge = this.#requireBridge();
 
     switch (step.action) {
       case "launchApp":

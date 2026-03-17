@@ -139,9 +139,26 @@ function collectSkillInputs(taskSpec: Record<string, any> = {}) {
     ["typeTarget", "Type Target"],
     ["typeText", "Text To Type"],
     ["sendTarget", "Send Target"],
+    ["saveTarget", "Save Target"],
     ["waitText", "Wait For Text"],
     ["waitUrl", "Wait For URL"],
-    ["captureLabel", "Capture Label"]
+    ["captureLabel", "Capture Label"],
+    ["downloadTarget", "Download Target"],
+    ["downloadPath", "Download Path"],
+    ["downloadFileName", "Download File Name"],
+    ["uploadTarget", "Upload Target"],
+    ["uploadPath", "Upload Path"],
+    ["documentTarget", "Document Target"],
+    ["documentText", "Document Text"],
+    ["writeFilePath", "Write File Path"],
+    ["writeText", "Write Text"],
+    ["appendFilePath", "Append File Path"],
+    ["appendText", "Append Text"],
+    ["readFilePath", "Read File Path"],
+    ["moveFileFrom", "Move File From"],
+    ["moveFileTo", "Move File To"],
+    ["copyFileFrom", "Copy File From"],
+    ["copyFileTo", "Copy File To"]
   ];
 
   return fields

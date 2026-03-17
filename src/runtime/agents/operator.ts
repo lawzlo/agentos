@@ -14,7 +14,15 @@ import type {
   WorkspaceRecord
 } from "../../types/runtime-schema.js";
 
-const TARGET_ACTIONS = new Set(["clickTarget", "focusTarget", "typeIntoTarget", "waitForTarget", "extractFromTarget"]);
+const TARGET_ACTIONS = new Set([
+  "clickTarget",
+  "focusTarget",
+  "typeIntoTarget",
+  "waitForTarget",
+  "extractFromTarget",
+  "download",
+  "upload"
+]);
 
 interface ControlGatePayload {
   phase: string;
