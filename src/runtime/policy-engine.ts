@@ -1,9 +1,19 @@
+import type { RiskGateDecision, RuntimeStep, TaskSpec, WatchDetection, WatchRule } from "../types/runtime-schema.js";
+
 const HIGH_RISK_KEYWORDS = ["pay", "payment", "wire", "delete", "submit", "send", "sign", "invoice", "合同", "付款", "删除", "提交", "发送", "签署"];
 const HIGH_RISK_AUTOMATION_KEYWORDS = ["pay", "payment", "wire", "delete", "invoice", "sign", "合同", "付款", "删除", "签署"];
 const BLOCKED_ACTIONS = new Set(["shell", "evaluate"]);
 
+interface PolicyEvaluation {
+  allowed: boolean;
+  riskLevel: "normal" | "high";
+  requiresReview: boolean;
+  reasons: string[];
+  [key: string]: unknown;
+}
+
 export class PolicyEngine {
-  evaluateTask(taskSpec) {
+  evaluateTask(taskSpec: TaskSpec): PolicyEvaluation {
     const text = [taskSpec.goal, taskSpec.doneCondition].filter(Boolean).join(" ").toLowerCase();
     const reasons = HIGH_RISK_KEYWORDS.filter((keyword) => text.includes(keyword)).map(
       (keyword) => `goal contains high-risk keyword: ${keyword}`
@@ -17,7 +27,7 @@ export class PolicyEngine {
     };
   }
 
-  evaluateStep(taskSpec, step) {
+  evaluateStep(taskSpec: TaskSpec, step: RuntimeStep): PolicyEvaluation {
     const permissions = taskSpec.permissions ?? {};
     const action = step.action;
     const reasons = [];
@@ -44,11 +54,11 @@ export class PolicyEngine {
     detection = null,
     replyText = ""
   }: {
-    taskSpec: Record<string, any>;
-    watchRule?: Record<string, any> | null;
-    detection?: Record<string, any> | null;
+    taskSpec: TaskSpec;
+    watchRule?: WatchRule | null;
+    detection?: WatchDetection | null;
     replyText?: string;
-  }) {
+  }): RiskGateDecision {
     const livePack = String(watchRule?.livePack ?? "");
     const configuredPolicy =
       watchRule?.taskInputs?.automationPolicy ??
@@ -72,7 +82,8 @@ export class PolicyEngine {
     const inputs = taskSpec?.inputs ?? {};
     const steps = Array.isArray(taskSpec?.steps) ? taskSpec.steps : [];
     const stepLooksLikeSend = steps.some((step) => {
-      const text = String(step?.params?.targetQuery ?? step?.params?.target?.text ?? step?.label ?? "").toLowerCase();
+      const target = (step?.params?.target ?? null) as { text?: string } | null;
+      const text = String(step?.params?.targetQuery ?? target?.text ?? step?.label ?? "").toLowerCase();
       return /(send|reply|submit|发送|回复|提交)/iu.test(text);
     });
     const hasOutboundSendIntent =

@@ -1,4 +1,6 @@
 import { json } from "../http-utils.js";
+import type { ApiRouteContext } from "../types.js";
+import type { DaemonStatus } from "../../types/system.js";
 
 export async function handleSystemRoutes({
   req,
@@ -8,8 +10,9 @@ export async function handleSystemRoutes({
   config,
   activePort,
   startedAt
-}: Record<string, any>) {
-  const daemon = {
+}: ApiRouteContext): Promise<boolean> {
+  const daemon: DaemonStatus = {
+    running: true,
     pid: process.pid,
     port: activePort,
     startedAt,
@@ -59,7 +62,7 @@ export async function handleSystemRoutes({
         ...daemon,
         connectorCount: controlPlane.listConnectors().length,
         watchCount: watches.length,
-        enabledWatchCount: watches.filter((rule: Record<string, any>) => rule.enabled).length
+        enabledWatchCount: watches.filter((rule) => rule.enabled).length
       }
     });
     return true;

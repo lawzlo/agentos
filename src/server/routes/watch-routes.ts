@@ -1,11 +1,21 @@
 import { json, readJsonBody } from "../http-utils.js";
+import type { WatchRuleInput } from "../../runtime/watch-rule-parser.js";
+import type { ApiRouteContext } from "../types.js";
+
+interface WatchFromTaskBody extends Record<string, unknown> {
+  taskId?: string;
+}
+
+interface DraftRejectBody {
+  reason?: string | null;
+}
 
 export async function handleWatchRoutes({
   req,
   res,
   url,
   controlPlane
-}: Record<string, any>) {
+}: ApiRouteContext): Promise<boolean> {
   if (req.method === "GET" && url.pathname === "/connectors") {
     json(res, 200, { connectors: controlPlane.listConnectors(), livePacks: controlPlane.listLivePacks() });
     return true;
@@ -23,25 +33,25 @@ export async function handleWatchRoutes({
 
   if (req.method === "POST" && url.pathname === "/watches/from-task") {
     try {
-      const body = await readJsonBody(req);
+      const body = await readJsonBody<WatchFromTaskBody>(req);
       if (!body.taskId) {
         json(res, 400, { error: "taskId is required" });
         return true;
       }
       const watch = controlPlane.saveTaskAsWatchRule(body.taskId, body);
       json(res, 200, { watch });
-    } catch (error: any) {
-      json(res, 400, { error: error.message });
+    } catch (error: unknown) {
+      json(res, 400, { error: error instanceof Error ? error.message : String(error) });
     }
     return true;
   }
 
   if (req.method === "POST" && url.pathname === "/watches") {
     try {
-      const watch = controlPlane.createWatchRule(await readJsonBody(req));
+      const watch = controlPlane.createWatchRule(await readJsonBody<WatchRuleInput>(req));
       json(res, 201, { watch });
-    } catch (error: any) {
-      json(res, 400, { error: error.message });
+    } catch (error: unknown) {
+      json(res, 400, { error: error instanceof Error ? error.message : String(error) });
     }
     return true;
   }
@@ -51,8 +61,8 @@ export async function handleWatchRoutes({
       const watchRuleId = url.pathname.split("/")[2];
       try {
         json(res, 200, { health: controlPlane.getWatchHealth(watchRuleId) });
-      } catch (error: any) {
-        json(res, 404, { error: error.message });
+      } catch (error: unknown) {
+        json(res, 404, { error: error instanceof Error ? error.message : String(error) });
       }
       return true;
     }
@@ -78,8 +88,8 @@ export async function handleWatchRoutes({
             ? controlPlane.disableWatchRule(watchRuleId)
             : controlPlane.retryWatchRule(watchRuleId);
       json(res, 200, { watch });
-    } catch (error: any) {
-      json(res, 404, { error: error.message });
+    } catch (error: unknown) {
+      json(res, 404, { error: error instanceof Error ? error.message : String(error) });
     }
     return true;
   }
@@ -89,8 +99,8 @@ export async function handleWatchRoutes({
     try {
       controlPlane.deleteWatchRule(watchRuleId);
       json(res, 200, { ok: true });
-    } catch (error: any) {
-      json(res, 404, { error: error.message });
+    } catch (error: unknown) {
+      json(res, 404, { error: error instanceof Error ? error.message : String(error) });
     }
     return true;
   }
@@ -124,20 +134,20 @@ export async function handleWatchRoutes({
     try {
       const draft = await controlPlane.approveDraft(draftId);
       json(res, 200, { draft });
-    } catch (error: any) {
-      json(res, 400, { error: error.message });
+    } catch (error: unknown) {
+      json(res, 400, { error: error instanceof Error ? error.message : String(error) });
     }
     return true;
   }
 
   if (req.method === "POST" && url.pathname.startsWith("/drafts/") && url.pathname.endsWith("/reject")) {
     const draftId = url.pathname.split("/")[2];
-    const body = await readJsonBody(req);
+    const body = await readJsonBody<DraftRejectBody>(req);
     try {
       const draft = controlPlane.rejectDraft(draftId, body.reason ?? null);
       json(res, 200, { draft });
-    } catch (error: any) {
-      json(res, 400, { error: error.message });
+    } catch (error: unknown) {
+      json(res, 400, { error: error instanceof Error ? error.message : String(error) });
     }
     return true;
   }

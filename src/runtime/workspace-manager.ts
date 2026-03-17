@@ -2,25 +2,30 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 import { createId, nowIso } from "./id.js";
+import type { ControlPlaneStore } from "./store.js";
+import type { TaskSpec, WorkspaceProfile, WorkspaceRecord } from "../types/runtime-schema.js";
 
 export class WorkspaceManager {
-  store: any;
+  store: Pick<
+    ControlPlaneStore,
+    "getWorkspaceByTask" | "createWorkspace" | "getWorkspaceProfileByName" | "putWorkspaceProfile" | "listWorkspaceProfiles"
+  >;
   rootDir: string;
   profileRootDir: string;
-  constructor(store: any, rootDir: string) {
+  constructor(store: WorkspaceManager["store"], rootDir: string) {
     this.store = store;
     this.rootDir = path.join(rootDir, "workspaces");
     this.profileRootDir = path.join(rootDir, "workspace-profiles");
   }
 
-  async prepare(taskId: string, taskSpec: Record<string, any> = {}) {
+  async prepare(taskId: string, taskSpec: TaskSpec = { goal: "" }): Promise<WorkspaceRecord> {
     const existing = this.store.getWorkspaceByTask(taskId);
     if (existing) {
       return existing;
     }
 
     if (taskSpec.workspaceName) {
-      const profile = await this.prepareProfile(taskSpec.workspaceName, taskSpec.workspaceMetadata ?? {});
+      const profile = await this.prepareProfile(taskSpec.workspaceName, {});
       const workspace = {
         id: createId("ws"),
         taskId,
@@ -61,7 +66,7 @@ export class WorkspaceManager {
     return this.store.createWorkspace(workspace);
   }
 
-  async prepareProfile(name: string, metadata: Record<string, any> = {}) {
+  async prepareProfile(name: string, metadata: Record<string, unknown> = {}): Promise<WorkspaceProfile> {
     const existing = this.store.getWorkspaceProfileByName(name);
     if (existing) {
       return existing;
@@ -69,7 +74,9 @@ export class WorkspaceManager {
 
     const safeName = String(name).trim().toLowerCase().replaceAll(/[^a-z0-9-]+/g, "-") || createId("profile");
     const rootPath = path.join(this.profileRootDir, safeName);
+    const timestamp = nowIso();
     const profile = {
+      id: createId("wsp"),
       name,
       rootPath,
       profilePath: path.join(rootPath, "profile"),
@@ -77,7 +84,8 @@ export class WorkspaceManager {
       artifactsPath: path.join(rootPath, "artifacts"),
       scratchPath: path.join(rootPath, "scratch"),
       metadata,
-      createdAt: nowIso()
+      createdAt: timestamp,
+      updatedAt: timestamp
     };
 
     await Promise.all([
@@ -90,7 +98,7 @@ export class WorkspaceManager {
     return this.store.putWorkspaceProfile(profile);
   }
 
-  listProfiles() {
+  listProfiles(): WorkspaceProfile[] {
     return this.store.listWorkspaceProfiles();
   }
 }

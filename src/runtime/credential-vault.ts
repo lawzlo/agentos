@@ -1,13 +1,31 @@
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import type { ControlPlaneStore } from "./store.js";
+
+interface VaultSecretRecord {
+  scope: string;
+  secretKey: string;
+  ciphertext?: string;
+  iv?: string;
+  tag?: string;
+  metadata: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface CredentialVaultOptions {
+  store: Pick<ControlPlaneStore, "putVaultEntry" | "getVaultEntry" | "listVaultEntries">;
+  masterKeyPath: string;
+  envKey?: string;
+}
 
 export class CredentialVault {
-  store: any;
-  masterKeyPath: any;
-  envKey: any;
-  masterKeyPromise: any;
-  constructor({ store, masterKeyPath, envKey }) {
+  store: CredentialVaultOptions["store"];
+  masterKeyPath: string;
+  envKey?: string;
+  masterKeyPromise: Promise<Buffer> | null;
+  constructor({ store, masterKeyPath, envKey }: CredentialVaultOptions) {
     this.store = store;
     this.masterKeyPath = masterKeyPath;
     this.envKey = envKey;
@@ -38,7 +56,7 @@ export class CredentialVault {
     return this.masterKeyPromise;
   }
 
-  #deriveEnvKey(secret) {
+  #deriveEnvKey(secret: string): Buffer {
     const looksBase64 = /^[A-Za-z0-9+/=]+$/.test(secret) && secret.length >= 43;
     if (looksBase64) {
       const decoded = Buffer.from(secret, "base64");
@@ -50,7 +68,12 @@ export class CredentialVault {
     return crypto.createHash("sha256").update(secret).digest();
   }
 
-  async putSecret(scope, secretKey, value, metadata = {}) {
+  async putSecret(
+    scope: string,
+    secretKey: string,
+    value: string,
+    metadata: Record<string, unknown> = {}
+  ) {
     const masterKey = await this.#loadMasterKey();
     const iv = crypto.randomBytes(12);
     const cipher = crypto.createCipheriv("aes-256-gcm", masterKey, iv);
@@ -75,8 +98,8 @@ export class CredentialVault {
     };
   }
 
-  async getSecret(scope, secretKey) {
-    const entry = this.store.getVaultEntry(scope, secretKey);
+  async getSecret(scope: string, secretKey: string) {
+    const entry = this.store.getVaultEntry(scope, secretKey) as VaultSecretRecord | null;
     if (!entry) {
       return null;
     }

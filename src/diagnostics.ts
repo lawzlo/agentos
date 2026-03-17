@@ -7,12 +7,19 @@ import {
   readDaemonLogTail,
   readDaemonRuntime
 } from "./daemon-state.js";
+import type { AgentOsConfig } from "./config.js";
+import type { ControlPlane } from "./runtime/control-plane.js";
+import type { DaemonStatus, DoctorBundle, DoctorBundleSnapshot } from "./types/system.js";
 
 export async function createDiagnosticBundle({
   controlPlane,
   config,
   daemon
-}: Record<string, any>) {
+}: {
+  controlPlane: Pick<ControlPlane, "doctor" | "listTasks" | "listWatchRules" | "listDrafts">;
+  config: AgentOsConfig;
+  daemon: DaemonStatus;
+}): Promise<DoctorBundle> {
   const bundleId = `doctor-${Date.now()}`;
   const bundlePath = path.join(config.daemonDir, "bundles", bundleId);
   await fs.mkdir(bundlePath, { recursive: true });
@@ -23,7 +30,7 @@ export async function createDiagnosticBundle({
     readDaemonLogTail(config.daemonDir)
   ]);
 
-  const snapshot = {
+  const snapshot: DoctorBundleSnapshot = {
     createdAt: new Date().toISOString(),
     doctor,
     daemon,

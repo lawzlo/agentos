@@ -1,14 +1,49 @@
+import type { AgentModelConfig } from "../config.js";
+import type { RuntimeStep, TaskSpec, WorldState } from "../types/runtime-schema.js";
+
+interface JsonSchemaRequest<TPayload> {
+  schemaName: string;
+  schema: Record<string, unknown>;
+  systemPrompt: string;
+  userPayload: TPayload;
+  temperature?: number;
+}
+
+interface ModelPlanResponse {
+  summary?: string;
+  steps: RuntimeStep[];
+}
+
+interface ModelAutonomyDecision {
+  done: boolean;
+  reason: string;
+  summary?: string | null;
+  action?: RuntimeStep | null;
+}
+
+interface ModelDraftReply {
+  replyText: string;
+  confidence?: number | null;
+  rationale?: string | null;
+}
+
 export class OpenAICompatibleModelClient {
-  config: any;
-  constructor(config) {
+  config: AgentModelConfig;
+  constructor(config: AgentModelConfig) {
     this.config = config;
   }
 
-  isConfigured() {
+  isConfigured(): boolean {
     return Boolean(this.config.baseUrl && this.config.apiKey && this.config.name);
   }
 
-  async #requestJson({ schemaName, schema, systemPrompt, userPayload, temperature = 0.1 }) {
+  async #requestJson<TPayload, TResponse>({
+    schemaName,
+    schema,
+    systemPrompt,
+    userPayload,
+    temperature = 0.1
+  }: JsonSchemaRequest<TPayload>): Promise<TResponse> {
     const response = await fetch(`${this.config.baseUrl.replace(/\/$/, "")}/chat/completions`, {
       method: "POST",
       headers: {
@@ -43,17 +78,19 @@ export class OpenAICompatibleModelClient {
       throw new Error(`planner model request failed: ${response.status}`);
     }
 
-    const payload = await response.json();
+    const payload = (await response.json()) as {
+      choices?: Array<{ message?: { content?: string } }>;
+    };
     const content = payload.choices?.[0]?.message?.content;
     if (!content) {
       throw new Error(`${schemaName} model returned no content`);
     }
 
-    return JSON.parse(content);
+    return JSON.parse(content) as TResponse;
   }
 
-  async planTask(taskSpec) {
-    return this.#requestJson({
+  async planTask(taskSpec: TaskSpec): Promise<ModelPlanResponse> {
+    return this.#requestJson<TaskSpec, ModelPlanResponse>({
       schemaName: "agentos_plan",
       schema: {
         type: "object",
@@ -86,8 +123,14 @@ export class OpenAICompatibleModelClient {
     });
   }
 
-  async decideNextAction(payload) {
-    return this.#requestJson({
+  async decideNextAction(payload: {
+    taskSpec: TaskSpec;
+    preferredSurface: "browser" | "desktop";
+    observation: WorldState;
+    previousSteps: Array<{ label: string; action: string; surface: string; result: unknown }>;
+    allowedActions: string[];
+  }): Promise<ModelAutonomyDecision> {
+    return this.#requestJson<typeof payload, ModelAutonomyDecision>({
       schemaName: "agentos_autonomy_decision",
       schema: {
         type: "object",
@@ -120,8 +163,13 @@ export class OpenAICompatibleModelClient {
     });
   }
 
-  async draftReply(payload) {
-    return this.#requestJson({
+  async draftReply(payload: {
+    goal: string;
+    livePack: string;
+    summary: string;
+    context: string[];
+  }): Promise<ModelDraftReply> {
+    return this.#requestJson<typeof payload, ModelDraftReply>({
       schemaName: "agentos_live_reply",
       schema: {
         type: "object",

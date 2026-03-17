@@ -1,17 +1,43 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
+import type { EventBus } from "../event-bus.js";
+import type { ControlPlane } from "../control-plane.js";
+import type { TaskSpec } from "../../types/runtime-schema.js";
+
+interface FileInboxEventPayload {
+  kind?: string;
+  type?: string;
+  source?: string;
+  payload?: Record<string, unknown>;
+  taskSpec?: Record<string, unknown>;
+  goal?: string;
+  steps?: unknown[];
+}
+
+function isTaskSpec(value: unknown): value is TaskSpec {
+  return Boolean(value && typeof value === "object" && "goal" in value && typeof (value as { goal?: unknown }).goal === "string");
+}
+
 export class FileInboxConnector {
   inboxDir: string;
-  controlPlane: any;
+  controlPlane: Pick<ControlPlane, "ingestEvent" | "createTask" | "eventBus"> & { eventBus: EventBus };
   pollMs: number;
-  timer: any;
-  inFlight: any;
+  timer: NodeJS.Timeout | null;
+  inFlight: Set<string>;
   processedCount: number;
   failedCount: number;
   lastScanAt: string | null;
 
-  constructor({ inboxDir, controlPlane, pollMs = 750 }: { inboxDir: string; controlPlane: any; pollMs?: number }) {
+  constructor({
+    inboxDir,
+    controlPlane,
+    pollMs = 750
+  }: {
+    inboxDir: string;
+    controlPlane: FileInboxConnector["controlPlane"];
+    pollMs?: number;
+  }) {
     this.inboxDir = inboxDir;
     this.controlPlane = controlPlane;
     this.pollMs = pollMs;
@@ -34,7 +60,7 @@ export class FileInboxConnector {
     return path.join(this.inboxDir, "failed");
   }
 
-  async start() {
+  async start(): Promise<void> {
     await Promise.all([
       fs.mkdir(this.pendingDir, { recursive: true }),
       fs.mkdir(this.processedDir, { recursive: true }),
@@ -47,7 +73,7 @@ export class FileInboxConnector {
     }, this.pollMs);
   }
 
-  async stop() {
+  async stop(): Promise<void> {
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
@@ -66,7 +92,7 @@ export class FileInboxConnector {
     };
   }
 
-  async scan() {
+  async scan(): Promise<void> {
     this.lastScanAt = new Date().toISOString();
     const entries = await fs.readdir(this.pendingDir, { withFileTypes: true });
 
@@ -90,25 +116,31 @@ export class FileInboxConnector {
   async #processFile(filePath: string, fileName: string) {
     try {
       const raw = await fs.readFile(filePath, "utf8");
-      const payload = JSON.parse(raw);
+      const payload = JSON.parse(raw) as FileInboxEventPayload;
 
       if (payload.kind === "event" || (payload.type && payload.source && Object.hasOwn(payload, "payload"))) {
         await this.controlPlane.ingestEvent(payload);
       } else if (payload.taskSpec && !payload.goal && !payload.steps) {
+        if (!isTaskSpec(payload.taskSpec)) {
+          throw new Error("file inbox taskSpec payload is missing a valid goal");
+        }
         await this.controlPlane.createTask(payload.taskSpec);
       } else {
+        if (!isTaskSpec(payload)) {
+          throw new Error("file inbox task payload is missing a valid goal");
+        }
         await this.controlPlane.createTask(payload);
       }
 
       this.processedCount += 1;
       await fs.rename(filePath, path.join(this.processedDir, `${Date.now()}-${fileName}`));
-    } catch (error: any) {
+    } catch (error: unknown) {
       this.failedCount += 1;
       await fs.rename(filePath, path.join(this.failedDir, `${Date.now()}-${fileName}`)).catch(() => {});
       this.controlPlane.eventBus.broadcast("connector.error", {
         connector: "file-inbox",
         fileName,
-        error: error?.message ?? String(error)
+        error: error instanceof Error ? error.message : String(error)
       });
     }
   }

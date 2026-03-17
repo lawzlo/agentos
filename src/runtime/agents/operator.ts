@@ -157,6 +157,7 @@ export class OperatorAgent {
   }): Promise<ExecutionSummary> {
     const outputs: Record<string, unknown> = {};
     const stepResults: ExecutionStepResult[] = [];
+    const taskSpec = task.taskSpec as TaskSpec;
 
     for (const rawStep of plan) {
       if (controlGate) {
@@ -179,7 +180,7 @@ export class OperatorAgent {
         throw new Error(`Unknown surface: ${step.surface}`);
       }
 
-      const stepPolicy = this.policyEngine.evaluateStep(task.taskSpec, step);
+      const stepPolicy = this.policyEngine.evaluateStep(taskSpec, step);
       if (!stepPolicy.allowed) {
         throw new PolicyError(`Policy denied step ${step.label}`, {
           step,

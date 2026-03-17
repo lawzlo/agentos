@@ -1,17 +1,20 @@
+import { DatabaseSync } from "node:sqlite";
+
 import {
   createId,
   hydrateTask,
   nowIso
 } from "./sqlite-helpers.js";
+import type { TaskRecord, TaskSpec, TaskStatus } from "../../types/runtime-schema.js";
 
 export class TaskRepository {
-  db: any;
+  db: DatabaseSync;
 
-  constructor(db: any) {
+  constructor(db: DatabaseSync) {
     this.db = db;
   }
 
-  create(taskSpec: Record<string, any>) {
+  create(taskSpec: TaskSpec & Partial<TaskRecord>) {
     const id = taskSpec.id ?? createId("task");
     const createdAt = nowIso();
     const record = {
@@ -58,7 +61,7 @@ export class TaskRepository {
     return this.get(record.id);
   }
 
-  update(id: string, patch: Record<string, any>) {
+  update(id: string, patch: Partial<TaskRecord>) {
     const current = this.get(id);
     if (!current) {
       return null;
@@ -98,7 +101,7 @@ export class TaskRepository {
     return this.get(id);
   }
 
-  list(limit = 50) {
+  list(limit = 50): TaskRecord[] {
     return this.db
       .prepare(`
         SELECT * FROM tasks
@@ -109,11 +112,11 @@ export class TaskRepository {
       .map(hydrateTask);
   }
 
-  get(id: string) {
+  get(id: string): TaskRecord | null {
     return hydrateTask(this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id));
   }
 
-  listByStatuses(statuses: string[] = []) {
+  listByStatuses(statuses: TaskStatus[] = []): TaskRecord[] {
     if (!statuses.length) {
       return [];
     }

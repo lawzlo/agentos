@@ -104,8 +104,9 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
     });
   }
 
-  async focus({ step }) {
+  async focus(args: { step?: { params?: Record<string, unknown> } } = {}) {
     const bridge = this.#requireBridge();
+    const step = args.step;
     if (step.params?.name) {
       return bridge.focusApp(step.params.name);
     }

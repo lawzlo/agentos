@@ -188,7 +188,7 @@ export class AutonomyAgent {
       });
 
       const decision = (await this.modelClient.decideNextAction({
-        taskSpec: task.taskSpec,
+        taskSpec,
         preferredSurface: activeSurface,
         observation,
         previousSteps: stepResults.map((step) => ({
@@ -235,7 +235,7 @@ export class AutonomyAgent {
         });
       }
 
-      const stepPolicy = this.policyEngine.evaluateStep(task.taskSpec, step);
+      const stepPolicy = this.policyEngine.evaluateStep(taskSpec, step);
       if (!stepPolicy.allowed) {
         throw new PlanningError(`Autonomy policy denied ${step.label}`, stepPolicy);
       }

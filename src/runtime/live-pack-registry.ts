@@ -7,7 +7,8 @@ import type {
   WatchDetection,
   WatchRule,
   WorldState,
-  WorkspaceProfile
+  WorkspaceProfile,
+  WorkspaceRecord
 } from "../types/runtime-schema.js";
 
 interface LivePackControlPlane extends Pick<ControlPlane, "modelClient" | "surfaceRegistry"> {}
@@ -40,6 +41,40 @@ interface LivePackMarkHandledArgs {
   rule: WatchRule;
   task: TaskRecord;
   controlPlane: LivePackControlPlane;
+}
+
+function createWatchTask(rule: WatchRule): TaskRecord {
+  const timestamp = new Date().toISOString();
+  return {
+    id: `watch-${rule.id}`,
+    goal: rule.goal,
+    status: "running",
+    priority: "normal",
+    triggerSource: "watch",
+    deadline: null,
+    preferredSurface: rule.preferredSurface,
+    workspaceId: null,
+    traceId: null,
+    taskSpec: { goal: rule.goal, preferredSurface: rule.preferredSurface },
+    plan: [],
+    result: null,
+    error: null,
+    createdAt: timestamp,
+    updatedAt: timestamp
+  };
+}
+
+function profileAsWorkspace(rule: WatchRule, profile: WorkspaceProfile): WorkspaceRecord {
+  return {
+    id: profile.id,
+    taskId: `watch-${rule.id}`,
+    rootPath: profile.rootPath,
+    profilePath: profile.profilePath,
+    downloadsPath: profile.downloadsPath,
+    artifactsPath: profile.artifactsPath,
+    scratchPath: profile.scratchPath,
+    createdAt: profile.createdAt
+  };
 }
 
 export interface LivePackDraftResponse {
@@ -256,15 +291,17 @@ function createVisualDesktopPack({
         if (!desktop) {
           return;
         }
+        const watchTask = createWatchTask(rule);
+        const watchWorkspace = profileAsWorkspace(rule, workspace);
         await desktop
           .act({
-            task: { id: `watch-${rule.id}`, goal: rule.goal },
+            task: watchTask,
             step: {
               id: `watch-focus-${rule.id}`,
               action: "focusApp",
               params: { name: rule.appTarget }
             },
-            workspace,
+            workspace: watchWorkspace,
             traceId: null
           })
           .catch(() => null);
@@ -275,12 +312,12 @@ function createVisualDesktopPack({
       if (!surface) {
         return null;
       }
-      return surface.observe({
-        task: { id: `watch-${rule.id}`, goal: rule.goal },
-        workspace,
+      return (await surface.observe({
+        task: createWatchTask(rule),
+        workspace: profileAsWorkspace(rule, workspace),
         traceId: null,
         label: `watch-${rule.id}`
-      });
+      })) as WorldState;
     },
     async detectNewItems({ rule, worldState, dedupeState = {} }) {
       const lines = visibleLines(worldState);

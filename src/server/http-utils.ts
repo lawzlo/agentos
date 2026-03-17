@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import path from "node:path";
 
 const STATIC_CONTENT_TYPES: Record<string, string> = {
@@ -10,25 +11,31 @@ const STATIC_CONTENT_TYPES: Record<string, string> = {
   ".svg": "image/svg+xml"
 };
 
-export function json(res: any, statusCode: number, payload: unknown) {
+export function json(res: ServerResponse<IncomingMessage>, statusCode: number, payload: unknown): void {
   res.writeHead(statusCode, { "content-type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(payload));
 }
 
-export async function readJsonBody(req: any) {
-  const chunks = [];
+export async function readJsonBody<TBody = Record<string, unknown>>(
+  req: IncomingMessage
+): Promise<TBody> {
+  const chunks: Buffer[] = [];
   for await (const chunk of req) {
-    chunks.push(chunk);
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   }
 
   if (!chunks.length) {
-    return {};
+    return {} as TBody;
   }
 
-  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  return JSON.parse(Buffer.concat(chunks).toString("utf8")) as TBody;
 }
 
-export async function serveStatic(publicDir: string, req: any, res: any) {
+export async function serveStatic(
+  publicDir: string,
+  req: IncomingMessage,
+  res: ServerResponse<IncomingMessage>
+): Promise<boolean> {
   const url = new URL(req.url, "http://localhost");
   const target = url.pathname === "/" ? "/index.html" : url.pathname;
   const filePath = path.join(publicDir, target);

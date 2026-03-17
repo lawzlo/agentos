@@ -1,18 +1,35 @@
 import { json, readJsonBody } from "../http-utils.js";
+import type { SkillDefinition } from "../../types/runtime-schema.js";
+import type { ApiRouteContext } from "../types.js";
+
+interface SkillFromTaskBody {
+  taskId?: string;
+  name?: string;
+}
+
+interface WorkspaceProfileBody {
+  metadata?: Record<string, unknown>;
+}
+
+interface VaultPutBody {
+  scope?: string;
+  value?: string;
+  metadata?: Record<string, unknown>;
+}
 
 export async function handleAdminRoutes({
   req,
   res,
   url,
   controlPlane
-}: Record<string, any>) {
+}: ApiRouteContext): Promise<boolean> {
   if (req.method === "GET" && url.pathname === "/skills") {
     json(res, 200, { skills: controlPlane.listSkills() });
     return true;
   }
 
   if (req.method === "POST" && url.pathname === "/skills/from-task") {
-    const body = await readJsonBody(req);
+    const body = await readJsonBody<SkillFromTaskBody>(req);
     if (!body.taskId || !body.name) {
       json(res, 400, { error: "taskId and name are required" });
       return true;
@@ -35,8 +52,8 @@ export async function handleAdminRoutes({
 
   if (req.method === "PUT" && url.pathname.startsWith("/skills/")) {
     const name = decodeURIComponent(url.pathname.split("/")[2] ?? "");
-    const body = await readJsonBody(req);
-    const skill = controlPlane.putSkill({ ...body, name });
+    const body = await readJsonBody<Partial<SkillDefinition>>(req);
+    const skill = controlPlane.putSkill({ ...body, name } as SkillDefinition);
     json(res, 200, { skill });
     return true;
   }
@@ -48,7 +65,7 @@ export async function handleAdminRoutes({
 
   if (req.method === "PUT" && url.pathname.startsWith("/workspace-profiles/")) {
     const name = decodeURIComponent(url.pathname.split("/")[2] ?? "");
-    const body = await readJsonBody(req);
+    const body = await readJsonBody<WorkspaceProfileBody>(req);
     const profile = await controlPlane.prepareWorkspaceProfile(name, body.metadata ?? {});
     json(res, 200, { profile });
     return true;
@@ -61,7 +78,7 @@ export async function handleAdminRoutes({
 
   if (req.method === "PUT" && url.pathname.startsWith("/vault/secrets/")) {
     const secretKey = decodeURIComponent(url.pathname.split("/")[3] ?? "");
-    const body = await readJsonBody(req);
+    const body = await readJsonBody<VaultPutBody>(req);
     const secret = await controlPlane.putVaultSecret({
       scope: body.scope ?? "default",
       secretKey,

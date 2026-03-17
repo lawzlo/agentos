@@ -301,7 +301,8 @@ export class RuntimeSupervisor {
 
     try {
       task = this.store.updateTask(taskId, { status: "planning" });
-      const workspace = await this.workspaceManager.prepare(taskId, task.taskSpec);
+      const initialTaskSpec = task.taskSpec as TaskSpec;
+      const workspace = await this.workspaceManager.prepare(taskId, initialTaskSpec);
       task = this.store.updateTask(taskId, { workspaceId: workspace.id });
       const trace = this.traceStore.start(taskId, []);
       task = this.store.updateTask(taskId, { traceId: trace.id });
@@ -315,7 +316,7 @@ export class RuntimeSupervisor {
         payload: { workspaceId: workspace.id, preferredSurface: task.preferredSurface }
       });
 
-      const evaluation = this.policyEngine.evaluateTask(task.taskSpec);
+      const evaluation = this.policyEngine.evaluateTask(initialTaskSpec);
       this.traceStore.log({
         traceId: trace.id,
         taskId,

@@ -4,9 +4,16 @@ interface WatchRuleLike {
   pollIntervalMs: number;
 }
 
+interface WatchExecutionService {
+  scan(ruleId: string): Promise<void>;
+}
+
 export class WatchScheduler {
-  store: any;
-  executionService: any;
+  store: {
+    listWatchRules(): WatchRuleLike[];
+    getWatchRule(id: string): WatchRuleLike | null;
+  };
+  executionService: WatchExecutionService;
   running: boolean;
   timers: Map<string, NodeJS.Timeout>;
   inFlight: Set<string>;
@@ -15,8 +22,8 @@ export class WatchScheduler {
     store,
     executionService
   }: {
-    store: any;
-    executionService: any;
+    store: WatchScheduler["store"];
+    executionService: WatchExecutionService;
   }) {
     this.store = store;
     this.executionService = executionService;

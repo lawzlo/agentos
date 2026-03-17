@@ -1,13 +1,20 @@
 import { GroundingError, PolicyError, RecoverableError, TakeoverRequiredError, VerificationError } from "../errors.js";
+import type { TraceStore } from "../trace-store.js";
+
+interface RecoveryDecision {
+  classification: string;
+  decision: "retry" | "takeover" | "fail";
+  nextAction: string;
+}
 
 export class RecoveryAgent {
-  traceStore: any;
-  constructor(traceStore) {
+  traceStore: TraceStore;
+  constructor(traceStore: TraceStore) {
     this.traceStore = traceStore;
   }
 
-  classify(error) {
-    const message = error.message.toLowerCase();
+  classify(error: unknown): RecoveryDecision {
+    const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
     if (error instanceof TakeoverRequiredError) {
       return {
         classification: "permission_blocked",
@@ -71,7 +78,7 @@ export class RecoveryAgent {
     };
   }
 
-  handle({ taskId, traceId, attempt, error }) {
+  handle({ taskId, traceId, attempt, error }: { taskId: string; traceId: string; attempt: number; error: unknown }) {
     const decision = this.classify(error);
     this.traceStore.log({
       traceId,
@@ -79,7 +86,12 @@ export class RecoveryAgent {
       role: "recovery",
       type: "recovery.decision",
       message: `Recovery classified the failure as ${decision.classification}.`,
-      payload: { attempt, error: error.message, ...decision, details: error.details ?? null }
+      payload: {
+        attempt,
+        error: error instanceof Error ? error.message : String(error),
+        ...decision,
+        details: error && typeof error === "object" && "details" in error ? (error as { details?: unknown }).details ?? null : null
+      }
     });
 
     return decision;

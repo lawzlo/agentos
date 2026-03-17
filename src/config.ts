@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import type { LivePack } from "./runtime/live-pack-registry.js";
 
 const CHROME_CANDIDATES: Record<string, string[]> = {
   darwin: [
@@ -34,7 +35,7 @@ export interface AgentOsConfig {
   inboxDir: string;
   headless: boolean;
   browserExecutable?: string;
-  livePacks: unknown;
+  livePacks: Record<string, LivePack> | null;
   model: AgentModelConfig;
 }
 
@@ -43,7 +44,7 @@ export interface ConfigOverrides {
   dataDir?: string;
   headless?: boolean;
   browserExecutable?: string;
-  livePacks?: unknown;
+  livePacks?: Record<string, LivePack> | null;
   model?: Partial<AgentModelConfig>;
 }
 

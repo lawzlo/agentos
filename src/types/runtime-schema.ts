@@ -391,6 +391,7 @@ export interface ConnectorStatus {
 }
 
 export interface SkillDefinition {
+  id?: string;
   name: string;
   surfaceScope: "any" | "browser" | "desktop";
   triggerTerms: string[];
@@ -399,6 +400,8 @@ export interface SkillDefinition {
   successCriteria: Record<string, unknown>[];
   recoveryHints: string[];
   metadata: Record<string, unknown>;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export type ControlAction =
