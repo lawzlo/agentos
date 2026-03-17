@@ -194,6 +194,45 @@ export const BUILTIN_SKILLS = [
     }
   },
   {
+    name: "google-drive-download-file",
+    surfaceScope: "browser",
+    triggerTerms: ["google drive download file", "download file from google drive", "drive download"],
+    anchors: [{ text: "Google Drive", role: "workspace" }, { text: "Download shared file", role: "link" }],
+    actionTemplate: [
+      {
+        label: "Open Google Drive page",
+        surface: "browser",
+        action: "goto",
+        params: {
+          url: "{{startUrl}}"
+        },
+        checkpoint: false
+      },
+      {
+        label: "Download from Google Drive",
+        surface: "browser",
+        action: "download",
+        params: {
+          targetQuery: "{{downloadTarget}}",
+          fileName: "{{downloadFileName}}"
+        },
+        saveAs: "download",
+        checkpoint: false
+      }
+    ],
+    successCriteria: [{ type: "resultSaved", value: "download" }],
+    recoveryHints: ["drive download target moved", "download link unavailable"],
+    metadata: {
+      pack: "google-drive",
+      builtin: true,
+      skillInputs: [
+        { key: "startUrl", defaultValue: "https://drive.google.com" },
+        { key: "downloadTarget", defaultValue: "Download shared file" },
+        { key: "downloadFileName", defaultValue: "drive-shared-file.txt" }
+      ]
+    }
+  },
+  {
     name: "google-docs-edit-document",
     surfaceScope: "browser",
     triggerTerms: ["google docs edit document", "edit google doc", "update google docs document"],

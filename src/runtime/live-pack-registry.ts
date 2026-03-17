@@ -874,7 +874,8 @@ function createDocumentPack({
   defaultTriggerTexts,
   summaryPrefixes,
   ignoreUiChrome,
-  defaultInputs
+  defaultInputs,
+  resolveWorkflow = null
 }: {
   name: string;
   family: "docs" | "files";
@@ -884,6 +885,20 @@ function createDocumentPack({
   summaryPrefixes: string[];
   ignoreUiChrome: (text: string) => boolean;
   defaultInputs: Record<string, string>;
+  resolveWorkflow?: null | (({
+    summary,
+    context,
+    rule,
+    runtimeInputs
+  }: {
+    summary: string;
+    context: string[];
+    rule: WatchRule;
+    runtimeInputs: Record<string, string>;
+  }) => {
+    skillName?: string;
+    inputs?: Record<string, string>;
+  });
 }): LivePack {
   return {
     name,
@@ -957,6 +972,17 @@ function createDocumentPack({
       if (!String(runtimeInputs.startUrl ?? "").trim()) {
         runtimeInputs.startUrl = inferBrowserPageUrl(worldState) ?? "";
       }
+      const resolvedWorkflow = resolveWorkflow?.({
+        summary,
+        context,
+        rule,
+        runtimeInputs
+      });
+      const resolvedSkillName = String(resolvedWorkflow?.skillName ?? skillName).trim() || skillName;
+      const resolvedInputs = {
+        ...runtimeInputs,
+        ...(resolvedWorkflow?.inputs ?? {})
+      };
 
       return {
         fingerprint: itemFingerprint,
@@ -968,16 +994,16 @@ function createDocumentPack({
           watchItemText: matchedText || summary,
           watchSummary: summary,
           watchContext: context.join("\n"),
-          ...runtimeInputs
+          ...resolvedInputs
         },
         taskSpec: {
           preferredSurface: "browser",
-          skillName,
+          skillName: resolvedSkillName,
           executionMode: "planned"
         },
         metadata: {
           surface: "browser",
-          skillName
+          skillName: resolvedSkillName
         }
       };
     }
@@ -1770,15 +1796,61 @@ export class LivePackRegistry {
       createDocumentPack({
         name: "google-drive-browser",
         family: "files",
-        description: "Google Drive browser watcher that detects pending file intake and triggers upload workflows.",
+        description: "Google Drive browser watcher that detects pending file intake and triggers upload or download workflows.",
         skillName: "google-drive-upload-file",
-        defaultTriggerTexts: ["pending upload", "upload request", "shared with you", "needs review"],
-        summaryPrefixes: ["pending upload", "upload request", "shared with you", "needs review"],
+        defaultTriggerTexts: [
+          "pending upload",
+          "upload request",
+          "pending download",
+          "download request",
+          "shared with you",
+          "needs review",
+          "需要下载",
+          "需要上传"
+        ],
+        summaryPrefixes: [
+          "pending upload",
+          "upload request",
+          "pending download",
+          "download request",
+          "shared with you",
+          "needs review",
+          "需要下载",
+          "需要上传"
+        ],
         ignoreUiChrome: isDriveUiChrome,
         defaultInputs: {
           startUrl: "https://drive.google.com",
           uploadTarget: "Upload to Drive",
-          uploadPath: "workspace/sample.txt"
+          uploadPath: "workspace/sample.txt",
+          downloadTarget: "Download shared file",
+          downloadFileName: "drive-shared-file.txt"
+        },
+        resolveWorkflow: ({ summary, context, rule, runtimeInputs }) => {
+          const goalText = String(rule.goal ?? "").toLowerCase();
+          const contextText = `${summary}\n${context.join("\n")}`.toLowerCase();
+          const forceUpload = /(upload|上传)/iu.test(goalText) && !/(download|下载|拉取)/iu.test(goalText);
+          const forceDownload = /(download|下载|拉取)/iu.test(goalText) && !/(upload|上传)/iu.test(goalText);
+
+          if (forceDownload || (!forceUpload && /(download|shared report|shared file|下载|拉取)/iu.test(contextText))) {
+            return {
+              skillName: "google-drive-download-file",
+              inputs: {
+                startUrl: runtimeInputs.startUrl ?? "https://drive.google.com",
+                downloadTarget: runtimeInputs.downloadTarget ?? "Download shared file",
+                downloadFileName: runtimeInputs.downloadFileName ?? "drive-shared-file.txt"
+              }
+            };
+          }
+
+          return {
+            skillName: "google-drive-upload-file",
+            inputs: {
+              startUrl: runtimeInputs.startUrl ?? "https://drive.google.com",
+              uploadTarget: runtimeInputs.uploadTarget ?? "Upload to Drive",
+              uploadPath: runtimeInputs.uploadPath ?? "workspace/sample.txt"
+            }
+          };
         }
       }),
       createDocumentPack({

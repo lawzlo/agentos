@@ -967,6 +967,47 @@ test("google drive browser watch rules infer the browser pack and trigger upload
   }
 });
 
+test("google drive browser watch rules can route download requests to the download workflow", async () => {
+  const dataDir = await createTempDir();
+  const fixture = await startDocsFilesFixtureServer();
+  const server = await startAgentServer({ dataDir });
+
+  try {
+    const createResponse = await fetch(`${server.baseUrl}/watches`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        goal: "Always watch Google Drive for pending downloads and process them.",
+        preferredSurface: "browser",
+        workspaceName: "drive-download-watch-main",
+        pollIntervalMs: 50,
+        watchProfile: {
+          triggerTexts: ["pending download", "download request", "download shared file"]
+        },
+        inputs: {
+          startUrl: `${fixture.url}/google-drive`,
+          downloadTarget: "Download shared file",
+          downloadFileName: "drive-watch-report.txt"
+        }
+      })
+    });
+    const { watch } = await createResponse.json();
+    assert.equal(watch.livePack, "google-drive-browser");
+
+    const triggeredTask = await waitForWatchTask(server.baseUrl, watch.id);
+    const completed = await waitForTask(server.baseUrl, triggeredTask.id, (task) => task.status === "completed");
+    assert.equal(completed.status, "completed");
+    assert.equal(completed.taskSpec.skillName, "google-drive-download-file");
+
+    const downloadedFilePath = `${dataDir}/workspace-profiles/drive-download-watch-main/downloads/drive-watch-report.txt`;
+    const downloadedContent = await fs.readFile(downloadedFilePath, "utf8");
+    assert.match(downloadedContent, /Quarterly report/u);
+  } finally {
+    await server.close();
+    await fixture.close();
+  }
+});
+
 test("google docs browser watch rules infer the browser pack and trigger document edit workflows", async () => {
   const dataDir = await createTempDir();
   const fixture = await startDocsFilesFixtureServer();

@@ -130,6 +130,47 @@ test("google drive builtin skill uploads a file through the specialized browser 
   }
 });
 
+test("google drive builtin skill downloads a shared file through the specialized browser workflow", async () => {
+  const dataDir = await createTempDir();
+  const fixture = await startDocsFilesFixtureServer();
+  const server = await startAgentServer({ dataDir });
+
+  try {
+    const createResponse = await fetch(`${server.baseUrl}/tasks`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        goal: "Download the shared report from Google Drive.",
+        preferredSurface: "browser",
+        skillName: "google-drive-download-file",
+        workspaceName: "drive-download-main",
+        inputs: {
+          startUrl: `${fixture.url}/google-drive`,
+          downloadTarget: "Download shared file",
+          downloadFileName: "drive-shared-report.txt"
+        }
+      })
+    });
+    const { task } = await createResponse.json();
+
+    const completed = await waitForTask(server.baseUrl, task.id, (current) => current.status === "completed");
+    assert.equal(completed.status, "completed");
+
+    const downloadedFilePath = path.join(
+      dataDir,
+      "workspace-profiles",
+      "drive-download-main",
+      "downloads",
+      "drive-shared-report.txt"
+    );
+    const downloadedContent = await fs.readFile(downloadedFilePath, "utf8");
+    assert.match(downloadedContent, /Quarterly report/u);
+  } finally {
+    await fixture.close();
+    await server.close();
+  }
+});
+
 test("google docs builtin skill edits and saves a document through the specialized browser workflow", async () => {
   const dataDir = await createTempDir();
   const fixture = await startDocsFilesFixtureServer();

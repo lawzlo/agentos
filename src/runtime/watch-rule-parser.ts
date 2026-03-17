@@ -114,7 +114,16 @@ function inferPack(
       livePack: "google-drive-browser",
       preferredSurface: "browser",
       appTarget: input.appTarget ?? null,
-      triggerTexts: ["pending upload", "upload request", "shared with you", "needs review"]
+      triggerTexts: [
+        "pending upload",
+        "upload request",
+        "pending download",
+        "download request",
+        "shared with you",
+        "needs review",
+        "需要下载",
+        "需要上传"
+      ]
     };
   }
 

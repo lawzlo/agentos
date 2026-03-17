@@ -400,6 +400,8 @@ export async function startDocsFilesFixtureServer() {
             <main>
               <h1>Google Drive</h1>
               <button id="drive-pending-item" type="button">Pending upload: Shared roadmap.pdf</button>
+              <button id="drive-pending-download-item" type="button">Pending download: Shared report.txt</button>
+              <a id="drive-download-link" href="/files/report.txt" download>Download shared file</a>
               <label for="drive-upload-input">Upload to Drive</label>
               <input id="drive-upload-input" type="file" aria-label="Upload to Drive" />
               <p id="drive-upload-status">Drive uploaded: ${state.googleDriveUploadedFileName || "none"}</p>
