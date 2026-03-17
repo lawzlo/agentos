@@ -7,7 +7,7 @@ import { ControlPlaneStore } from "../src/runtime/store.js";
 import { LivePackRegistry } from "../src/runtime/live-pack-registry.js";
 import { SurfaceRegistry } from "../src/runtime/surface-registry.js";
 import type { WatchRule, WorkspaceProfile } from "../src/types/runtime-schema.js";
-import { createTempDir, startAgentServer, startSlackFixtureServer, waitForTask } from "./helpers.js";
+import { createTempDir, startAgentServer, startMailFixtureServer, startSlackFixtureServer, waitForTask } from "./helpers.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -484,6 +484,7 @@ test("doctor and packs endpoints expose live runtime diagnostics", async () => {
     assert.ok(Array.isArray(doctorPayload.doctor.warnings));
 
     const packsPayload = await (await fetch(`${server.baseUrl}/packs`)).json();
+    assert.ok(packsPayload.packs.some((pack) => pack.name === "generic-mail-browser"));
     assert.ok(packsPayload.packs.some((pack) => pack.name === "slack-desktop"));
     assert.ok(packsPayload.packs.some((pack) => pack.name === "slack-browser"));
     assert.ok(packsPayload.packs.some((pack) => pack.name === "wechat-desktop"));
@@ -862,6 +863,202 @@ test("wechat desktop pack can detect unread conversations and build reply steps 
   assert.equal(context?.inputs?.typeTarget, "输入消息");
   assert.equal(context?.inputs?.sendTarget, "发送");
   assert.equal(context?.context?.[0], "客户: 明天下午方便吗？");
+  assert.equal(Array.isArray(context?.taskSpec?.steps), true);
+  assert.equal(context?.taskSpec?.steps?.[0]?.action, "clickTarget");
+  assert.equal(context?.taskSpec?.steps?.[2]?.params?.text, "{{typeText}}");
+});
+
+test("mail browser watch rules infer the browser pack, draft replies, and can be approved into tasks", async () => {
+  const dataDir = await createTempDir();
+  const mail = await startMailFixtureServer();
+  const server = await startAgentServer({ dataDir });
+
+  try {
+    const createResponse = await fetch(`${server.baseUrl}/watches`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        goal: "Always watch email and reply to unread messages",
+        preferredSurface: "browser",
+        workspaceName: "mail-browser-main",
+        pollIntervalMs: 50,
+        inputs: {
+          startUrl: `${mail.url}/mail`
+        }
+      })
+    });
+    const { watch } = await createResponse.json();
+    assert.equal(watch.livePack, "generic-mail-browser");
+
+    const pendingDraft = await waitForDraft(
+      server.baseUrl,
+      (draft) => draft.watchRuleId === watch.id && draft.livePack === "generic-mail-browser" && draft.status === "pending"
+    );
+    assert.equal(pendingDraft.riskDecision.action, "draft");
+
+    let state = await mail.getState();
+    assert.equal(state.sentReplies.length, 0);
+
+    const approvedResponse = await fetch(`${server.baseUrl}/drafts/${pendingDraft.id}/approve`, {
+      method: "POST"
+    });
+    const approvedPayload = await approvedResponse.json();
+    assert.equal(approvedPayload.draft.status, "approved");
+
+    const completed = await waitForTask(server.baseUrl, approvedPayload.draft.taskId, (task) => task.status === "completed");
+    assert.equal(completed.status, "completed");
+
+    state = await mail.getState();
+    assert.equal(state.sentReplies.length, 1);
+    assert.equal(state.sentReplies[0].message, "Thanks for your email. I received it and will follow up shortly.");
+  } finally {
+    await server.close();
+    await mail.close();
+  }
+});
+
+test("mail desktop pack can detect unread messages and build reply steps from a desktop world state", async () => {
+  let opened = false;
+  const initialWorldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-mail",
+    appContext: {
+      appName: "Mail",
+      windows: [{ title: "Inbox" }]
+    },
+    capture: null,
+    ocrBlocks: [],
+    interactionCandidates: [
+      {
+        id: "mail-thread",
+        surface: "desktop",
+        kind: "text",
+        text: "未读邮件: 项目更新",
+        role: "text",
+        bounds: { x: 10, y: 10, width: 180, height: 24, centerX: 100, centerY: 22 },
+        confidence: 0.9,
+        sourceHints: { source: "ocr" },
+        isInteractive: true
+      }
+    ],
+    visibleText: "收件箱\n未读邮件\n项目更新\n客户: 请发一下最新进展",
+    recentActions: [],
+    summary: "Mail inbox",
+    timestamp: new Date().toISOString()
+  };
+  const threadWorldState = {
+    ...initialWorldState,
+    interactionCandidates: [
+      {
+        id: "mail-thread",
+        surface: "desktop",
+        kind: "text",
+        text: "项目更新",
+        role: "text",
+        bounds: { x: 10, y: 10, width: 180, height: 24, centerX: 100, centerY: 22 },
+        confidence: 0.9,
+        sourceHints: { source: "ocr" },
+        isInteractive: true
+      },
+      {
+        id: "compose",
+        surface: "desktop",
+        kind: "text",
+        text: "回复",
+        role: "textbox",
+        bounds: { x: 10, y: 210, width: 240, height: 32, centerX: 130, centerY: 226 },
+        confidence: 0.84,
+        sourceHints: { source: "ocr", placeholder: "回复" },
+        isInteractive: true
+      },
+      {
+        id: "send",
+        surface: "desktop",
+        kind: "text",
+        text: "发送",
+        role: "button",
+        bounds: { x: 260, y: 210, width: 60, height: 32, centerX: 290, centerY: 226 },
+        confidence: 0.84,
+        sourceHints: { source: "ocr" },
+        isInteractive: true
+      }
+    ],
+    visibleText: "邮件\n项目更新\n客户: 请发一下最新进展\n我: 稍后给你整理一版。\n回复\n发送"
+  };
+  const fakeSurface = {
+    async observe() {
+      return opened ? threadWorldState : initialWorldState;
+    },
+    async act({ step }) {
+      if (step.action === "clickTarget") {
+        opened = true;
+      }
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("generic-mail-desktop");
+  const rule: WatchRule = {
+    id: "watch-mail-desktop",
+    goal: "Always watch email and reply to unread messages",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "mail-desktop-main",
+    skillName: null,
+    appTarget: "Mail",
+    livePack: "generic-mail-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-mail",
+    name: "mail-desktop-main",
+    rootPath: "/tmp/mail-desktop-main",
+    profilePath: "/tmp/mail-desktop-main/profile",
+    downloadsPath: "/tmp/mail-desktop-main/downloads",
+    artifactsPath: "/tmp/mail-desktop-main/artifacts",
+    scratchPath: "/tmp/mail-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: initialWorldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {} as never
+  });
+  assert.equal(detection?.summary, "项目更新");
+
+  const context = await pack?.extractContext?.({
+    rule,
+    worldState: initialWorldState as never,
+    detection: detection as never,
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: { isConfigured: () => false }
+    } as never
+  });
+  assert.equal(context?.inputs?.typeTarget, "回复");
+  assert.equal(context?.inputs?.sendTarget, "发送");
+  assert.equal(context?.context?.[0], "客户: 请发一下最新进展");
   assert.equal(Array.isArray(context?.taskSpec?.steps), true);
   assert.equal(context?.taskSpec?.steps?.[0]?.action, "clickTarget");
   assert.equal(context?.taskSpec?.steps?.[2]?.params?.text, "{{typeText}}");

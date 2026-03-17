@@ -53,6 +53,8 @@ const SLACK_UI_CHROME_PATTERN =
   /^(search|compose|home|later|activity|more|threads|drafts|canvas|huddle|send|reply|message|messages|slack|搜索|撰写|发送|回复|消息)$/iu;
 const WECHAT_UI_CHROME_PATTERN =
   /^(wechat|微信|搜索|search|send|发送|reply|回复|聊天信息|聊天记录|通讯录|contacts|发现|moments|我|me|文件传输助手|表情|图片|文件|语音消息)$/iu;
+const MAIL_UI_CHROME_PATTERN =
+  /^(mail|email|gmail|outlook|邮件|inbox|收件箱|已发送|sent|drafts|草稿|spam|archive|归档|trash|垃圾箱|delete|删除|search|搜索|compose|撰写|reply|回复|send|发送)$/iu;
 
 function createWatchTask(rule: WatchRule): TaskRecord {
   const timestamp = new Date().toISOString();
@@ -627,6 +629,172 @@ function buildWeChatReplySteps(): RuntimeStep[] {
   ];
 }
 
+function normalizeMailSummary(value: string): string {
+  return String(value ?? "")
+    .replace(/^[●•]\s*/u, "")
+    .replace(/^(unread email|unread mail|unread|new mail|new email|未读邮件|未读|新邮件)\s*[:：-]?\s*/iu, "")
+    .replace(/^\(\d+\)\s*/u, "")
+    .replace(/\s+\(\d+\)$/u, "")
+    .trim();
+}
+
+function isMailUiChrome(text: string): boolean {
+  return MAIL_UI_CHROME_PATTERN.test(String(text ?? "").trim());
+}
+
+function scoreMailCandidate({
+  candidate,
+  worldState
+}: {
+  candidate: InteractionCandidate;
+  worldState: WorldState | null;
+}): number | null {
+  const hintText = candidateHintText(candidate);
+  const summary = normalizeMailSummary(candidate.text || hintText);
+  if (!summary || isMailUiChrome(summary) || SEND_PATTERN.test(summary)) {
+    return null;
+  }
+
+  let score = candidate.isInteractive ? 12 : 4;
+  if (candidate.role === "button" || candidate.role === "link" || candidate.role === "text") {
+    score += 4;
+  }
+  if (UNREAD_PATTERN.test(hintText) || /(mail|email|邮件)/iu.test(hintText)) {
+    score += 24;
+  }
+
+  const lines = visibleLines(worldState);
+  for (const [index, line] of lines.entries()) {
+    if (!UNREAD_PATTERN.test(line) && !/(mail|email|邮件|收件箱|inbox)/iu.test(line)) {
+      continue;
+    }
+    const nearby = lines
+      .slice(Math.max(0, index - 2), index + 6)
+      .some((entry) => entry.includes(summary) || summary.includes(normalizeMailSummary(entry)));
+    if (nearby) {
+      score += 16;
+      break;
+    }
+  }
+
+  if (summary.length >= 4 && summary.length <= 120) {
+    score += 3;
+  }
+
+  return score;
+}
+
+function findMailUnreadCandidate(worldState: WorldState | null): InteractionCandidate | null {
+  const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
+  const ranked = candidates
+    .map((candidate) => ({ candidate, score: scoreMailCandidate({ candidate, worldState }) }))
+    .filter((entry): entry is { candidate: InteractionCandidate; score: number } => Number.isFinite(entry.score))
+    .sort((left, right) => right.score - left.score);
+  return ranked[0]?.candidate ?? null;
+}
+
+function pickMailComposeQuery(worldState: WorldState | null, surface: LivePackSurface): string {
+  const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
+  const composeCandidate =
+    candidates.find((candidate) => {
+      const hintText = candidateHintText(candidate);
+      return (
+        candidate.role === "textbox" ||
+        /(reply|message|compose|write|回复|撰写|输入)/iu.test(hintText) ||
+        /(reply|message|compose|write|回复|撰写|输入)/iu.test(candidate.text)
+      );
+    }) ?? null;
+
+  if (!composeCandidate) {
+    return /[\u4e00-\u9fff]/u.test(String(worldState?.visibleText ?? ""))
+      ? "回复"
+      : surface === "browser"
+        ? "Reply"
+        : "Message";
+  }
+
+  const hints = (composeCandidate.sourceHints ?? {}) as Record<string, unknown>;
+  return (
+    String(hints.placeholder ?? hints.ariaLabel ?? composeCandidate.text ?? "").trim() ||
+    (/[\u4e00-\u9fff]/u.test(String(worldState?.visibleText ?? ""))
+      ? "回复"
+      : surface === "browser"
+        ? "Reply"
+        : "Message")
+  );
+}
+
+function pickMailSendQuery(worldState: WorldState | null, surface: LivePackSurface): string {
+  const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
+  const sendCandidate =
+    candidates.find((candidate) => {
+      const hintText = candidateHintText(candidate);
+      return candidate.role === "button" && (SEND_PATTERN.test(hintText) || SEND_PATTERN.test(candidate.text));
+    }) ?? null;
+
+  if (!sendCandidate) {
+    return /[\u4e00-\u9fff]/u.test(String(worldState?.visibleText ?? "")) ? "发送" : surface === "browser" ? "Send reply" : "Send";
+  }
+
+  return (
+    String(sendCandidate.text ?? "").trim() ||
+    String(((sendCandidate.sourceHints ?? {}) as Record<string, unknown>).ariaLabel ?? "").trim() ||
+    (/[\u4e00-\u9fff]/u.test(String(worldState?.visibleText ?? "")) ? "发送" : surface === "browser" ? "Send reply" : "Send")
+  );
+}
+
+function extractMailThreadContext(worldState: WorldState | null, summary: string): string[] {
+  const lines = visibleLines(worldState).filter((line) => !isMailUiChrome(line));
+  const normalizedSummary = normalizeMailSummary(summary);
+  const summaryIndex = lines.findIndex((line) => normalizeMailSummary(line) === normalizedSummary);
+  const pool = summaryIndex === -1 ? lines : lines.slice(summaryIndex + 1);
+  return uniqueStrings(
+    pool.filter((line) => {
+      const normalized = normalizeMailSummary(line);
+      return (
+        normalized &&
+        normalized !== normalizedSummary &&
+        !UNREAD_PATTERN.test(line) &&
+        !SEND_PATTERN.test(line) &&
+        !/(reply|message|compose|write|回复|撰写|输入)/iu.test(line)
+      );
+    })
+  ).slice(0, 5);
+}
+
+function buildMailReplySteps(surface: LivePackSurface): RuntimeStep[] {
+  return [
+    {
+      label: "Open unread mail thread",
+      surface,
+      action: "clickTarget",
+      params: { targetQuery: "{{openTarget}}" },
+      checkpoint: false
+    },
+    {
+      label: "Wait for mail composer",
+      surface,
+      action: "waitForTarget",
+      params: { targetQuery: "{{typeTarget}}", timeoutMs: 5000 },
+      checkpoint: false
+    },
+    {
+      label: "Type mail reply",
+      surface,
+      action: "typeIntoTarget",
+      params: { targetQuery: "{{typeTarget}}", text: "{{typeText}}", clear: false },
+      checkpoint: false
+    },
+    {
+      label: "Send mail reply",
+      surface,
+      action: "clickTarget",
+      params: { targetQuery: "{{sendTarget}}" },
+      checkpoint: false
+    }
+  ];
+}
+
 function buildSlackReplySteps(surface: LivePackSurface): RuntimeStep[] {
   return [
     {
@@ -1050,6 +1218,225 @@ function createWeChatPack(): LivePack {
   };
 }
 
+async function openMailThreadForContext({
+  rule,
+  workspace,
+  surfaceRegistry,
+  surface,
+  detection
+}: LivePackExtractContextArgs & { surface: LivePackSurface }): Promise<WorldState | null> {
+  const adapter = surfaceRegistry.get(surface);
+  if (!adapter) {
+    return null;
+  }
+
+  const openTarget = String(detection.inputs?.openTarget ?? detection.summary ?? "").trim();
+  if (!openTarget) {
+    return null;
+  }
+
+  const openCandidate = (detection.metadata?.openCandidate ?? null) as Record<string, unknown> | null;
+  await adapter.act({
+    task: createWatchTask(rule),
+    step: {
+      id: `mail-open-${rule.id}`,
+      label: "Open mail thread",
+      surface,
+      action: "clickTarget",
+      params: {
+        targetQuery: openTarget,
+        ...(openCandidate ? { target: openCandidate } : {})
+      }
+    },
+    workspace: profileAsWorkspace(rule, workspace),
+    traceId: null,
+    outputs: {}
+  });
+
+  if (surface === "browser") {
+    await adapter.act({
+      task: createWatchTask(rule),
+      step: {
+        id: `mail-open-wait-${rule.id}`,
+        label: "Wait for mail thread",
+        surface,
+        action: "wait",
+        params: { ms: 100 }
+      },
+      workspace: profileAsWorkspace(rule, workspace),
+      traceId: null,
+      outputs: {}
+    });
+  }
+
+  return observeWatchSurface({
+    rule,
+    workspace,
+    surfaceRegistry,
+    controlPlane: {} as LivePackControlPlane,
+    surface
+  });
+}
+
+function createMailPack({
+  name,
+  surface,
+  description
+}: {
+  name: string;
+  surface: LivePackSurface;
+  description: string;
+}): LivePack {
+  return {
+    name,
+    info: {
+      name,
+      family: "mail",
+      surface,
+      supportsDrafts: true,
+      supportsAutoSend: false,
+      description
+    },
+    async activate({ rule, workspace, surfaceRegistry }) {
+      const adapter = surfaceRegistry.get(surface);
+      if (!adapter) {
+        return;
+      }
+
+      const watchTask = createWatchTask(rule);
+      const watchWorkspace = profileAsWorkspace(rule, workspace);
+      if (surface === "desktop") {
+        if (!rule.appTarget) {
+          return;
+        }
+        await adapter
+          .act({
+            task: watchTask,
+            step: {
+              id: `watch-focus-${rule.id}`,
+              action: "focusApp",
+              surface,
+              params: { name: rule.appTarget }
+            },
+            workspace: watchWorkspace,
+            traceId: null,
+            outputs: {}
+          })
+          .catch(() => null);
+        return;
+      }
+
+      const startUrl = String(rule.taskInputs?.startUrl ?? rule.taskInputs?.url ?? rule.appTarget ?? "").trim();
+      if (/^https?:\/\//u.test(startUrl)) {
+        await adapter.act({
+          task: watchTask,
+          step: {
+            id: `watch-goto-${rule.id}`,
+            action: "goto",
+            surface,
+            params: { url: startUrl, waitUntil: "domcontentloaded", timeoutMs: 15000 }
+          },
+          workspace: watchWorkspace,
+          traceId: null,
+          outputs: {}
+        });
+      } else {
+        await adapter.focus({
+          task: watchTask,
+          workspace: watchWorkspace,
+          traceId: null
+        }).catch(() => null);
+      }
+    },
+    async observeInbox(args) {
+      return observeWatchSurface({ ...args, surface });
+    },
+    async detectNewItems({ rule, worldState, dedupeState = {} }) {
+      const candidate = findMailUnreadCandidate(worldState);
+      if (!candidate) {
+        return null;
+      }
+
+      const summary = normalizeMailSummary(candidate.text || candidateHintText(candidate));
+      if (!summary) {
+        return null;
+      }
+
+      const context = contextForSignal(worldState, { text: candidate.text || summary });
+      const itemFingerprint = fingerprint(
+        `${name}:${surface}:${rule.workspaceName ?? "default"}:${summary}:${context.join("|")}`
+      );
+      if (dedupeState.lastFingerprint === itemFingerprint) {
+        return null;
+      }
+
+      return {
+        fingerprint: itemFingerprint,
+        summary,
+        text: summary,
+        context,
+        inputs: {
+          watchItemText: summary,
+          watchSummary: summary,
+          watchContext: context.join("\n"),
+          openTarget: String(candidate.text ?? summary).trim() || summary
+        },
+        metadata: {
+          openCandidate: candidate,
+          surface
+        }
+      };
+    },
+    async extractContext(args) {
+      const threadState = await openMailThreadForContext({ ...args, surface });
+      const summary = String(args.detection.summary ?? "").trim();
+      const context = extractMailThreadContext(threadState, summary);
+      return {
+        summary,
+        context,
+        inputs: {
+          ...(args.detection.inputs ?? {}),
+          watchContext: context.join("\n"),
+          openTarget: String(args.detection.inputs?.openTarget ?? summary).trim() || summary,
+          typeTarget: pickMailComposeQuery(threadState, surface),
+          sendTarget: pickMailSendQuery(threadState, surface)
+        },
+        taskSpec: {
+          preferredSurface: surface,
+          steps: buildMailReplySteps(surface)
+        }
+      };
+    },
+    async draftReply({ rule, detection, controlPlane }) {
+      const summary = String(detection?.summary ?? "").trim();
+      const context = Array.isArray(detection?.context) ? detection.context : [];
+      if (controlPlane.modelClient.isConfigured()) {
+        const drafted = await controlPlane.modelClient.draftReply({
+          goal: rule.goal,
+          livePack: name,
+          summary,
+          context
+        });
+        return {
+          replyText: String(drafted.replyText ?? "").trim(),
+          metadata: {
+            confidence: drafted.confidence ?? null,
+            rationale: drafted.rationale ?? null,
+            source: "model"
+          }
+        };
+      }
+
+      return draftHeuristicReply({
+        family: "mail",
+        goal: rule.goal,
+        summary,
+        context
+      });
+    }
+  };
+}
+
 function createVisualDesktopPack({
   name,
   family = "generic",
@@ -1214,13 +1601,15 @@ export class LivePackRegistry {
         description: "Slack browser watcher that detects unread threads, extracts context, and sends low-risk replies."
       }),
       createWeChatPack(),
-      createVisualDesktopPack({
+      createMailPack({
         name: "generic-mail-desktop",
-        family: "mail",
-        description: "Generic desktop mail watcher with approval-first reply drafts.",
-        defaultTriggerTexts: ["unread", "inbox", "mail", "邮件", "未读", "收件箱"],
-        unreadTokens: ["unread", "new mail", "inbox", "邮件", "未读", "收件箱"],
-        ignoreTokens: ["send", "reply", "compose", "发送", "回复", "撰写"]
+        surface: "desktop",
+        description: "Generic desktop mail watcher that detects unread threads, extracts context, and drafts approval-first replies."
+      }),
+      createMailPack({
+        name: "generic-mail-browser",
+        surface: "browser",
+        description: "Generic browser mail watcher that detects unread threads, extracts context, and drafts approval-first replies."
       })
     ]) {
       this.register(pack.name, pack);

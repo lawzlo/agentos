@@ -136,7 +136,7 @@ export class PolicyEngine {
       };
     }
 
-    if (livePack === "generic-mail-desktop") {
+    if (["generic-mail-desktop", "generic-mail-browser"].includes(livePack)) {
       return {
         policy: "confirm_required",
         riskLevel,

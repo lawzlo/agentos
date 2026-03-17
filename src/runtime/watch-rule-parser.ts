@@ -65,6 +65,8 @@ function inferPack(
     const inferredSurface =
       input.livePack === "slack-browser"
         ? "browser"
+        : input.livePack.endsWith("-browser")
+          ? "browser"
         : input.livePack.endsWith("-desktop")
           ? "desktop"
           : (input.preferredSurface ?? "desktop");
@@ -98,10 +100,11 @@ function inferPack(
   }
 
   if (/(mail|email|gmail|outlook|邮箱|邮件)/iu.test(text)) {
+    const preferredSurface = input.preferredSurface ?? "desktop";
     return {
-      livePack: "generic-mail-desktop",
-      preferredSurface: input.preferredSurface ?? "desktop",
-      appTarget: input.appTarget ?? null,
+      livePack: preferredSurface === "browser" ? "generic-mail-browser" : "generic-mail-desktop",
+      preferredSurface,
+      appTarget: preferredSurface === "browser" ? input.appTarget ?? null : (input.appTarget ?? null),
       triggerTexts: ["unread", "inbox", "mail", "邮件", "未读", "收件箱"]
     };
   }

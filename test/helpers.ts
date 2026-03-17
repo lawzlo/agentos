@@ -193,6 +193,132 @@ export async function startSlackFixtureServer({
   };
 }
 
+export async function startMailFixtureServer({
+  threadTitle = "Project update",
+  unreadAriaLabel = null,
+  messages = ["Customer: Can you send the latest project update?"]
+}: {
+  threadTitle?: string;
+  unreadAriaLabel?: string | null;
+  messages?: string[];
+} = {}) {
+  const state = {
+    threadId: "mail-thread-1",
+    threadTitle,
+    unread: true,
+    messages: [...messages],
+    sentReplies: [] as Array<{ message: string; createdAt: string }>
+  };
+
+  const renderPage = (selectedThread = false) => {
+    const selected = selectedThread ? state.threadId : "";
+    const items = `
+      <li>
+        <a
+          id="mail-thread-link"
+          href="/mail?thread=${encodeURIComponent(state.threadId)}"
+          aria-label="${unreadAriaLabel ?? `Unread email: ${state.threadTitle}`}"
+        >${state.threadTitle}</a>
+      </li>
+    `;
+    const threadView = selectedThread
+      ? `
+        <section id="mail-thread-panel">
+          <h2>Email: ${state.threadTitle}</h2>
+          <div id="mail-thread-messages">
+            ${state.messages.map((message) => `<p class="message-line">${message}</p>`).join("")}
+          </div>
+          <form method="POST" action="/mail/send?thread=${encodeURIComponent(state.threadId)}">
+            <label for="reply-box">Reply</label>
+            <textarea id="reply-box" name="message" placeholder="Reply to ${state.threadTitle}"></textarea>
+            <button id="send-reply" type="submit" aria-label="Send reply">Send reply</button>
+          </form>
+          <p id="send-status">${
+            state.sentReplies.at(-1)?.message ? `Last sent: ${state.sentReplies.at(-1)?.message}` : "No reply sent yet."
+          }</p>
+        </section>
+      `
+      : '<section id="mail-thread-panel"><p>Select an email to view its contents.</p></section>';
+
+    return `<!doctype html>
+      <html>
+        <body>
+          <main>
+            <h1>Inbox</h1>
+            <aside>
+              <h2>Unread mail</h2>
+              <ul id="mail-sidebar">${items}</ul>
+            </aside>
+            <section>
+              <p id="mail-view-state">Selected: ${selected || "none"}</p>
+              ${threadView}
+            </section>
+          </main>
+        </body>
+      </html>`;
+  };
+
+  const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+
+    if (req.method === "GET" && url.pathname === "/mail") {
+      const selected = url.searchParams.get("thread") === state.threadId;
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(renderPage(selected));
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/mail/send") {
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      }
+      const body = new URLSearchParams(Buffer.concat(chunks).toString("utf8"));
+      const message = String(body.get("message") ?? "").trim();
+      if (message) {
+        state.sentReplies.push({ message, createdAt: new Date().toISOString() });
+        state.messages.push(`AgentOS: ${message}`);
+        state.unread = false;
+      }
+      res.writeHead(303, {
+        location: `/mail?thread=${encodeURIComponent(state.threadId)}`
+      });
+      res.end();
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/state") {
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+      res.end(
+        JSON.stringify({
+          threadId: state.threadId,
+          threadTitle: state.threadTitle,
+          unread: state.unread,
+          messages: state.messages,
+          sentReplies: state.sentReplies
+        })
+      );
+      return;
+    }
+
+    res.writeHead(404);
+    res.end();
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, () => resolve()));
+  const address = server.address() as AddressInfo;
+  return {
+    url: `http://127.0.0.1:${address.port}`,
+    async getState() {
+      const response = await fetch(`http://127.0.0.1:${address.port}/api/state`);
+      return response.json();
+    },
+    async close() {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  };
+}
+
 export async function startAgentServer({ dataDir, ...overrides }) {
   const app = await createAgentServer({
     port: 0,
