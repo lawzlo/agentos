@@ -72,6 +72,47 @@ test("browser task runs, captures trace, and exposes outputs", async () => {
   }
 });
 
+test("browser tasks accept planner open_url aliases", async () => {
+  const dataDir = await createTempDir();
+  const fixture = await startFixtureServer();
+  const server = await startAgentServer({ dataDir });
+
+  try {
+    const createResponse = await fetch(`${server.baseUrl}/tasks`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        goal: "Open the demo page using the planner alias.",
+        preferredSurface: "browser",
+        steps: [
+          {
+            label: "Open demo page",
+            surface: "browser",
+            action: "open_url",
+            params: { url: fixture.url },
+            expect: { urlIncludes: fixture.url }
+          },
+          {
+            label: "Read status",
+            surface: "browser",
+            action: "extractText",
+            params: { selector: "#status" },
+            saveAs: "status"
+          }
+        ]
+      })
+    });
+    const { task } = await createResponse.json();
+
+    const completed = await waitForTask(server.baseUrl, task.id, (current) => current.status === "completed");
+    assert.equal(completed.status, "completed");
+    assert.equal(completed.result.outputs.status.text, "Not submitted yet");
+  } finally {
+    await fixture.close();
+    await server.close();
+  }
+});
+
 test("browser tasks can ground natural-language targets into actions", async () => {
   const dataDir = await createTempDir();
   const fixture = await startFixtureServer();

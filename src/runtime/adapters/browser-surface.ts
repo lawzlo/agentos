@@ -286,6 +286,8 @@ export class BrowserSurfaceAdapter extends SurfaceAdapter {
     try {
       switch (step.action) {
         case "goto":
+        case "open_url":
+        case "openUrl":
           await page.goto(params.url, {
             waitUntil: params.waitUntil ?? "domcontentloaded",
             timeout: params.timeoutMs ?? 30000
