@@ -48,40 +48,39 @@ AgentOS は、ブラウザ、デスクトップアプリ、ローカルファイ
 
 多くのユーザーは自然言語の CLI から始めるべきです。最初から JSON を書く必要はありません。
 
-1. 依存関係を入れ、runtime を build して daemon を起動します。
+1. 依存関係を入れ、runtime を build し、ローカルの `agentos` コマンドを有効にします。
 
 ```bash
 npm install
-npm run build:ts
-node dist/bin/agentos.js daemon start
+npm run cli:link
 ```
 
-2. 起動確認:
+2. 最初に setup チェックを実行します。daemon、browser、model 設定、native sidecar、live pack をまとめて確認できます。
 
 ```bash
-node dist/bin/agentos.js daemon status
-node dist/bin/agentos.js doctor
+agentos setup
 ```
 
-3. 最初の単発タスクを実行します。
+3. 対話シェルを開くか、最初の単発タスクを実行します。
 
 ```bash
-node dist/bin/agentos.js run \
-  "example.com を開き、More information をクリックして、スクリーンショットを撮る" \
-  --surface browser \
-  --wait
+agentos
+
+agentos "example.com を開き、More information をクリックして、スクリーンショットを撮る" --surface browser
 ```
 
 4. 最初の常駐 watch rule を追加します。
 
 ```bash
-node dist/bin/agentos.js watch add \
+agentos watch add \
   "Slack を監視し、低リスクの未読スレッドには自分の文体で返信する" \
   --surface browser \
   --workspace personal-main
 ```
 
 デフォルトでは `http://127.0.0.1:3017` で待ち受けます。Web console は trace / debug 用に残っていますが、主入口は CLI です。
+
+グローバル CLI を使いたくない場合は、以下の `agentos` を `node dist/bin/agentos.js` に置き換えてください。
 
 ## よくある personal agent シナリオ
 

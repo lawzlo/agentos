@@ -48,40 +48,39 @@ AgentOS 的能力足够强，可以操作浏览器、桌面应用、本地文件
 
 大多数用户应该先用自然语言 CLI 命令开始。上手阶段不需要写 JSON。
 
-1. 先安装依赖、构建 runtime，然后启动 daemon：
+1. 先安装依赖、构建 runtime，并把本地 `agentos` 命令暴露出来：
 
 ```bash
 npm install
-npm run build:ts
-node dist/bin/agentos.js daemon start
+npm run cli:link
 ```
 
-2. 检查当前 runtime 是否正常：
+2. 先跑一次首次 setup 检查。它会统一检查 daemon、浏览器、模型配置、native sidecar、live packs 和下一步建议：
 
 ```bash
-node dist/bin/agentos.js daemon status
-node dist/bin/agentos.js doctor
+agentos setup
 ```
 
-3. 先执行一个一次性任务：
+3. 然后直接进入交互模式，或者先跑一个一次性任务：
 
 ```bash
-node dist/bin/agentos.js run \
-  "打开 example.com，点击 More information，然后截图" \
-  --surface browser \
-  --wait
+agentos
+
+agentos "打开 example.com，点击 More information，然后截图" --surface browser
 ```
 
 4. 再加一个长期 watch rule：
 
 ```bash
-node dist/bin/agentos.js watch add \
+agentos watch add \
   "一直盯 Slack，把低风险未读消息按我的风格自动回复" \
   --surface browser \
   --workspace personal-main
 ```
 
 默认监听 `http://127.0.0.1:3017`。Web console 仍可用于 trace/debug，但主入口是 CLI。
+
+如果你不想注册全局命令，下面所有 `agentos` 示例都可以替换成 `node dist/bin/agentos.js`。
 
 ## 常见个人 Agent 场景
 

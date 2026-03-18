@@ -49,40 +49,39 @@ AgentOS is powerful enough to operate browsers, desktop apps, local files, and l
 
 Most users should start with natural-language CLI commands. You do not need to write JSON to get value from AgentOS.
 
-1. Install dependencies, build the runtime, and start the daemon:
+1. Install dependencies, build the runtime, and expose the local `agentos` command:
 
 ```bash
 npm install
-npm run build:ts
-node dist/bin/agentos.js daemon start
+npm run cli:link
 ```
 
-2. Check that the daemon is healthy:
+2. Run the first-time setup check. This will verify the daemon, browser, model config, native sidecar, packs, and recommended next steps:
 
 ```bash
-node dist/bin/agentos.js daemon status
-node dist/bin/agentos.js doctor
+agentos setup
 ```
 
-3. Run a first one-off task:
+3. Start the interactive shell or run a first one-off task:
 
 ```bash
-node dist/bin/agentos.js run \
-  "Open example.com, click More information, then capture a screenshot" \
-  --surface browser \
-  --wait
+agentos
+
+agentos "Open example.com, click More information, then capture a screenshot" --surface browser
 ```
 
 4. Add a first always-on watch rule:
 
 ```bash
-node dist/bin/agentos.js watch add \
+agentos watch add \
   "Always watch Slack and reply to low-risk unread threads in my style" \
   --surface browser \
   --workspace personal-main
 ```
 
 The daemon listens on `http://127.0.0.1:3017` by default. The web console remains available for trace and debug use, but the primary entrypoint is the CLI.
+
+If you do not want a global CLI command, replace `agentos` with `node dist/bin/agentos.js` in the examples below.
 
 ## Common personal agent scenarios
 

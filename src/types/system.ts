@@ -117,3 +117,11 @@ export interface DiagnosticBundleSource {
   proposals?: ProposalRecord[];
   connectors?: ConnectorStatus[];
 }
+
+export interface SetupReport {
+  ok: boolean;
+  startedDaemon: boolean;
+  daemon: DaemonStatus;
+  doctor: DoctorReport;
+  recommendedActions: string[];
+}

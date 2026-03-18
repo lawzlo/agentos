@@ -174,9 +174,94 @@ const server = http.createServer(async (req, res) => {
     if (method === "GET" && url.pathname === "/daemon/status") {
       writeJson({
         daemon: {
-          running: false,
-          pid: null,
-          port: 3017
+          running: true,
+          pid: 1234,
+          port: 3017,
+          connectorCount: 0,
+          livePackCount: 4,
+          readyLivePackCount: 2,
+          blockedLivePackCount: 2,
+          watchCount: Object.keys(state.watches).length,
+          enabledWatchCount: Object.values(state.watches).filter((watch) => watch.status === "watching").length,
+          degradedWatchCount: 1,
+          pendingDraftCount: 1,
+          pendingProposalCount: 1,
+          install: {
+            supported: true,
+            mode: "launchd",
+            installed: false,
+            loaded: null
+          }
+        }
+      });
+      return;
+    }
+
+    if (method === "GET" && url.pathname === "/doctor") {
+      writeJson({
+        doctor: {
+          ok: false,
+          warnings: [
+            "Model client is not configured; live reply drafting uses heuristics.",
+            "Daemon auto-start is not installed.",
+            "2 live pack(s) are blocked: slack-browser, boss-browser."
+          ],
+          browserExecutable: null,
+          modelConfigured: false,
+          livePackCount: 4,
+          readyLivePackCount: 2,
+          blockedLivePackCount: 2,
+          degradedWatchCount: 1,
+          pendingDraftCount: 1,
+          pendingProposalCount: 1,
+          awaitingApprovalWatchCount: 1,
+          backoffWatchCount: 1,
+          connectorCount: 0,
+          learning: {
+            running: true,
+            sourceCount: 1,
+            enabledSourceCount: 1,
+            observationCount: 0,
+            entityCount: 0,
+            chunkCount: 0,
+            pendingProposalCount: 1,
+            lastDigestAt: null,
+            lastObservationAt: null,
+            scanIntervalMs: 300000
+          },
+          version: {
+            appVersion: "0.1.0",
+            runtimeProtocolVersion: 1,
+            nativeProtocolVersion: 1,
+            storeSchemaVersion: 2,
+            installLayoutVersion: 1
+          },
+          install: {
+            supported: true,
+            mode: "launchd",
+            installed: false,
+            loaded: null
+          },
+          recentErrors: [
+            {
+              id: "watch-1",
+              status: "backoff",
+              message: "Thread reply failed",
+              updatedAt: nowIso()
+            }
+          ],
+          store: {
+            schemaVersion: 2,
+            compatible: true
+          },
+          native: {
+            available: true,
+            compatible: true,
+            permissions: {
+              accessibility: true,
+              screenRecording: true
+            }
+          }
         }
       });
       return;
@@ -564,6 +649,81 @@ test("cli interactive shell accepts natural-language tasks with slash-command de
     assert.equal(api.state.lastTaskBody?.goal, "Prepare the inbox summary");
     assert.equal(api.state.lastTaskBody?.preferredSurface, "browser");
     assert.equal(api.state.lastTaskBody?.workspaceName, "cli-main");
+  } finally {
+    await api.close();
+    await fs.rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("cli setup summarizes readiness and recommended next steps", async () => {
+  const dataDir = await createTempDir("agentos-cli-");
+  const api = await startCliApiFixture();
+  const env = {
+    ...process.env,
+    AGENTOS_BASE_URL: api.baseUrl,
+    AGENTOS_DATA_DIR: dataDir
+  };
+
+  try {
+    const result = await execFileAsync(process.execPath, ["dist/bin/agentos.js", "setup"], {
+      cwd: process.cwd(),
+      env
+    });
+
+    assert.match(result.stdout, /AgentOS setup/);
+    assert.match(result.stdout, /Status: needs attention/);
+    assert.match(result.stdout, /Auto-start: not installed, launchd/);
+    assert.match(result.stdout, /Recommended next steps:/);
+    assert.match(result.stdout, /agentos daemon install/);
+    assert.match(result.stdout, /agentos packs ls/);
+  } finally {
+    await api.close();
+    await fs.rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("cli setup --json returns structured onboarding data", async () => {
+  const dataDir = await createTempDir("agentos-cli-");
+  const api = await startCliApiFixture();
+  const env = {
+    ...process.env,
+    AGENTOS_BASE_URL: api.baseUrl,
+    AGENTOS_DATA_DIR: dataDir
+  };
+
+  try {
+    const result = await execFileAsync(process.execPath, ["dist/bin/agentos.js", "setup", "--json"], {
+      cwd: process.cwd(),
+      env
+    });
+
+    const payload = JSON.parse(result.stdout);
+    assert.equal(payload.startedDaemon, false);
+    assert.equal(payload.daemon.running, true);
+    assert.equal(payload.doctor.modelConfigured, false);
+    assert.equal(payload.doctor.blockedLivePackCount, 2);
+    assert.equal(Array.isArray(payload.recommendedActions), true);
+    assert.equal(payload.recommendedActions.some((entry: string) => entry.includes("agentos daemon install")), true);
+  } finally {
+    await api.close();
+    await fs.rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("cli interactive shell exposes the /setup shortcut", async () => {
+  const dataDir = await createTempDir("agentos-cli-");
+  const api = await startCliApiFixture();
+  const env = {
+    ...process.env,
+    AGENTOS_BASE_URL: api.baseUrl,
+    AGENTOS_DATA_DIR: dataDir
+  };
+
+  try {
+    const session = await runCliSession(["dist/bin/agentos.js"], "/setup\n/exit\n", env);
+    assert.match(session.stdout, /AgentOS interactive shell/);
+    assert.match(session.stdout, /AgentOS setup/);
+    assert.match(session.stdout, /Recommended next steps:/);
   } finally {
     await api.close();
     await fs.rm(dataDir, { recursive: true, force: true });

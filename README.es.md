@@ -48,40 +48,39 @@ AgentOS es lo bastante potente como para operar navegadores, aplicaciones de esc
 
 La mayoría de los usuarios deberían empezar con comandos CLI en lenguaje natural. No necesitas escribir JSON para empezar a usar AgentOS.
 
-1. Instala dependencias, construye el runtime y arranca el daemon:
+1. Instala dependencias, construye el runtime y expone el comando local `agentos`:
 
 ```bash
 npm install
-npm run build:ts
-node dist/bin/agentos.js daemon start
+npm run cli:link
 ```
 
-2. Verifica el estado:
+2. Ejecuta primero el chequeo de setup. Verifica daemon, navegador, configuración del modelo, sidecar nativo y packs disponibles:
 
 ```bash
-node dist/bin/agentos.js daemon status
-node dist/bin/agentos.js doctor
+agentos setup
 ```
 
-3. Ejecuta una primera tarea puntual:
+3. Entra en la shell interactiva o ejecuta una primera tarea puntual:
 
 ```bash
-node dist/bin/agentos.js run \
-  "Abrir example.com, hacer clic en More information y capturar una pantalla" \
-  --surface browser \
-  --wait
+agentos
+
+agentos "Abrir example.com, hacer clic en More information y capturar una pantalla" --surface browser
 ```
 
 4. Añade una primera watch rule permanente:
 
 ```bash
-node dist/bin/agentos.js watch add \
+agentos watch add \
   "Vigila Slack y responde hilos no leídos de bajo riesgo con mi estilo" \
   --surface browser \
   --workspace personal-main
 ```
 
 Por defecto escucha en `http://127.0.0.1:3017`. La consola web sigue disponible para trace y debug, pero la entrada principal es la CLI.
+
+Si no quieres registrar un comando global, sustituye `agentos` por `node dist/bin/agentos.js` en los ejemplos siguientes.
 
 ## Escenarios comunes para un agente personal
 

@@ -190,8 +190,7 @@ export async function waitForDaemon(timeoutMs = 10000): Promise<DaemonStatus> {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
     try {
-      const payload = await apiRequest<{ daemon: DaemonStatus }>("GET", "/daemon/status");
-      return payload.daemon;
+      return await fetchDaemonStatus();
     } catch {
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
@@ -199,10 +198,61 @@ export async function waitForDaemon(timeoutMs = 10000): Promise<DaemonStatus> {
   throw new Error("Timed out waiting for the daemon to start.");
 }
 
+export async function fetchDaemonStatus(): Promise<DaemonStatus> {
+  const payload = await apiRequest<{ daemon: DaemonStatus }>("GET", "/daemon/status");
+  return payload.daemon;
+}
+
+async function startDetachedDaemon(): Promise<DaemonStatus> {
+  const runtime = await readDaemonRuntime(config.daemonDir);
+  if (runtime.running && runtime.state?.pid) {
+    const runningPort = runtime.state.port ? ` on port ${runtime.state.port}` : "";
+    throw new Error(`AgentOS daemon is already running with pid ${runtime.state.pid}${runningPort}.`);
+  }
+
+  await fsp.mkdir(config.daemonDir, { recursive: true });
+  await rotateDaemonLogs(config.daemonDir);
+  const logPath = daemonLogPath(config.daemonDir);
+  const out = fs.openSync(logPath, "a");
+  const child = spawn(process.execPath, [runtimeEntry], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      PORT: String(config.port),
+      AGENTOS_DATA_DIR: config.dataDir
+    },
+    detached: true,
+    stdio: ["ignore", out, out]
+  });
+  child.unref();
+  return waitForDaemon();
+}
+
+export async function ensureDaemonRunning(options: CliOptions = {}): Promise<{
+  daemon: DaemonStatus;
+  startedDaemon: boolean;
+}> {
+  try {
+    return {
+      daemon: await fetchDaemonStatus(),
+      startedDaemon: false
+    };
+  } catch (error) {
+    if (process.env.AGENTOS_BASE_URL) {
+      throw error;
+    }
+
+    return {
+      daemon: await startDetachedDaemon(),
+      startedDaemon: true
+    };
+  }
+}
+
 export async function daemonStatus(options: CliOptions) {
   try {
-    const payload = await apiRequest<{ daemon: DaemonStatus }>("GET", "/daemon/status");
-    print(payload.daemon, options);
+    const daemon = await fetchDaemonStatus();
+    print(daemon, options);
     return;
   } catch {}
 
@@ -223,20 +273,10 @@ export async function daemonStatus(options: CliOptions) {
 
 export async function daemonStart(options: CliOptions) {
   try {
-    const payload = await apiRequest<{ daemon: DaemonStatus }>("GET", "/daemon/status");
-    print(options.json ? payload.daemon : `AgentOS daemon already running on port ${payload.daemon.port}.`, options);
+    const daemon = await fetchDaemonStatus();
+    print(options.json ? daemon : `AgentOS daemon already running on port ${daemon.port}.`, options);
     return;
   } catch {}
-
-  const runtime = await readDaemonRuntime(config.daemonDir);
-  if (runtime.running && runtime.state?.pid) {
-    const runningPort = runtime.state.port ? ` on port ${runtime.state.port}` : "";
-    throw new Error(`AgentOS daemon is already running with pid ${runtime.state.pid}${runningPort}.`);
-  }
-
-  await fsp.mkdir(config.daemonDir, { recursive: true });
-  await rotateDaemonLogs(config.daemonDir);
-  const logPath = daemonLogPath(config.daemonDir);
 
   if (boolOption(options.foreground)) {
     const child = spawn(process.execPath, [runtimeEntry], {
@@ -252,20 +292,7 @@ export async function daemonStart(options: CliOptions) {
     return;
   }
 
-  const out = fs.openSync(logPath, "a");
-  const child = spawn(process.execPath, [runtimeEntry], {
-    cwd: process.cwd(),
-    env: {
-      ...process.env,
-      PORT: String(config.port),
-      AGENTOS_DATA_DIR: config.dataDir
-    },
-    detached: true,
-    stdio: ["ignore", out, out]
-  });
-  child.unref();
-
-  const daemon = await waitForDaemon();
+  const daemon = await startDetachedDaemon();
   print(options.json ? daemon : `Started AgentOS daemon on http://127.0.0.1:${daemon.port}`, options);
 }
 

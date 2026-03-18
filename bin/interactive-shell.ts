@@ -6,6 +6,7 @@ import { commandWatch } from "./commands/watch-command.js";
 import { commandDrafts } from "./commands/drafts-command.js";
 import { commandMemory } from "./commands/memory-command.js";
 import { commandProposals } from "./commands/proposals-command.js";
+import { commandSetup } from "./commands/setup-command.js";
 import {
   apiRequest,
   baseUrl,
@@ -28,7 +29,7 @@ function banner() {
   return [
     "AgentOS interactive shell",
     "Type a task in plain language and press Enter.",
-    "Slash commands: /help /status /doctor /ps /watches /watch <goal> /drafts /approve <draft-id> /reject <draft-id> [reason] /inspect <task-id> /logs <task-id> /surface browser|desktop /workspace <name|clear> /wait on|off /memory <query> /proposals /exit"
+    "Slash commands: /help /setup /status /doctor /ps /watches /watch <goal> /drafts /approve <draft-id> /reject <draft-id> [reason] /inspect <task-id> /logs <task-id> /surface browser|desktop /workspace <name|clear> /wait on|off /memory <query> /proposals /exit"
   ].join("\n");
 }
 
@@ -139,6 +140,11 @@ async function handleSlashCommand(input: string, state: InteractiveSessionState)
 
   if (name === "status") {
     await daemonStatus({});
+    return false;
+  }
+
+  if (name === "setup") {
+    await commandSetup({});
     return false;
   }
 
