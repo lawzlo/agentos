@@ -84,7 +84,7 @@ npm run cli:link
 agentos setup
 ```
 
-3. model は環境変数を手で書く代わりに `agentos model setup` を使います。OpenAI、Claude、Gemini、または独自の OpenAI-compatible endpoint を選んで、API key を貼り付けます。
+3. model は環境変数を手で書く代わりに `agentos model setup` を使います。OpenAI、Claude、Gemini、または独自の OpenAI-compatible endpoint を選んで、API key を貼り付けます。AgentOS はその key で利用できる model を取得し、短い推奨リストを表示します。
 
 ```bash
 agentos model setup

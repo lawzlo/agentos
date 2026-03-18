@@ -16,6 +16,11 @@ import {
   type PersistedModelConfig
 } from "../../src/config.js";
 import {
+  fetchProviderModelCatalog,
+  type ProviderModelCatalogResult,
+  type ProviderModelChoice
+} from "../../src/model-catalog.js";
+import {
   config,
   isRemoteControlPlaneMode,
   print,
@@ -124,16 +129,19 @@ function renderModelStatus(payload: ReturnType<typeof modelStatusPayload>) {
   return lines.join("\n");
 }
 
+interface PromptChoiceOption<T extends string> {
+  value: T;
+  label: string;
+}
+
 async function promptChoice<T extends string>({
   title,
-  values,
-  current,
-  format
+  options,
+  current
 }: {
   title: string;
-  values: T[];
+  options: PromptChoiceOption<T>[];
   current: T;
-  format: (value: T) => string;
 }): Promise<T> {
   const readline = createInterface({
     input: process.stdin,
@@ -142,21 +150,98 @@ async function promptChoice<T extends string>({
   });
 
   try {
-    const rendered = values.map((value, index) => `${index + 1}. ${format(value)}${value === current ? " (default)" : ""}`);
+    const rendered = options.map((option, index) => `${index + 1}. ${option.label}${option.value === current ? " (default)" : ""}`);
     const answer = (await readline.question(`${title}\n${rendered.join("\n")}\n> `)).trim();
     if (!answer) {
       return current;
     }
 
     const byIndex = Number(answer);
-    if (Number.isInteger(byIndex) && byIndex >= 1 && byIndex <= values.length) {
-      return values[byIndex - 1];
+    if (Number.isInteger(byIndex) && byIndex >= 1 && byIndex <= options.length) {
+      return options[byIndex - 1].value;
     }
 
-    return values.find((value) => value === answer) ?? current;
+    const normalized = answer.toLowerCase();
+    return (
+      options.find((option) => option.value === answer || option.label.toLowerCase() === normalized)?.value ??
+      current
+    );
   } finally {
     readline.close();
   }
+}
+
+async function promptSecretInput({
+  title,
+  defaultValue = "",
+  allowEmpty = false
+}: {
+  title: string;
+  defaultValue?: string;
+  allowEmpty?: boolean;
+}): Promise<string> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY || typeof process.stdin.setRawMode !== "function") {
+    return promptInput({ title, defaultValue, allowEmpty });
+  }
+
+  const suffix = defaultValue ? " [default hidden]" : "";
+  process.stdout.write(`${title}${suffix}\n> `);
+
+  return new Promise<string>((resolve, reject) => {
+    const stdin = process.stdin;
+    const stdout = process.stdout;
+    const wasRaw = Boolean((stdin as NodeJS.ReadStream & { isRaw?: boolean }).isRaw);
+    let value = "";
+
+    const cleanup = (writeNewline = true) => {
+      stdin.off("data", onData);
+      if (!wasRaw) {
+        stdin.setRawMode(false);
+      }
+      if (writeNewline) {
+        stdout.write("\n");
+      }
+    };
+
+    const onData = (chunk: string | Buffer) => {
+      for (const char of String(chunk)) {
+        if (char === "\u0003") {
+          cleanup();
+          reject(new Error("Model setup cancelled."));
+          return;
+        }
+
+        if (char === "\r" || char === "\n") {
+          const finalValue = value || defaultValue;
+          if (!finalValue && !allowEmpty) {
+            continue;
+          }
+          cleanup();
+          resolve(finalValue);
+          return;
+        }
+
+        if (char === "\u007f" || char === "\b") {
+          if (value.length) {
+            value = value.slice(0, -1);
+            stdout.write("\b \b");
+          }
+          continue;
+        }
+
+        if (char.startsWith("\u001b")) {
+          continue;
+        }
+
+        value += char;
+        stdout.write("*");
+      }
+    };
+
+    stdin.setRawMode(true);
+    stdin.resume();
+    stdin.on("data", onData);
+  });
 }
 
 async function promptInput({
@@ -199,6 +284,31 @@ function requireInteractiveSetup() {
   }
 }
 
+function modelChoiceLabel(choice: ProviderModelChoice) {
+  const badge =
+    choice.slot === "recommended" ? "Recommended" : choice.slot === "fast" ? "Fast" : "Strong";
+  const preview = choice.preview ? ", preview" : "";
+  const thinking = choice.supportsThinking ? ", thinking" : "";
+  return `${choice.label} (${choice.modelId}) [${badge}${preview}${thinking}]`;
+}
+
+function preferredChoiceForTier(catalog: ProviderModelCatalogResult, tier: AgentModelTier) {
+  return (
+    catalog.choices.find((choice) => choice.tier === tier) ??
+    catalog.choices.find((choice) => choice.slot === "recommended") ??
+    catalog.choices[0] ??
+    null
+  );
+}
+
+function inferTierFromCatalog(
+  catalog: ProviderModelCatalogResult,
+  modelId: string,
+  fallback: AgentModelTier
+) {
+  return catalog.choices.find((choice) => choice.modelId === modelId)?.tier ?? fallback;
+}
+
 async function resolveModelSetupInput(options: CliOptions) {
   const persisted = readPersistedModelConfig(config.dataDir) ?? {};
   const resolved = currentResolvedModel();
@@ -209,27 +319,16 @@ async function resolveModelSetupInput(options: CliOptions) {
     persistedProvider ??
     resolvedProvider ??
     "openai";
-  let tier =
-    normalizeTier(options.tier) ??
-    normalizeTier(persisted.tier) ??
-    normalizeTier(resolved.tier) ??
-    defaultModelTier();
+  let tier = normalizeTier(options.tier) ?? defaultModelTier();
 
   if (!normalizeProvider(options.provider) && !process.env.MODEL_PROVIDER && process.stdin.isTTY) {
     provider = await promptChoice({
       title: "Choose a model provider",
-      values: PROVIDERS,
+      options: PROVIDERS.map((value) => ({
+        value,
+        label: `${modelProviderLabel(value)} (${value})`
+      })),
       current: provider,
-      format: (value) => `${modelProviderLabel(value)} (${value})`
-    });
-  }
-
-  if (!normalizeTier(options.tier) && !process.env.MODEL_TIER && process.stdin.isTTY) {
-    tier = await promptChoice({
-      title: "Choose a model preset",
-      values: TIERS,
-      current: tier,
-      format: (value) => value
     });
   }
 
@@ -264,7 +363,7 @@ async function resolveModelSetupInput(options: CliOptions) {
       apiKey = existingKey;
     } else {
       requireInteractiveSetup();
-      apiKey = await promptInput({
+      apiKey = await promptSecretInput({
         title: `Paste your ${modelProviderLabel(provider)} API key`,
         allowEmpty: false
       });
@@ -289,9 +388,102 @@ async function resolveModelSetupInput(options: CliOptions) {
   }
 
   let model = String(options.model ?? "").trim();
+  const catalog =
+    apiKey && baseUrl
+      ? await fetchProviderModelCatalog({
+          provider,
+          baseUrl,
+          apiKey,
+          timeoutMs: resolved.timeoutMs
+        })
+      : {
+          source: "unavailable" as const,
+          models: [],
+          choices: [],
+          warning: "API key or base URL is missing."
+        };
+
+  if (model) {
+    tier = inferTierFromCatalog(catalog, model, tier);
+  }
+
+  if (!model && catalog.choices.length) {
+    const defaultChoice = preferredChoiceForTier(
+      catalog,
+      normalizeTier(options.tier) ??
+        normalizeTier(persisted.tier) ??
+        normalizeTier(resolved.tier) ??
+        defaultModelTier()
+    );
+
+    if (process.stdin.isTTY && !options.model) {
+      const selected = await promptChoice({
+        title: "Choose a model",
+        options: [
+          ...catalog.choices.map((choice) => ({
+            value: choice.modelId,
+            label: modelChoiceLabel(choice)
+          })),
+          {
+            value: "__custom__",
+            label: "Custom model id"
+          }
+        ],
+        current: defaultChoice?.modelId ?? "__custom__"
+      });
+
+      if (selected === "__custom__") {
+        model = await promptInput({
+          title: "Enter the model name",
+          defaultValue: defaultModel,
+          allowEmpty: false
+        });
+        tier =
+          normalizeTier(options.tier) ??
+          normalizeTier(persisted.tier) ??
+          normalizeTier(resolved.tier) ??
+          defaultModelTier();
+      } else {
+        model = selected;
+        tier = inferTierFromCatalog(catalog, selected, tier);
+      }
+    } else if (defaultChoice) {
+      model = defaultChoice.modelId;
+      tier = defaultChoice.tier;
+    }
+  }
+
   if (!model) {
-    if (defaultModel) {
-      model = defaultModel;
+    if (!normalizeTier(options.tier) && !process.env.MODEL_TIER && process.stdin.isTTY) {
+      tier = await promptChoice({
+        title: "Choose a model preset",
+        options: TIERS.map((value) => ({
+          value,
+          label: value
+        })),
+        current:
+          normalizeTier(persisted.tier) ??
+          normalizeTier(resolved.tier) ??
+          tier
+      });
+    } else {
+      tier =
+        normalizeTier(options.tier) ??
+        normalizeTier(persisted.tier) ??
+        normalizeTier(resolved.tier) ??
+          tier;
+    }
+
+    const fallbackModel = String(
+      options.model ??
+        (persistedMatchesProvider ? persisted.name : undefined) ??
+        (resolvedMatchesProvider ? resolved.name : undefined) ??
+        defaultModelName(provider, tier) ??
+        ""
+    ).trim();
+
+    if (fallbackModel) {
+      model = fallbackModel;
     } else {
       requireInteractiveSetup();
       model = await promptInput({
@@ -307,7 +499,10 @@ async function resolveModelSetupInput(options: CliOptions) {
     apiKey,
     baseUrl,
     model,
-    timeoutMs: resolved.timeoutMs
+    timeoutMs: resolved.timeoutMs,
+    catalogSource: catalog.source,
+    catalogWarning: catalog.warning,
+    catalogChoices: catalog.choices
   };
 }
 
@@ -340,6 +535,16 @@ export async function commandModelSetup(options: CliOptions) {
     tier: payload.tier,
     baseUrl: payload.baseUrl || null,
     apiKey: maskSecret(payload.apiKey),
+    catalogSource: payload.catalogSource,
+    catalogWarning: payload.catalogWarning,
+    catalogChoices: payload.catalogChoices.map((choice) => ({
+      slot: choice.slot,
+      modelId: choice.modelId,
+      label: choice.label,
+      tier: choice.tier,
+      preview: choice.preview,
+      supportsThinking: choice.supportsThinking
+    })),
     daemonRestarted,
     daemonPort,
     nextSteps: [
@@ -360,6 +565,11 @@ export async function commandModelSetup(options: CliOptions) {
           "",
           `Saved ${result.providerLabel} / ${result.model} (${result.tier}) to ${savedPath}`,
           `API key: ${result.apiKey}`,
+          result.catalogSource === "live"
+            ? `Fetched live models from ${result.providerLabel} and chose from a curated shortlist.`
+            : result.catalogWarning
+              ? `Live model discovery was unavailable: ${result.catalogWarning}`
+              : "Live model discovery was unavailable. AgentOS used local defaults.",
           daemonRestarted
             ? `Restarted the local daemon on http://127.0.0.1:${daemonPort ?? 3017}.`
             : isRemoteControlPlaneMode()

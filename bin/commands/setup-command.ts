@@ -449,7 +449,7 @@ function buildOnboardingGuides(report: SetupReport): SetupGuide[] {
       actions:
         modelCheck?.status === "blocking"
           ? [
-              "Run `agentos model setup`, choose OpenAI, Claude, Gemini, or a custom OpenAI-compatible provider, then paste the API key.",
+              "Run `agentos model setup`, choose OpenAI, Claude, Gemini, or a custom OpenAI-compatible provider, then paste the API key. AgentOS will fetch the models available to that key and recommend a short list.",
               "Rerun `agentos setup` to confirm planning and drafting are enabled."
             ]
           : [`Model access is ready${report.doctor.modelProviderLabel ? ` via ${report.doctor.modelProviderLabel}` : ""}. You can move on to browser or desktop setup.`]

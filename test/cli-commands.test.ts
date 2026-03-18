@@ -42,6 +42,46 @@ async function runCliSession(args: string[], input: string, env: NodeJS.ProcessE
   });
 }
 
+async function startCliJsonServer(handler: (request: {
+  method: string;
+  url: string;
+  headers: http.IncomingHttpHeaders;
+  bodyText: string;
+}) => {
+  status?: number;
+  payload: unknown;
+}) {
+  const server = http.createServer(async (req, res) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+
+    const result = handler({
+      method: req.method ?? "GET",
+      url: req.url ?? "/",
+      headers: req.headers,
+      bodyText: Buffer.concat(chunks).toString("utf8")
+    });
+    res.writeHead(result.status ?? 200, {
+      "content-type": "application/json; charset=utf-8"
+    });
+    res.end(JSON.stringify(result.payload));
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, () => resolve()));
+  const address = server.address() as AddressInfo;
+  return {
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    async close() {
+      const closePromise = new Promise<void>((resolve) => server.close(() => resolve()));
+      server.closeIdleConnections?.();
+      server.closeAllConnections?.();
+      await closePromise;
+    }
+  };
+}
+
 interface CliTraceEvent {
   message: string;
   role: string;
@@ -1112,6 +1152,35 @@ test("cli interactive shell can run /setup --fix --dry-run", async () => {
 
 test("cli model setup saves a provider config and model status reads it back", async () => {
   const dataDir = await createTempDir("agentos-model-");
+  const modelApi = await startCliJsonServer((request) => {
+    if (request.method === "GET" && request.url === "/v1/models") {
+      return {
+        payload: {
+          data: [
+            {
+              id: "claude-opus-4-1-20250805",
+              display_name: "Claude Opus 4.1"
+            },
+            {
+              id: "claude-sonnet-4-20250514",
+              display_name: "Claude Sonnet 4"
+            },
+            {
+              id: "claude-haiku-3-5-20241022",
+              display_name: "Claude Haiku 3.5"
+            }
+          ]
+        }
+      };
+    }
+
+    return {
+      status: 404,
+      payload: {
+        error: "not found"
+      }
+    };
+  });
   const env = {
     ...process.env,
     AGENTOS_DATA_DIR: dataDir
@@ -1126,10 +1195,10 @@ test("cli model setup saves a provider config and model status reads it back", a
         "setup",
         "--provider",
         "anthropic",
-        "--tier",
-        "balanced",
         "--api-key",
         "sk-ant-test",
+        "--base-url",
+        modelApi.baseUrl,
         "--json"
       ],
       {
@@ -1139,12 +1208,14 @@ test("cli model setup saves a provider config and model status reads it back", a
     );
     const setupPayload = JSON.parse(setupResult.stdout);
     assert.equal(setupPayload.provider, "anthropic");
-    assert.equal(setupPayload.model, "claude-sonnet-4-5");
+    assert.equal(setupPayload.model, "claude-sonnet-4-20250514");
     assert.equal(setupPayload.tier, "balanced");
+    assert.equal(setupPayload.catalogSource, "live");
+    assert.equal(setupPayload.catalogChoices.some((entry: { slot: string; modelId: string }) => entry.slot === "recommended" && entry.modelId === "claude-sonnet-4-20250514"), true);
 
     const saved = JSON.parse(await fs.readFile(path.join(dataDir, "model-config.json"), "utf8"));
     assert.equal(saved.provider, "anthropic");
-    assert.equal(saved.name, "claude-sonnet-4-5");
+    assert.equal(saved.name, "claude-sonnet-4-20250514");
 
     const statusResult = await execFileAsync(
       process.execPath,
@@ -1157,10 +1228,11 @@ test("cli model setup saves a provider config and model status reads it back", a
     const statusPayload = JSON.parse(statusResult.stdout);
     assert.equal(statusPayload.configured, true);
     assert.equal(statusPayload.provider, "anthropic");
-    assert.equal(statusPayload.model, "claude-sonnet-4-5");
+    assert.equal(statusPayload.model, "claude-sonnet-4-20250514");
     assert.equal(statusPayload.apiKey, "sk-a***test");
     assert.equal(statusPayload.source, "saved_config");
   } finally {
+    await modelApi.close();
     await fs.rm(dataDir, { recursive: true, force: true });
   }
 });

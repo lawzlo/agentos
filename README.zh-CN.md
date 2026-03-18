@@ -84,7 +84,7 @@ npm run cli:link
 agentos setup
 ```
 
-3. 模型不要再手填环境变量。直接走产品化入口 `agentos model setup`，选择 OpenAI、Claude、Gemini，或者自定义 OpenAI-compatible 服务，再粘贴 API key：
+3. 模型不要再手填环境变量。直接走产品化入口 `agentos model setup`，选择 OpenAI、Claude、Gemini，或者自定义 OpenAI-compatible 服务，再粘贴 API key。AgentOS 会拉当前 key 可用的模型，并给出一个很短的推荐列表：
 
 ```bash
 agentos model setup

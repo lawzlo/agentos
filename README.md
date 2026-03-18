@@ -85,7 +85,7 @@ npm run cli:link
 agentos setup
 ```
 
-3. Configure model access in the product flow instead of hand-writing env vars. `agentos model setup` lets you choose OpenAI, Claude, Gemini, or a custom OpenAI-compatible endpoint, then paste the API key:
+3. Configure model access in the product flow instead of hand-writing env vars. `agentos model setup` lets you choose OpenAI, Claude, Gemini, or a custom OpenAI-compatible endpoint, then paste the API key. AgentOS will fetch the models available to that key and show a short recommended list:
 
 ```bash
 agentos model setup

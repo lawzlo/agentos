@@ -84,7 +84,7 @@ npm run cli:link
 agentos setup
 ```
 
-3. No configures el modelo escribiendo variables de entorno a mano. Usa `agentos model setup`, elige OpenAI, Claude, Gemini o un endpoint OpenAI-compatible y pega la API key:
+3. No configures el modelo escribiendo variables de entorno a mano. Usa `agentos model setup`, elige OpenAI, Claude, Gemini o un endpoint OpenAI-compatible y pega la API key. AgentOS consultará los modelos disponibles para esa key y mostrará una lista corta recomendada:
 
 ```bash
 agentos model setup
