@@ -104,6 +104,8 @@ export class RuntimeSupervisor {
   surfaceRegistry: SurfaceRegistry;
   queue: string[];
   running: boolean;
+  drainPromise: Promise<void> | null;
+  acceptingNewTasks: boolean;
 
   constructor({
     controlPlane,
@@ -141,11 +143,29 @@ export class RuntimeSupervisor {
     this.surfaceRegistry = surfaceRegistry;
     this.queue = [];
     this.running = false;
+    this.drainPromise = null;
+    this.acceptingNewTasks = true;
   }
 
   enqueue(taskId: string): void {
+    if (!this.acceptingNewTasks) {
+      return;
+    }
     this.queue.push(taskId);
-    void this.drain();
+    this.scheduleDrain();
+  }
+
+  scheduleDrain(): void {
+    if (this.drainPromise) {
+      return;
+    }
+
+    this.drainPromise = this.drain().finally(() => {
+      this.drainPromise = null;
+      if (this.queue.length && this.acceptingNewTasks) {
+        this.scheduleDrain();
+      }
+    });
   }
 
   async restoreRuntimeState() {
@@ -271,24 +291,53 @@ export class RuntimeSupervisor {
   }
 
   async drain(): Promise<void> {
-    if (this.running) {
-      return;
-    }
-
     this.running = true;
-    while (this.queue.length) {
-      const taskId = this.queue.shift();
-      try {
-        await this.runTask(taskId);
-      } catch (error: unknown) {
-        const task = this.store.updateTask(taskId, {
-          status: "failed",
-          error: errorMessage(error)
-        });
-        this.eventBus.broadcast("task.updated", this.controlPlane.decorateTask(task));
+    try {
+      while (this.queue.length) {
+        const taskId = this.queue.shift();
+        try {
+          await this.runTask(taskId);
+        } catch (error: unknown) {
+          const task = this.store.updateTask(taskId, {
+            status: "failed",
+            error: errorMessage(error)
+          });
+          this.eventBus.broadcast("task.updated", this.controlPlane.decorateTask(task));
+        }
       }
+    } finally {
+      this.running = false;
     }
-    this.running = false;
+  }
+
+  async waitForIdle(timeoutMs = 5000): Promise<void> {
+    const started = Date.now();
+    while (this.queue.length > 0 || this.drainPromise) {
+      if (!this.drainPromise && this.queue.length) {
+        this.scheduleDrain();
+        continue;
+      }
+
+      const activeDrain = this.drainPromise;
+      if (!activeDrain) {
+        continue;
+      }
+
+      const remaining = timeoutMs - (Date.now() - started);
+      if (remaining <= 0) {
+        throw new Error("Timed out waiting for queued tasks to finish during shutdown");
+      }
+
+      await Promise.race([
+        activeDrain,
+        new Promise<never>((_, reject) => {
+          const timer = setTimeout(() => {
+            reject(new Error("Timed out waiting for queued tasks to finish during shutdown"));
+          }, remaining);
+          activeDrain.finally(() => clearTimeout(timer)).catch(() => clearTimeout(timer));
+        })
+      ]);
+    }
   }
 
   async runTask(taskId: string): Promise<void> {
@@ -550,7 +599,9 @@ export class RuntimeSupervisor {
   }
 
   async shutdown() {
+    this.acceptingNewTasks = false;
     await this.watchScheduler.stop();
+    await this.waitForIdle();
     for (const connector of this.connectors) {
       await connector.stop();
     }

@@ -165,12 +165,14 @@ function buildSuggestedCommands({
 function buildStatusChecks({
   doctor,
   startedDaemon,
+  installSource,
   missingRuntimeDirectories,
   appliedFixes,
   packSummaries
 }: {
   doctor: DoctorReport;
   startedDaemon: boolean;
+  installSource: SetupReport["installSource"];
   missingRuntimeDirectories: string[];
   appliedFixes: string[];
   packSummaries: SetupPackSummary[];
@@ -199,6 +201,23 @@ function buildStatusChecks({
           ? `Some runtime directories were missing under ${config.dataDir}.`
           : `Runtime directories are present under ${config.dataDir}.`,
       nextStep: fixedDirectory ? null : missingRuntimeDirectories.length ? "Run `agentos setup --fix` to create the missing directories." : null
+    },
+    {
+      id: "cli-runtime",
+      label: "CLI runtime",
+      status: installSource.source === "source" ? "info" : installSource.bundledRuntime ? "ready" : "warning",
+      detail:
+        installSource.source === "source"
+          ? `This source checkout uses the local Node.js runtime at ${installSource.runtimeExecutablePath ?? process.execPath}.`
+          : installSource.bundledRuntime
+            ? `This installation bundles its own Node.js runtime at ${installSource.runtimeExecutablePath ?? "the packaged install root"}.`
+            : "This installation still depends on a system Node.js runtime.",
+      nextStep:
+        installSource.source === "source"
+          ? "Use the packaged release when you want a self-contained `agentos` install."
+          : installSource.bundledRuntime
+            ? null
+            : "Reinstall from a packaged release that bundles the AgentOS runtime."
     },
     {
       id: "autostart",
@@ -494,6 +513,7 @@ export async function buildSetupReport(options: {
   report.statusChecks = buildStatusChecks({
     doctor: report.doctor,
     startedDaemon: report.startedDaemon,
+    installSource: report.installSource,
     missingRuntimeDirectories,
     appliedFixes: report.appliedFixes,
     packSummaries: report.packSummaries

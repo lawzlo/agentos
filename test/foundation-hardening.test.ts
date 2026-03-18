@@ -9,6 +9,7 @@ import type { TaskRecord } from "../src/types/runtime-schema.js";
 import { rotateDaemonLogs } from "../src/daemon-state.js";
 import { FileInboxConnector } from "../src/runtime/connectors/file-inbox.js";
 import { EventBus } from "../src/runtime/event-bus.js";
+import { RuntimeSupervisor } from "../src/runtime/runtime-supervisor.js";
 import { ControlPlaneStore } from "../src/runtime/store.js";
 import { WatchScheduler } from "../src/runtime/watch-scheduler.js";
 import { createServer } from "../src/server.js";
@@ -285,4 +286,134 @@ test("file inbox shutdown waits for in-flight file processing to finish", async 
   } finally {
     releaseCreateTask?.();
   }
+});
+
+test("runtime supervisor shutdown waits for queued task drains before closing the store", async () => {
+  let releaseTask: (() => void) | null = null;
+  let taskStarted = false;
+  let shutdownResolved = false;
+  let storeClosed = false;
+  let surfaceShutdown = false;
+
+  const supervisor = new RuntimeSupervisor({
+    controlPlane: {
+      mergePersistedResult() {
+        return {};
+      },
+      getTask() {
+        return null;
+      },
+      decorateTask(task) {
+        return task;
+      },
+      controlTask() {
+        return null;
+      },
+      saveTaskAsSkill() {
+        return null;
+      },
+      saveTaskAsWatchRule() {
+        return null;
+      }
+    } as never,
+    store: {
+      listTasksByStatuses() {
+        return [];
+      },
+      updateTask() {
+        return null;
+      },
+      getTask() {
+        return null;
+      },
+      updateTrace() {
+        return null;
+      },
+      close() {
+        storeClosed = true;
+      }
+    } as never,
+    traceStore: {
+      start() {
+        return { id: "trace-1" };
+      },
+      finish() {
+        return null;
+      },
+      log() {
+        return null;
+      }
+    } as never,
+    eventBus: new EventBus(),
+    executionController: {
+      registerTask() {
+        return null;
+      },
+      unregisterTask() {
+        return null;
+      },
+      getState() {
+        return null;
+      },
+      waitForAgent() {
+        return Promise.resolve(null);
+      },
+      setMode() {
+        return null;
+      }
+    } as never,
+    workspaceManager: {} as never,
+    policyEngine: {} as never,
+    autonomy: {} as never,
+    planner: {} as never,
+    operator: {} as never,
+    verifier: {} as never,
+    recovery: {} as never,
+    memoryStore: {
+      remember() {
+        return null;
+      }
+    } as never,
+    watchScheduler: {
+      stop() {
+        return Promise.resolve();
+      }
+    } as never,
+    connectors: [],
+    surfaceRegistry: {
+      shutdown() {
+        surfaceShutdown = true;
+        return Promise.resolve();
+      }
+    } as never
+  });
+
+  supervisor.runTask = async () => {
+    taskStarted = true;
+    await new Promise<void>((resolve) => {
+      releaseTask = resolve;
+    });
+  };
+
+  supervisor.enqueue("task-1");
+  const startedAt = Date.now();
+  while (!taskStarted && Date.now() - startedAt < 2000) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(taskStarted, true);
+
+  const shutdownPromise = supervisor.shutdown().then(() => {
+    shutdownResolved = true;
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(shutdownResolved, false);
+  assert.equal(storeClosed, false);
+  assert.equal(surfaceShutdown, false);
+
+  releaseTask?.();
+  await shutdownPromise;
+  assert.equal(shutdownResolved, true);
+  assert.equal(storeClosed, true);
+  assert.equal(surfaceShutdown, true);
 });

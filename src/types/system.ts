@@ -18,6 +18,8 @@ export interface InstallSourceInfo {
   wrapperPath: string | null;
   metadataPath: string | null;
   managedInstallation: boolean;
+  bundledRuntime: boolean;
+  runtimeExecutablePath?: string | null;
   uninstallHint?: string | null;
 }
 

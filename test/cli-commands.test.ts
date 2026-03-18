@@ -912,6 +912,7 @@ test("cli setup summarizes readiness and recommended next steps", async () => {
     assert.match(result.stdout, /Status: needs attention/);
     assert.match(result.stdout, /Install source: source checkout or npm link/);
     assert.match(result.stdout, /Setup checks:/);
+    assert.match(result.stdout, /CLI runtime/);
     assert.match(result.stdout, /Browser app sessions/);
     assert.match(result.stdout, /Pack availability:/);
     assert.match(result.stdout, /slack-browser/);
@@ -944,9 +945,11 @@ test("cli setup --json returns structured onboarding data", async () => {
     assert.equal(payload.startedDaemon, false);
     assert.equal(payload.daemon.running, true);
     assert.equal(payload.installSource.source, "source");
+    assert.equal(payload.installSource.bundledRuntime, false);
     assert.equal(payload.doctor.modelConfigured, false);
     assert.equal(payload.doctor.blockedLivePackCount, 2);
     assert.equal(Array.isArray(payload.statusChecks), true);
+    assert.equal(payload.statusChecks.some((entry: { id: string }) => entry.id === "cli-runtime"), true);
     assert.equal(payload.statusChecks.some((entry: { id: string }) => entry.id === "browser-sessions"), true);
     assert.equal(Array.isArray(payload.packSummaries), true);
     assert.equal(payload.packSummaries.some((entry: { name: string }) => entry.name === "slack-browser"), true);

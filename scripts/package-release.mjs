@@ -19,9 +19,17 @@ for (let index = 2; index < process.argv.length; index += 1) {
 const platform = String(args.get("--platform") ?? process.platform);
 const jsonOutput = args.get("--json") === true;
 const skipBuild = args.get("--skip-build") === true;
+const bundledRuntimeInput = args.get("--node-runtime") ?? process.env.AGENTOS_BUNDLED_NODE_PATH ?? null;
+const nativeBinaryInput = args.get("--native-binary") ?? process.env.AGENTOS_NATIVE_BINARY_PATH ?? null;
+const releaseDirInput = args.get("--release-dir") ?? process.env.AGENTOS_RELEASE_DIR ?? null;
+const skipBundledRuntime = args.get("--no-bundled-runtime") === true || process.env.AGENTOS_SKIP_BUNDLED_RUNTIME === "1";
 
 function extensionForPlatform(targetPlatform) {
   return targetPlatform === "win32" ? ".exe" : "";
+}
+
+function runtimeExecutableName(targetPlatform) {
+  return targetPlatform === "win32" ? "node.exe" : "node";
 }
 
 async function packageVersion() {
@@ -65,32 +73,115 @@ async function copyDir(source, target) {
   }
 }
 
-function shellWrapper(version) {
+function resolveInputPath(input) {
+  if (!input) {
+    return null;
+  }
+  return path.isAbsolute(input) ? input : path.resolve(rootDir, input);
+}
+
+async function pathExists(targetPath) {
+  try {
+    await fs.access(targetPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function resolveBundledRuntime(targetPlatform) {
+  if (skipBundledRuntime) {
+    return null;
+  }
+
+  const candidate = resolveInputPath(bundledRuntimeInput) ?? (targetPlatform === process.platform ? process.execPath : null);
+  if (!candidate) {
+    return null;
+  }
+
+  const stats = await fs.stat(candidate).catch(() => null);
+  if (!stats) {
+    throw new Error(`Bundled runtime path does not exist: ${candidate}`);
+  }
+
+  if (stats.isDirectory()) {
+    const executableCandidates =
+      targetPlatform === "win32"
+        ? [path.join(candidate, "node.exe"), path.join(candidate, "bin", "node.exe")]
+        : [path.join(candidate, "bin", "node"), path.join(candidate, "node")];
+    for (const executablePath of executableCandidates) {
+      if (await pathExists(executablePath)) {
+        return {
+          kind: "directory",
+          sourcePath: candidate,
+          relativeExecutable: path.relative(candidate, executablePath)
+        };
+      }
+    }
+    throw new Error(`Bundled runtime directory does not contain a ${runtimeExecutableName(targetPlatform)} executable: ${candidate}`);
+  }
+
+  return {
+    kind: "file",
+    sourcePath: candidate,
+    relativeExecutable: runtimeExecutableName(targetPlatform)
+  };
+}
+
+async function stageBundledRuntime(runtime, installRoot, targetPlatform) {
+  if (!runtime) {
+    return null;
+  }
+
+  const runtimeDir = path.join(installRoot, "runtime");
+  if (runtime.kind === "directory") {
+    await copyDir(runtime.sourcePath, runtimeDir);
+  } else {
+    await fs.mkdir(runtimeDir, { recursive: true });
+    await fs.copyFile(runtime.sourcePath, path.join(runtimeDir, runtimeExecutableName(targetPlatform)));
+  }
+
+  const stagedExecutable = path.join(runtimeDir, runtime.relativeExecutable);
+  if (targetPlatform !== "win32") {
+    await fs.chmod(stagedExecutable, 0o755).catch(() => undefined);
+  }
+
+  return stagedExecutable;
+}
+
+function shellWrapper(version, runtimePath) {
   return `#!/bin/sh
 set -eu
-exec node "/opt/agentos/${version}/dist/bin/agentos.js" "$@"
+AGENTOS_ROOT="/opt/agentos/${version}"
+AGENTOS_RUNTIME="${runtimePath ?? ""}"
+if [ -n "$AGENTOS_RUNTIME" ] && [ -x "$AGENTOS_RUNTIME" ]; then
+  exec "$AGENTOS_RUNTIME" "$AGENTOS_ROOT/dist/bin/agentos.js" "$@"
+fi
+exec node "$AGENTOS_ROOT/dist/bin/agentos.js" "$@"
 `;
 }
 
-function windowsWrapper(version) {
+function windowsWrapper(version, runtimePath) {
   return `@echo off
 setlocal
-node "%ProgramFiles%\\AgentOS\\${version}\\dist\\bin\\agentos.js" %*
+set "AGENTOS_ROOT=%ProgramFiles%\\AgentOS\\${version}"
+set "AGENTOS_RUNTIME=${runtimePath ?? ""}"
+if not "%AGENTOS_RUNTIME%"=="" if exist "%AGENTOS_RUNTIME%" (
+  "%AGENTOS_RUNTIME%" "%AGENTOS_ROOT%\\dist\\bin\\agentos.js" %*
+  exit /b %errorlevel%
+)
+node "%AGENTOS_ROOT%\\dist\\bin\\agentos.js" %*
 `;
 }
 
 async function main() {
   const version = await packageVersion();
-  const releaseDir = path.join(rootDir, "release");
+  const releaseDir = resolveInputPath(releaseDirInput) ?? path.join(rootDir, "release");
   const stageDir = path.join(releaseDir, "staging", platform);
-  const nativeBinary = path.join(
-    rootDir,
-    "rust",
-    "agentos-native",
-    "target",
-    "release",
-    `agentos-native${extensionForPlatform(platform)}`
-  );
+  const nativeBinary =
+    resolveInputPath(nativeBinaryInput) ??
+    path.join(rootDir, "rust", "agentos-native", "target", "release", `agentos-native${extensionForPlatform(platform)}`);
+  const bundledRuntime = await resolveBundledRuntime(platform);
 
   if (!skipBuild) {
     await run(process.platform === "win32" ? "npm.cmd" : "npm", ["run", "build:ts"]);
@@ -104,20 +195,24 @@ async function main() {
   const manifest = {
     version,
     platform,
-    stagedAt: new Date().toISOString()
+    stagedAt: new Date().toISOString(),
+    bundledRuntime: Boolean(bundledRuntime),
+    runtimeExecutable: null
   };
 
   if (platform === "darwin") {
     const installRoot = path.join(stageDir, "root", "opt", "agentos", version);
     const wrapperPath = path.join(stageDir, "root", "usr", "local", "bin", "agentos");
     const scriptsDir = path.join(stageDir, "scripts");
+    const runtimeExecutablePath = await stageBundledRuntime(bundledRuntime, installRoot, platform);
+    const runtimeExecutable = runtimeExecutablePath ? `/opt/agentos/${version}/${path.relative(installRoot, runtimeExecutablePath).replaceAll(path.sep, "/")}` : null;
     await copyDir(distDir, path.join(installRoot, "dist"));
     await fs.mkdir(path.join(installRoot, "bin"), { recursive: true });
     await fs.copyFile(nativeBinary, path.join(installRoot, "bin", "agentos-native"));
     await fs.copyFile(path.join(rootDir, "LICENSE"), path.join(installRoot, "LICENSE"));
     await fs.copyFile(path.join(rootDir, "README.md"), path.join(installRoot, "README.md"));
     await fs.mkdir(path.dirname(wrapperPath), { recursive: true });
-    await fs.writeFile(wrapperPath, shellWrapper(version), "utf8");
+    await fs.writeFile(wrapperPath, shellWrapper(version, runtimeExecutable), "utf8");
     await fs.chmod(wrapperPath, 0o755);
     await fs.writeFile(
       path.join(installRoot, "install-metadata.json"),
@@ -125,7 +220,9 @@ async function main() {
         {
           source: "macos_pkg",
           installRoot: `/opt/agentos/${version}`,
-          wrapperPath: "/usr/local/bin/agentos"
+          wrapperPath: "/usr/local/bin/agentos",
+          bundledRuntime: Boolean(runtimeExecutable),
+          runtimeExecutablePath: runtimeExecutable
         },
         null,
         2
@@ -144,22 +241,29 @@ set -eu
     await fs.chmod(path.join(scriptsDir, "postinstall"), 0o755);
     manifest.installRoot = `/opt/agentos/${version}`;
     manifest.wrapper = "/usr/local/bin/agentos";
+    manifest.runtimeExecutable = runtimeExecutable;
   } else if (platform === "win32") {
     const installRoot = path.join(stageDir, "app", "AgentOS", version);
     const wrapperPath = path.join(stageDir, "app", "agentos.cmd");
+    const runtimeExecutablePath = await stageBundledRuntime(bundledRuntime, installRoot, platform);
+    const runtimeExecutable = runtimeExecutablePath
+      ? `AgentOS\\${version}\\${path.relative(installRoot, runtimeExecutablePath).split(path.sep).join("\\")}`
+      : null;
     await copyDir(distDir, path.join(installRoot, "dist"));
     await fs.mkdir(path.join(installRoot, "bin"), { recursive: true });
     await fs.copyFile(nativeBinary, path.join(installRoot, "bin", "agentos-native.exe"));
     await fs.copyFile(path.join(rootDir, "LICENSE"), path.join(installRoot, "LICENSE"));
     await fs.copyFile(path.join(rootDir, "README.md"), path.join(installRoot, "README.md"));
-    await fs.writeFile(wrapperPath, windowsWrapper(version), "utf8");
+    await fs.writeFile(wrapperPath, windowsWrapper(version, runtimeExecutable ? `%ProgramFiles%\\${runtimeExecutable}` : null), "utf8");
     await fs.writeFile(
       path.join(installRoot, "install-metadata.json"),
       JSON.stringify(
         {
           source: "windows_msi",
           installRoot: `AgentOS\\${version}`,
-          wrapperPath: "agentos.cmd"
+          wrapperPath: "agentos.cmd",
+          bundledRuntime: Boolean(runtimeExecutable),
+          runtimeExecutablePath: runtimeExecutable ? `%ProgramFiles%\\${runtimeExecutable}` : null
         },
         null,
         2
@@ -168,6 +272,7 @@ set -eu
     );
     manifest.installRoot = `AgentOS\\${version}`;
     manifest.wrapper = "agentos.cmd";
+    manifest.runtimeExecutable = runtimeExecutable ? `%ProgramFiles%\\${runtimeExecutable}` : null;
   } else {
     throw new Error(`Unsupported packaging platform: ${platform}`);
   }
