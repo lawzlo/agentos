@@ -6,6 +6,7 @@ import type { LivePackInfo } from "../../src/types/runtime-schema.js";
 import type {
   DoctorReport,
   SetupCommandTemplate,
+  SetupGuide,
   SetupPackSummary,
   SetupReport,
   SetupStatusCheck
@@ -335,6 +336,148 @@ function collectBlockingIssues(checks: SetupStatusCheck[]) {
   return checks.filter((check) => check.status === "blocking").map((check) => `${check.label}: ${check.detail}`);
 }
 
+function findCheck(report: SetupReport, id: string) {
+  return report.statusChecks.find((check) => check.id === id) ?? null;
+}
+
+function uniqueActions(actions: string[]) {
+  return Array.from(new Set(actions.map((entry) => entry.trim()).filter(Boolean)));
+}
+
+function buildOnboardingGuides(report: SetupReport): SetupGuide[] {
+  const modelCheck = findCheck(report, "model");
+  const browserRuntime = findCheck(report, "browser-runtime");
+  const browserSessions = findCheck(report, "browser-sessions");
+  const nativeSidecar = findCheck(report, "native-sidecar");
+  const desktopPermissions = findCheck(report, "desktop-permissions");
+  const autostart = findCheck(report, "autostart");
+  const browserPackCount = report.packSummaries.filter((pack) => pack.surface === "browser").length;
+  const blockedBrowserPackCount = report.packSummaries.filter((pack) => pack.surface === "browser" && pack.status !== "ready").length;
+
+  const guides: SetupGuide[] = [
+    {
+      id: "model-access",
+      title: "Model access",
+      status: modelCheck?.status === "blocking" ? "blocking" : "ready",
+      summary:
+        modelCheck?.status === "blocking"
+          ? "AgentOS can still run simple direct tasks, but planning, drafting, summarization, and recovery stay degraded until a model is configured."
+          : "Model access is configured, so planning and drafting are available.",
+      whyItMatters: "Model access powers planning, reply drafting, summaries, and recovery when tasks need more than deterministic UI steps.",
+      actions:
+        modelCheck?.status === "blocking"
+          ? [
+              "Set `MODEL_API_KEY`, `MODEL_BASE_URL`, and `MODEL_NAME` in the shell or launch environment where you run AgentOS.",
+              "Rerun `agentos setup` to confirm planning and drafting are enabled."
+            ]
+          : ["Model access is ready. You can move on to browser or desktop setup."]
+    },
+    {
+      id: "browser-apps",
+      title: "Browser apps",
+      status:
+        browserRuntime?.status === "blocking"
+          ? "blocking"
+          : blockedBrowserPackCount > 0 || browserSessions?.status === "warning"
+            ? "warning"
+            : "ready",
+      summary:
+        browserRuntime?.status === "blocking"
+          ? "Browser automation is not ready yet because AgentOS cannot find a Chrome-compatible browser."
+          : blockedBrowserPackCount > 0
+            ? `${blockedBrowserPackCount} browser pack(s) still need login or runtime attention before always-on browser workflows will behave well.`
+            : browserPackCount > 0
+              ? "Browser automation is available. App logins are still validated when each pack runs."
+              : "No browser packs are currently registered.",
+      whyItMatters: "Slack, mail, BOSS, Drive, Docs, and other browser packs depend on a Chrome-compatible browser plus the same signed-in sessions a human would use.",
+      actions:
+        browserRuntime?.status === "blocking"
+          ? [
+              "Install Chrome, Chromium, or Edge, or set `AGENTOS_BROWSER_EXECUTABLE` to a Chrome-compatible browser binary.",
+              "After that, open the browser once and sign in to the sites you want AgentOS to handle."
+            ]
+          : [
+              "Open Slack, mail, BOSS, Drive, or Docs in the managed browser once and confirm you are signed in.",
+              'Run `agentos "Open example.com, click More information, then capture a screenshot" --surface browser` as a low-risk smoke test.'
+            ]
+    },
+    {
+      id: "desktop-apps",
+      title: "Desktop apps",
+      status:
+        nativeSidecar?.status === "blocking"
+          ? "blocking"
+          : desktopPermissions?.status === "warning"
+            ? "warning"
+            : "ready",
+      summary:
+        nativeSidecar?.status === "blocking"
+          ? "Desktop automation is blocked until the native sidecar is available and compatible."
+          : desktopPermissions?.status === "warning"
+            ? "The desktop bridge is present, but OS permissions still need attention."
+            : "Desktop automation looks ready at the runtime level.",
+      whyItMatters: "Desktop packs such as WeChat and desktop mail rely on the native sidecar plus OS-level Accessibility and Screen Recording permissions.",
+      actions:
+        nativeSidecar?.status === "blocking"
+          ? ["Run `npm run native:build` to rebuild the native sidecar, then rerun `agentos setup`."]
+          : desktopPermissions?.status === "warning"
+            ? [
+                "Grant Accessibility and Screen Recording permissions in system settings.",
+                'Then run `agentos "Open a local text editor, type a short note, and wait for me" --surface desktop` to verify desktop control.'
+              ]
+            : ['Run `agentos "Open a local text editor, type a short note, and wait for me" --surface desktop` as a safe desktop smoke test.']
+    },
+    {
+      id: "always-on",
+      title: "Always-on readiness",
+      status:
+        autostart?.status === "warning" ||
+        report.doctor.pendingDraftCount > 0 ||
+        report.doctor.awaitingApprovalWatchCount > 0 ||
+        report.doctor.backoffWatchCount > 0 ||
+        report.doctor.degradedWatchCount > 0
+          ? "warning"
+          : "ready",
+      summary:
+        autostart?.status === "warning"
+          ? "The daemon is running now, but it is not yet configured to come back automatically when you log in."
+          : report.doctor.pendingDraftCount > 0 || report.doctor.awaitingApprovalWatchCount > 0 || report.doctor.backoffWatchCount > 0 || report.doctor.degradedWatchCount > 0
+            ? "AgentOS can stay on, but there are drafts or watch states that should be reviewed before trusting unattended workflows."
+            : "The daemon and watch runtime look healthy enough for low-risk always-on workflows.",
+      whyItMatters: "Always-on behavior depends on daemon auto-start, healthy watch rules, and a clean draft/reply queue so automation does not silently drift.",
+      actions: uniqueActions([
+        autostart?.status === "warning" ? "Run `agentos setup --fix` to install low-risk defaults like runtime directories and daemon auto-start." : "",
+        report.doctor.pendingDraftCount > 0 ? "Run `agentos drafts ls` to review pending drafts before turning on more autonomy." : "",
+        report.doctor.awaitingApprovalWatchCount > 0 || report.doctor.backoffWatchCount > 0 || report.doctor.degradedWatchCount > 0
+          ? "Run `agentos watch ls` to review watches that are waiting, degraded, or in backoff."
+          : "",
+        report.doctor.pendingDraftCount === 0 && report.doctor.awaitingApprovalWatchCount === 0 && report.doctor.backoffWatchCount === 0 && report.doctor.degradedWatchCount === 0
+          ? "Add one low-risk recurring workflow first, for example `agentos jobs add daily_digest --hour 18`."
+          : ""
+      ])
+    }
+  ];
+
+  return guides;
+}
+
+function buildStarterActions(report: SetupReport) {
+  const actions: string[] = [];
+  for (const guide of report.onboardingGuides) {
+    if (guide.status !== "ready" && guide.actions.length) {
+      actions.push(guide.actions[0]);
+    }
+  }
+
+  if (!actions.length) {
+    for (const template of report.suggestedCommands.slice(0, 3)) {
+      actions.push(`Try ${template.label.toLowerCase()}: \`${template.command}\``);
+    }
+  }
+
+  return uniqueActions(actions).slice(0, 4);
+}
+
 function buildRecommendedActions(report: SetupReport) {
   const actions: string[] = [];
 
@@ -367,7 +510,7 @@ function buildRecommendedActions(report: SetupReport) {
     actions.push(`Try ${template.label.toLowerCase()}: \`${template.command}\``);
   }
 
-  return actions;
+  return uniqueActions(actions);
 }
 
 function renderCheck(check: SetupStatusCheck) {
@@ -386,6 +529,11 @@ function renderTemplate(template: SetupCommandTemplate) {
   return `- ${template.label}: \`${template.command}\`\n  ${template.reason}`;
 }
 
+function renderGuide(guide: SetupGuide) {
+  const actions = guide.actions.length ? ` Next: ${guide.actions.join(" ")}` : "";
+  return `[${guide.status}] ${guide.title}: ${guide.summary} Why: ${guide.whyItMatters}${actions}`;
+}
+
 function renderSetupReport(report: SetupReport, options: { compact?: boolean } = {}) {
   const packLimit = options.compact ? 4 : Math.max(report.packSummaries.length, 4);
   const lines = [
@@ -397,8 +545,28 @@ function renderSetupReport(report: SetupReport, options: { compact?: boolean } =
     `Data directory: ${config.dataDir}`
   ];
 
+  if (report.starterActions.length) {
+    lines.push("", options.compact ? "Start here:" : "Starter actions:");
+    for (const action of report.starterActions) {
+      lines.push(`- ${action}`);
+    }
+  }
+
+  if (report.onboardingGuides.length) {
+    lines.push("", options.compact ? "What still matters:" : "Setup guides:");
+    for (const guide of report.onboardingGuides) {
+      if (options.compact && guide.status === "ready") {
+        continue;
+      }
+      lines.push(`- ${renderGuide(guide)}`);
+    }
+  }
+
+  const checksToRender = options.compact
+    ? report.statusChecks.filter((check) => check.status !== "ready").slice(0, 6)
+    : report.statusChecks;
   lines.push("", options.compact ? "Key checks:" : "Setup checks:");
-  for (const check of report.statusChecks) {
+  for (const check of checksToRender) {
     lines.push(`- ${renderCheck(check)}`);
   }
 
@@ -486,6 +654,8 @@ export async function buildSetupReport(options: {
     installSource,
     statusChecks: [],
     packSummaries,
+    starterActions: [],
+    onboardingGuides: [],
     suggestedCommands: [],
     blockingIssues: [],
     plannedFixes: [],
@@ -519,10 +689,12 @@ export async function buildSetupReport(options: {
     packSummaries: report.packSummaries
   });
   report.blockingIssues = collectBlockingIssues(report.statusChecks);
+  report.onboardingGuides = buildOnboardingGuides(report);
   report.suggestedCommands = buildSuggestedCommands({
     doctor: report.doctor,
     packs: report.packSummaries
   });
+  report.starterActions = buildStarterActions(report);
   report.recommendedActions = buildRecommendedActions(report);
   report.ok = !report.statusChecks.some((check) => check.status === "blocking" || check.status === "warning");
   return report;

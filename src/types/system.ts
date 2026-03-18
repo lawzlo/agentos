@@ -167,6 +167,15 @@ export interface SetupCommandTemplate {
   reason: string;
 }
 
+export interface SetupGuide {
+  id: string;
+  title: string;
+  status: "ready" | "warning" | "blocking";
+  summary: string;
+  whyItMatters: string;
+  actions: string[];
+}
+
 export interface SetupReport {
   ok: boolean;
   startedDaemon: boolean;
@@ -175,6 +184,8 @@ export interface SetupReport {
   installSource: InstallSourceInfo;
   statusChecks: SetupStatusCheck[];
   packSummaries: SetupPackSummary[];
+  starterActions: string[];
+  onboardingGuides: SetupGuide[];
   suggestedCommands: SetupCommandTemplate[];
   blockingIssues: string[];
   plannedFixes: string[];

@@ -9,6 +9,13 @@ import { createServer as createAgentServer } from "../src/server.js";
 const DEFAULT_TASK_WAIT_TIMEOUT_MS = Number.parseInt(process.env.AGENTOS_WAIT_TASK_TIMEOUT_MS ?? "", 10) || 60000;
 const TASK_WAIT_INTERVAL_MS = 250;
 
+async function closeHttpServer(server: http.Server) {
+  const closePromise = new Promise<void>((resolve) => server.close(() => resolve()));
+  server.closeIdleConnections?.();
+  server.closeAllConnections?.();
+  await closePromise;
+}
+
 export async function createTempDir(prefix = "agentos-test-") {
   return fs.mkdtemp(path.join(os.tmpdir(), prefix));
 }
@@ -65,7 +72,7 @@ export async function startFixtureServer() {
   return {
     url: `http://127.0.0.1:${address.port}`,
     async close() {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await closeHttpServer(server);
     }
   };
 }
@@ -191,7 +198,7 @@ export async function startSlackFixtureServer({
       return response.json();
     },
     async close() {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await closeHttpServer(server);
     }
   };
 }
@@ -317,7 +324,7 @@ export async function startMailFixtureServer({
       return response.json();
     },
     async close() {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await closeHttpServer(server);
     }
   };
 }
@@ -496,7 +503,7 @@ export async function startBossFixtureServer({
       });
     },
     async close() {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await closeHttpServer(server);
     }
   };
 }
@@ -761,7 +768,7 @@ export async function startDocsFilesFixtureServer() {
       return response.json();
     },
     async close() {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await closeHttpServer(server);
     }
   };
 }
@@ -830,7 +837,7 @@ export async function startModelServer(decide) {
   return {
     baseUrl: `http://127.0.0.1:${address.port}`,
     async close() {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await closeHttpServer(server);
     }
   };
 }

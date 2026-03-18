@@ -771,7 +771,10 @@ const server = http.createServer(async (req, res) => {
     baseUrl: `http://127.0.0.1:${address.port}`,
     state,
     close() {
-      return new Promise<void>((resolve) => server.close(() => resolve()));
+      const closePromise = new Promise<void>((resolve) => server.close(() => resolve()));
+      server.closeIdleConnections?.();
+      server.closeAllConnections?.();
+      return closePromise;
     }
   };
 }
@@ -880,6 +883,7 @@ test("cli interactive shell accepts natural-language tasks with slash-command de
     );
 
     assert.match(session.stdout, /AgentOS onboarding/);
+    assert.match(session.stdout, /Start here:/);
     assert.match(session.stdout, /AgentOS interactive shell/);
     assert.match(session.stdout, /Default surface: browser/);
     assert.match(session.stdout, /Default workspace: cli-main/);
@@ -912,6 +916,8 @@ test("cli setup summarizes readiness and recommended next steps", async () => {
     assert.match(result.stdout, /Status: needs attention/);
     assert.match(result.stdout, /Install source: source checkout or npm link/);
     assert.match(result.stdout, /Setup checks:/);
+    assert.match(result.stdout, /Starter actions:/);
+    assert.match(result.stdout, /Setup guides:/);
     assert.match(result.stdout, /CLI runtime/);
     assert.match(result.stdout, /Browser app sessions/);
     assert.match(result.stdout, /Pack availability:/);
@@ -949,6 +955,10 @@ test("cli setup --json returns structured onboarding data", async () => {
     assert.equal(payload.doctor.modelConfigured, false);
     assert.equal(payload.doctor.blockedLivePackCount, 2);
     assert.equal(Array.isArray(payload.statusChecks), true);
+    assert.equal(Array.isArray(payload.starterActions), true);
+    assert.equal(payload.starterActions.length > 0, true);
+    assert.equal(Array.isArray(payload.onboardingGuides), true);
+    assert.equal(payload.onboardingGuides.some((entry: { id: string }) => entry.id === "model-access"), true);
     assert.equal(payload.statusChecks.some((entry: { id: string }) => entry.id === "cli-runtime"), true);
     assert.equal(payload.statusChecks.some((entry: { id: string }) => entry.id === "browser-sessions"), true);
     assert.equal(Array.isArray(payload.packSummaries), true);

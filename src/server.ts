@@ -119,9 +119,18 @@ export async function createServer(overrides = {}) {
     },
     async close() {
       controlPlane.eventBus.off("broadcast", broadcast);
-      await new Promise<void>((resolve, reject) => {
+      for (const client of wss.clients) {
+        client.terminate();
+      }
+      const wssClose = new Promise<void>((resolve) => {
+        wss.close(() => resolve());
+      });
+      const serverClose = new Promise<void>((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()));
       });
+      server.closeIdleConnections?.();
+      server.closeAllConnections?.();
+      await Promise.all([serverClose, wssClose]);
       await appendDaemonMarker(config.daemonDir, "daemon.stopped", {
         pid: process.pid
       }).catch(() => {});
