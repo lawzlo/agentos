@@ -9,6 +9,48 @@ import {
 } from "../cli-utils.js";
 import type { WatchHealth, WatchRule } from "../../src/types/runtime-schema.js";
 
+function parseQuietHours(value: unknown) {
+  if (value == null) {
+    return undefined;
+  }
+
+  const match = String(value)
+    .trim()
+    .match(/^(\d{1,2})(?::\d{2})?\s*-\s*(\d{1,2})(?::\d{2})?$/u);
+  if (!match) {
+    throw new Error("quiet hours must look like 22-8 or 22:00-08:00");
+  }
+
+  const startHour = Number(match[1]);
+  const endHour = Number(match[2]);
+  if (!Number.isInteger(startHour) || !Number.isInteger(endHour) || startHour < 0 || startHour > 23 || endHour < 0 || endHour > 23) {
+    throw new Error("quiet hours must use 0-23 hour values");
+  }
+
+  return { startHour, endHour };
+}
+
+function parseGovernance(options: CliOptions) {
+  const governance: Record<string, unknown> = {};
+  if (options.approval) {
+    governance.approvalMode = String(options.approval);
+  }
+  if (options.cooldownMs != null) {
+    governance.cooldownMs = Number(options.cooldownMs);
+  }
+  if (options.maxAutoActionsPerDay != null) {
+    governance.maxAutoActionsPerDay = Number(options.maxAutoActionsPerDay);
+  }
+  if (options.maxConsecutiveFailures != null) {
+    governance.maxConsecutiveFailures = Number(options.maxConsecutiveFailures);
+  }
+  if (options.quietHours) {
+    governance.quietHours = parseQuietHours(options.quietHours);
+  }
+
+  return Object.keys(governance).length ? governance : undefined;
+}
+
 export async function commandWatch(subcommand: string | undefined, positionals: string[], options: CliOptions) {
   if (subcommand === "add") {
     const goal = positionals.join(" ").trim();
@@ -24,6 +66,7 @@ export async function commandWatch(subcommand: string | undefined, positionals: 
       appTarget: options.app,
       livePack: options.pack,
       pollIntervalMs: options.interval ? Number(options.interval) : undefined,
+      governance: parseGovernance(options),
       inputs: parseInputs(options.input)
     });
     print(payload.watch, options);
@@ -47,7 +90,8 @@ export async function commandWatch(subcommand: string | undefined, positionals: 
       livePack: options.pack,
       pollIntervalMs: options.interval ? Number(options.interval) : undefined,
       enabled: options.enabled == null ? true : boolOption(options.enabled),
-      triggerTexts: listify(options.trigger)
+      triggerTexts: listify(options.trigger),
+      governance: parseGovernance(options)
     });
     print(payload.watch, options);
     return;

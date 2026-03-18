@@ -32,8 +32,8 @@ agentos inspect <task-id>
 agentos logs <task-id>
 agentos control <task-id> pause|resume|takeover|request_takeover|return|return_to_agent|stop [--note "..."]
 agentos teach-step <task-id> --action clickTarget [--target "..."] [--text "..."] [--surface browser|desktop]
-agentos watch add "<goal>" [--pack live-pack] [--skill name] [--workspace name] [--input key=value]
-agentos watch teach <task-id> "<goal>" [--watch id] [--pack live-pack] [--workspace name]
+agentos watch add "<goal>" [--pack live-pack] [--skill name] [--workspace name] [--input key=value] [--approval auto|draft_only|confirm_required|blocked] [--cooldown-ms n] [--max-auto-actions-per-day n] [--max-consecutive-failures n] [--quiet-hours 22-8]
+agentos watch teach <task-id> "<goal>" [--watch id] [--pack live-pack] [--workspace name] [--approval auto|draft_only|confirm_required|blocked]
 agentos watch ls|inspect|health|enable|disable|retry|rm
 agentos drafts ls|inspect|approve|reject
 agentos packs ls|inspect

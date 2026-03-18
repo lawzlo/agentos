@@ -93,3 +93,30 @@ test("normalizeWatchRule maps preferred browser mail goal to browser live pack",
   assert.equal(watch.appTarget, null);
   assert.equal(watch.watchProfile.executionMode, "planned");
 });
+
+test("normalizeWatchRule normalizes governance settings", async () => {
+  const watch = normalizeWatchRule({
+    goal: "Watch Slack and keep actions bounded",
+    governance: {
+      approvalMode: "draft_only",
+      cooldownMs: 30_500,
+      maxAutoActionsPerDay: 2,
+      maxConsecutiveFailures: 1,
+      quietHours: {
+        startHour: 22,
+        endHour: 8
+      }
+    }
+  });
+
+  assert.deepEqual(watch.watchProfile.governance, {
+    approvalMode: "draft_only",
+    cooldownMs: 30500,
+    maxAutoActionsPerDay: 2,
+    maxConsecutiveFailures: 1,
+    quietHours: {
+      startHour: 22,
+      endHour: 8
+    }
+  });
+});

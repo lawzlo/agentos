@@ -577,6 +577,16 @@ test("cli watch add posts composed payload and exposes created watch", async () 
         "cli-main",
         "--input",
         "mode=monitor",
+        "--approval",
+        "confirm_required",
+        "--cooldown-ms",
+        "60000",
+        "--max-auto-actions-per-day",
+        "2",
+        "--max-consecutive-failures",
+        "4",
+        "--quiet-hours",
+        "22-8",
         "--json"
       ],
       { cwd: process.cwd(), env }
@@ -589,6 +599,16 @@ test("cli watch add posts composed payload and exposes created watch", async () 
     assert.equal(watch.workspaceName, "cli-main");
     assert.equal(watch.livePack, "cli-live");
     assert.deepEqual(api.state.lastWatchBody?.inputs, { mode: "monitor" });
+    assert.deepEqual(api.state.lastWatchBody?.governance, {
+      approvalMode: "confirm_required",
+      cooldownMs: 60000,
+      maxAutoActionsPerDay: 2,
+      maxConsecutiveFailures: 4,
+      quietHours: {
+        startHour: 22,
+        endHour: 8
+      }
+    });
   } finally {
     await api.close();
     await fs.rm(dataDir, { recursive: true, force: true });

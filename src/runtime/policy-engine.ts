@@ -4,6 +4,23 @@ const HIGH_RISK_KEYWORDS = ["pay", "payment", "wire", "delete", "submit", "send"
 const HIGH_RISK_AUTOMATION_KEYWORDS = ["pay", "payment", "wire", "delete", "invoice", "sign", "合同", "付款", "删除", "签署"];
 const BLOCKED_ACTIONS = new Set(["shell", "evaluate"]);
 
+function configuredAutomationPolicy(
+  watchRule: WatchRule | null | undefined,
+  taskSpec: TaskSpec
+): "allow" | "draft_only" | "confirm_required" | "blocked" | null {
+  const governanceMode = watchRule?.watchProfile?.governance?.approvalMode;
+  if (governanceMode && governanceMode !== "auto") {
+    return governanceMode;
+  }
+
+  return (
+    watchRule?.taskInputs?.automationPolicy ??
+    watchRule?.watchProfile?.metadata?.automationPolicy ??
+    taskSpec?.permissions?.automationPolicy ??
+    null
+  ) as "allow" | "draft_only" | "confirm_required" | "blocked" | null;
+}
+
 interface PolicyEvaluation {
   allowed: boolean;
   riskLevel: "normal" | "high";
@@ -60,11 +77,7 @@ export class PolicyEngine {
     replyText?: string;
   }): RiskGateDecision {
     const livePack = String(watchRule?.livePack ?? "");
-    const configuredPolicy =
-      watchRule?.taskInputs?.automationPolicy ??
-      watchRule?.watchProfile?.metadata?.automationPolicy ??
-      taskSpec?.permissions?.automationPolicy ??
-      null;
+    const configuredPolicy = configuredAutomationPolicy(watchRule, taskSpec);
     const text = [
       taskSpec?.goal,
       taskSpec?.doneCondition,

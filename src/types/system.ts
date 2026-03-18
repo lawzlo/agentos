@@ -8,6 +8,16 @@ import type { LearningStatus, ProposalRecord } from "./learning.js";
 import type { RuntimeVersionInfo } from "../version.js";
 import type { SidecarHealthResult, SidecarPermissionsResult } from "./native-sidecar.js";
 
+export interface DaemonInstallStatus {
+  supported: boolean;
+  mode: "launchd" | "task-scheduler" | "unsupported";
+  installed: boolean;
+  loaded?: boolean | null;
+  label?: string | null;
+  path?: string | null;
+  command?: string | null;
+}
+
 export interface DaemonStatus {
   running: boolean;
   pid?: number;
@@ -17,6 +27,16 @@ export interface DaemonStatus {
   connectorCount?: number;
   watchCount?: number;
   enabledWatchCount?: number;
+  degradedWatchCount?: number;
+  pendingDraftCount?: number;
+  pendingProposalCount?: number;
+  recentErrors?: Array<{
+    id: string;
+    status: string;
+    message: string;
+    updatedAt: string;
+  }>;
+  install?: DaemonInstallStatus;
   [key: string]: unknown;
 }
 
@@ -36,9 +56,19 @@ export interface DoctorReport {
   livePackCount: number;
   degradedWatchCount: number;
   pendingDraftCount: number;
+  pendingProposalCount: number;
+  awaitingApprovalWatchCount: number;
+  backoffWatchCount: number;
   connectorCount: number;
   learning: LearningStatus;
   version: RuntimeVersionInfo;
+  install: DaemonInstallStatus;
+  recentErrors: Array<{
+    id: string;
+    status: string;
+    message: string;
+    updatedAt: string;
+  }>;
   store: {
     schemaVersion: number;
     compatible: boolean;

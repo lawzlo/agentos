@@ -1,4 +1,5 @@
 import { json } from "../http-utils.js";
+import { getDaemonInstallStatus } from "../../daemon-autostart.js";
 import type { ApiRouteContext } from "../types.js";
 import type { DaemonStatus } from "../../types/system.js";
 
@@ -56,13 +57,29 @@ export async function handleSystemRoutes({
 
   if (req.method === "GET" && url.pathname === "/daemon/status") {
     const watches = controlPlane.listWatchRules();
+    const drafts = controlPlane.listDrafts(200);
+    const proposals = controlPlane.listProposals(200);
+    const install = await getDaemonInstallStatus();
     json(res, 200, {
       daemon: {
-        running: true,
         ...daemon,
         connectorCount: controlPlane.listConnectors().length,
         watchCount: watches.length,
-        enabledWatchCount: watches.filter((rule) => rule.enabled).length
+        enabledWatchCount: watches.filter((rule) => rule.enabled).length,
+        degradedWatchCount: watches.filter((rule) => ["degraded", "backoff"].includes(rule.status)).length,
+        pendingDraftCount: drafts.filter((draft) => draft.status === "pending").length,
+        pendingProposalCount: proposals.filter((proposal) => proposal.status === "pending").length,
+        recentErrors: watches
+          .filter((rule) => typeof rule.lastError === "string" && rule.lastError.trim())
+          .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))
+          .slice(0, 5)
+          .map((rule) => ({
+            id: rule.id,
+            status: rule.status,
+            message: String(rule.lastError ?? ""),
+            updatedAt: rule.updatedAt
+          })),
+        install
       }
     });
     return true;

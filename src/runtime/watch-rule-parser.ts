@@ -1,4 +1,4 @@
-import type { WatchProfile } from "../types/runtime-schema.js";
+import type { WatchGovernance, WatchProfile, WatchQuietHours } from "../types/runtime-schema.js";
 
 type ExecutionMode = "planned" | "autonomous";
 
@@ -25,6 +25,7 @@ export interface WatchRuleInput {
   lastTriggeredAt?: string | null;
   lastError?: string | null;
   executionMode?: ExecutionMode;
+  governance?: WatchGovernance;
 }
 
 export interface NormalizedWatchRule {
@@ -52,6 +53,68 @@ function clampPollInterval(value?: number | string): number {
     return 15000;
   }
   return Math.max(1000, Math.min(interval, 300000));
+}
+
+function clampNonNegative(value: unknown, fallback = 0, max = 86_400_000): number {
+  const numeric = Number(value ?? fallback);
+  if (!Number.isFinite(numeric)) {
+    return fallback;
+  }
+  return Math.max(0, Math.min(Math.round(numeric), max));
+}
+
+function clampPositiveInteger(value: unknown, fallback: number, max: number): number {
+  const numeric = Number(value ?? fallback);
+  if (!Number.isFinite(numeric)) {
+    return fallback;
+  }
+  return Math.max(1, Math.min(Math.round(numeric), max));
+}
+
+function normalizeQuietHours(value: WatchQuietHours | null | undefined): WatchQuietHours | null | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const startHour = Number(value.startHour);
+  const endHour = Number(value.endHour);
+  if (!Number.isInteger(startHour) || !Number.isInteger(endHour)) {
+    return undefined;
+  }
+  if (startHour < 0 || startHour > 23 || endHour < 0 || endHour > 23) {
+    return undefined;
+  }
+
+  return {
+    startHour,
+    endHour
+  };
+}
+
+function normalizeGovernance(value: WatchGovernance | null | undefined): WatchGovernance | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+
+  const approvalMode = ["auto", "draft_only", "confirm_required", "blocked"].includes(String(value.approvalMode))
+    ? (String(value.approvalMode) as WatchGovernance["approvalMode"])
+    : undefined;
+  const quietHours = normalizeQuietHours(value.quietHours);
+  const cooldownMs = value.cooldownMs == null ? undefined : clampNonNegative(value.cooldownMs, 0, 7 * 24 * 60 * 60 * 1000);
+  const maxAutoActionsPerDay =
+    value.maxAutoActionsPerDay == null ? undefined : clampPositiveInteger(value.maxAutoActionsPerDay, 1, 500);
+  const maxConsecutiveFailures =
+    value.maxConsecutiveFailures == null ? undefined : clampPositiveInteger(value.maxConsecutiveFailures, 1, 20);
+
+  const normalized: WatchGovernance = {
+    ...(approvalMode ? { approvalMode } : {}),
+    ...(quietHours ? { quietHours } : {}),
+    ...(cooldownMs != null ? { cooldownMs } : {}),
+    ...(maxAutoActionsPerDay != null ? { maxAutoActionsPerDay } : {}),
+    ...(maxConsecutiveFailures != null ? { maxConsecutiveFailures } : {})
+  };
+
+  return Object.keys(normalized).length ? normalized : undefined;
 }
 
 function inferPack(
@@ -164,13 +227,18 @@ export function normalizeWatchRule(
 
   const inferred = inferPack(goal, input);
   const taskInputs = input.taskInputs ?? input.inputs ?? {};
+  const governance = normalizeGovernance({
+    ...(input.watchProfile?.governance ?? {}),
+    ...(input.governance ?? {})
+  });
   const watchProfile: WatchProfile = {
     ...(input.watchProfile ?? {}),
     triggerTexts: input.watchProfile?.triggerTexts ?? inferred.triggerTexts,
     executionMode:
       input.watchProfile?.executionMode ??
       input.executionMode ??
-      (input.skillName ? "planned" : modelConfigured ? "autonomous" : "planned")
+      (input.skillName ? "planned" : modelConfigured ? "autonomous" : "planned"),
+    ...(governance ? { governance } : {})
   };
   const enabled = input.enabled !== false;
 

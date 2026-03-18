@@ -7,7 +7,14 @@ import type { LivePackRegistry } from "./live-pack-registry.js";
 import type { OpenAICompatibleModelClient } from "./model-client.js";
 import type { ControlPlaneStore } from "./store.js";
 import type { WatchScheduler } from "./watch-scheduler.js";
-import type { ConnectorStatus, TaskSpec, TeachRecording, WatchHealth, WatchRule } from "../types/runtime-schema.js";
+import type {
+  ConnectorStatus,
+  TaskSpec,
+  TeachRecording,
+  WatchGovernance,
+  WatchHealth,
+  WatchRule
+} from "../types/runtime-schema.js";
 import type { WatchRuleInput } from "./watch-rule-parser.js";
 
 interface WatchServiceOptions {
@@ -31,6 +38,7 @@ interface SaveWatchRuleOptions {
   pollIntervalMs?: number | null;
   enabled?: boolean | null;
   triggerTexts?: string[];
+  governance?: WatchGovernance;
 }
 
 export class WatchService {
@@ -76,7 +84,8 @@ export class WatchService {
       skillName = null,
       pollIntervalMs = null,
       enabled = null,
-      triggerTexts = []
+      triggerTexts = [],
+      governance = undefined
     }: SaveWatchRuleOptions = {}
   ): WatchRule | null {
     const task = this.store.getTask(taskId);
@@ -110,6 +119,16 @@ export class WatchService {
         recoveryHints: existingWatchRule?.watchProfile?.recoveryHints ?? []
       }
     });
+    const mergedWatchProfile: WatchRule["watchProfile"] = {
+      ...(existingWatchRule?.watchProfile ?? {}),
+      ...watchProfile,
+      executionMode: watchProfile.executionMode === "autonomous" ? "autonomous" : "planned",
+      governance:
+        governance ??
+        existingWatchRule?.watchProfile?.governance ??
+        (watchProfile as WatchRule["watchProfile"]).governance ??
+        undefined
+    };
 
     const normalized = normalizeWatchRule(
       {
@@ -129,11 +148,7 @@ export class WatchService {
         skillName: skillName ?? existingWatchRule?.skillName ?? null,
         pollIntervalMs: pollIntervalMs ?? existingWatchRule?.pollIntervalMs ?? 15000,
         enabled: enabled ?? existingWatchRule?.enabled ?? true,
-        watchProfile: {
-          ...(existingWatchRule?.watchProfile ?? {}),
-          ...watchProfile,
-          executionMode: watchProfile.executionMode === "autonomous" ? "autonomous" : "planned"
-        },
+        watchProfile: mergedWatchProfile,
         taskInputs: {
           ...(existingWatchRule?.taskInputs ?? {}),
           ...taskInputs,

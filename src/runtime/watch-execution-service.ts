@@ -12,6 +12,7 @@ import type {
   TaskSpec,
   TeachTemplateInput,
   WatchDetection,
+  WatchGovernance,
   WatchRule
 } from "../types/runtime-schema.js";
 
@@ -34,6 +35,73 @@ function clearWatchFailureState(dedupeState: Record<string, unknown> = {}) {
     failureCount: 0,
     retryAfter: null,
     backoffMs: 0
+  };
+}
+
+function localDayKey(date = new Date()): string {
+  const offsetMs = date.getTimezoneOffset() * 60_000;
+  return new Date(date.getTime() - offsetMs).toISOString().slice(0, 10);
+}
+
+function watchGovernance(rule: WatchRule): WatchGovernance {
+  return (rule.watchProfile?.governance ?? {}) as WatchGovernance;
+}
+
+function isWithinQuietHours(governance: WatchGovernance, now = new Date()): boolean {
+  const quietHours = governance.quietHours;
+  if (!quietHours) {
+    return false;
+  }
+
+  const startHour = Number(quietHours.startHour);
+  const endHour = Number(quietHours.endHour);
+  if (!Number.isInteger(startHour) || !Number.isInteger(endHour) || startHour === endHour) {
+    return false;
+  }
+
+  const currentHour = now.getHours();
+  if (startHour < endHour) {
+    return currentHour >= startHour && currentHour < endHour;
+  }
+
+  return currentHour >= startHour || currentHour < endHour;
+}
+
+function withinCooldown(rule: WatchRule, governance: WatchGovernance, now = Date.now()): boolean {
+  const cooldownMs = Number(governance.cooldownMs ?? 0);
+  const lastTriggeredAt = rule.lastTriggeredAt ? new Date(rule.lastTriggeredAt).getTime() : 0;
+  return cooldownMs > 0 && Number.isFinite(lastTriggeredAt) && lastTriggeredAt > 0 && now - lastTriggeredAt < cooldownMs;
+}
+
+function autoActionCount(rule: WatchRule, dayKey = localDayKey()): number {
+  const storedDay = String(rule.dedupeState?.autoActionDay ?? "");
+  if (storedDay !== dayKey) {
+    return 0;
+  }
+
+  return Math.max(0, Number(rule.dedupeState?.autoActionCount ?? 0));
+}
+
+function recordAutoAction(dedupeState: Record<string, unknown> = {}, dayKey = localDayKey()) {
+  const storedDay = String(dedupeState.autoActionDay ?? "");
+  const currentCount = storedDay === dayKey ? Math.max(0, Number(dedupeState.autoActionCount ?? 0)) : 0;
+  return {
+    ...dedupeState,
+    autoActionDay: dayKey,
+    autoActionCount: currentCount + 1
+  };
+}
+
+function downgradeToDraft(
+  decision: RiskGateDecision,
+  reason: string,
+  policy: RiskGateDecision["policy"] = "draft_only"
+): RiskGateDecision {
+  return {
+    ...decision,
+    policy,
+    action: "draft",
+    reasons: [...decision.reasons, reason]
   };
 }
 
@@ -371,12 +439,38 @@ export class WatchExecutionService {
         detection,
         replyText: replyDraft?.replyText ?? ""
       }) as RiskGateDecision;
+      const governance = watchGovernance(rule);
 
-      if (automation.action === "block") {
+      if (automation.action !== "block" && withinCooldown(rule, governance)) {
         const updated = this.store.putWatchRule({
           ...rule,
           lastObservedAt: nowIso(),
-          lastError: automation.reasons.join("; ") || "automation blocked",
+          lastError: null,
+          status: "watching"
+        });
+        this.eventBus.broadcast("watch.skipped", {
+          rule: updated,
+          reason: "cooldown_active",
+          cooldownMs: governance.cooldownMs ?? 0
+        });
+        this.eventBus.broadcast("watch.updated", this.controlPlane.watchService.decorate(updated));
+        return;
+      }
+
+      const autoActionsToday = autoActionCount(rule);
+      const maxAutoActionsPerDay = Math.max(0, Number(governance.maxAutoActionsPerDay ?? 0));
+      const governedAutomation =
+        automation.action === "send" && maxAutoActionsPerDay > 0 && autoActionsToday >= maxAutoActionsPerDay
+          ? downgradeToDraft(automation, "watch governance max auto actions per day reached")
+          : automation.action === "send" && replyDraft && isWithinQuietHours(governance)
+            ? downgradeToDraft(automation, "watch governance quiet hours active")
+            : automation;
+
+      if (governedAutomation.action === "block") {
+        const updated = this.store.putWatchRule({
+          ...rule,
+          lastObservedAt: nowIso(),
+          lastError: governedAutomation.reasons.join("; ") || "automation blocked",
           status: "degraded",
           dedupeState: {
             ...(rule.dedupeState ?? {}),
@@ -390,18 +484,18 @@ export class WatchExecutionService {
         this.eventBus.broadcast("watch.updated", this.controlPlane.watchService.decorate(updated));
         this.eventBus.broadcast("watch.blocked", {
           rule: updated,
-          automation,
+          automation: governedAutomation,
           detection
         });
         return;
       }
 
-      if (automation.action === "draft") {
+      if (governedAutomation.action === "draft") {
         const draft = this.controlPlane.draftService.create({
           watchRule: rule,
           taskSpec,
           detection: detection as Record<string, unknown>,
-          riskDecision: automation,
+          riskDecision: governedAutomation,
           replyText: replyDraft?.replyText ?? null,
           summary: detection.summary ?? null,
           metadata: {
@@ -442,7 +536,7 @@ export class WatchExecutionService {
         lastError: null,
         status: "watching",
         dedupeState: clearWatchFailureState({
-          ...(rule.dedupeState ?? {}),
+          ...recordAutoAction(rule.dedupeState ?? {}),
           lastFingerprint: detection.fingerprint ?? detection.summary ?? task.id,
           lastSummary: detection.summary ?? null,
           lastContext: detection.context ?? [],
@@ -459,6 +553,10 @@ export class WatchExecutionService {
     } catch (error) {
       const current = this.store.getWatchRule(ruleId);
       const failureCount = Number(current?.dedupeState?.failureCount ?? 0) + 1;
+      const maxConsecutiveFailures = Math.max(
+        1,
+        Number((current?.watchProfile?.governance as WatchGovernance | undefined)?.maxConsecutiveFailures ?? 3)
+      );
       const backoffMs = Math.min(
         Math.max((current ?? rule).pollIntervalMs * 2 ** Math.max(failureCount - 1, 0), (current ?? rule).pollIntervalMs),
         300000
@@ -467,7 +565,7 @@ export class WatchExecutionService {
         ...(current ?? rule),
         lastObservedAt: nowIso(),
         lastError: error instanceof Error ? error.message : String(error),
-        status: failureCount >= 3 ? "degraded" : "backoff",
+        status: failureCount >= maxConsecutiveFailures ? "degraded" : "backoff",
         dedupeState: {
           ...((current ?? rule).dedupeState ?? {}),
           failureCount,

@@ -27,6 +27,7 @@ import { DraftService } from "./draft-service.js";
 import { WatchExecutionService } from "./watch-execution-service.js";
 import { RuntimeSupervisor } from "./runtime-supervisor.js";
 import { LearningService } from "./learning-service.js";
+import { getDaemonInstallStatus } from "../daemon-autostart.js";
 import { createDiagnosticBundle } from "../diagnostics.js";
 import { getRuntimeVersionInfo } from "../version.js";
 import type { AgentOsConfig } from "../config.js";
@@ -459,6 +460,21 @@ export class ControlPlane {
     const schemaVersion = this.store.getSchemaVersion();
     const native = await this.#collectNativeDiagnostics();
     const learning = this.learningService.status();
+    const install = await getDaemonInstallStatus();
+    const watches = this.listWatchRules();
+    const pendingProposalCount = learning.pendingProposalCount;
+    const awaitingApprovalWatchCount = watches.filter((rule) => rule.status === "awaiting_approval").length;
+    const backoffWatchCount = watches.filter((rule) => rule.status === "backoff").length;
+    const recentErrors = watches
+      .filter((rule) => typeof rule.lastError === "string" && rule.lastError.trim())
+      .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))
+      .slice(0, 5)
+      .map((rule) => ({
+        id: rule.id,
+        status: rule.status,
+        message: String(rule.lastError ?? ""),
+        updatedAt: rule.updatedAt
+      }));
     const warnings = [...base.warnings];
 
     if (schemaVersion !== version.storeSchemaVersion) {
@@ -477,6 +493,12 @@ export class ControlPlane {
     if (native.permissions && Object.values(native.permissions).some((value) => value === false)) {
       warnings.push("Desktop automation permissions are incomplete.");
     }
+    if (install.supported && !install.installed) {
+      warnings.push("Daemon auto-start is not installed.");
+    }
+    if (install.installed && install.loaded === false) {
+      warnings.push("Daemon auto-start is installed but not loaded.");
+    }
 
     return {
       ...base,
@@ -488,6 +510,11 @@ export class ControlPlane {
       warnings,
       learning,
       version,
+      install,
+      pendingProposalCount,
+      awaitingApprovalWatchCount,
+      backoffWatchCount,
+      recentErrors,
       store: {
         schemaVersion,
         compatible: schemaVersion === version.storeSchemaVersion

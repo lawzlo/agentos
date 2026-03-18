@@ -359,6 +359,192 @@ test("watch failures enter backoff and record retry metadata", async () => {
   }
 });
 
+test("watch governance quiet hours downgrade auto-send replies into drafts", async () => {
+  const dataDir = await createTempDir();
+  const currentHour = new Date().getHours();
+  const fakeLivePack = {
+    async detectNewItems({ dedupeState }) {
+      if (dedupeState.lastFingerprint === "quiet-hours-item-1") {
+        return null;
+      }
+
+      return {
+        fingerprint: "quiet-hours-item-1",
+        summary: "Quiet hours message",
+        replyText: "Handled during quiet hours",
+        inputs: {
+          typeTarget: "Message",
+          sendTarget: "Send"
+        }
+      };
+    }
+  };
+  const server = await startAgentServer({
+    dataDir,
+    livePacks: {
+      "quiet-hours-live": fakeLivePack
+    }
+  });
+
+  try {
+    const createResponse = await fetch(`${server.baseUrl}/watches`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        goal: "Always watch the quiet inbox",
+        livePack: "quiet-hours-live",
+        preferredSurface: "desktop",
+        pollIntervalMs: 50,
+        inputs: {
+          automationPolicy: "allow"
+        },
+        governance: {
+          quietHours: {
+            startHour: currentHour,
+            endHour: (currentHour + 1) % 24
+          }
+        }
+      })
+    });
+    const { watch } = await createResponse.json();
+
+    const pendingDraft = await waitForDraft(
+      server.baseUrl,
+      (draft) => draft.watchRuleId === watch.id && draft.status === "pending"
+    );
+    assert.equal(pendingDraft.riskDecision.action, "draft");
+    assert.ok(
+      pendingDraft.riskDecision.reasons.some((reason) => String(reason).includes("quiet hours"))
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test("watch governance max auto actions per day downgrades later triggers into drafts", async () => {
+  const dataDir = await createTempDir();
+  const queuedDetections = [
+    {
+      fingerprint: "budget-item-1",
+      summary: "First automatic action",
+      taskSpec: {
+        goal: "Handle the first automatic item",
+        preferredSurface: "desktop",
+        steps: [
+          {
+            label: "Wait briefly",
+            surface: "desktop",
+            action: "wait",
+            params: { ms: 10 },
+            checkpoint: false
+          }
+        ]
+      }
+    },
+    {
+      fingerprint: "budget-item-2",
+      summary: "Second automatic action",
+      taskSpec: {
+        goal: "Handle the second automatic item",
+        preferredSurface: "desktop",
+        steps: [
+          {
+            label: "Wait briefly",
+            surface: "desktop",
+            action: "wait",
+            params: { ms: 10 },
+            checkpoint: false
+          }
+        ]
+      }
+    }
+  ];
+  const fakeLivePack = {
+    async detectNewItems() {
+      return queuedDetections.shift() ?? null;
+    }
+  };
+  const server = await startAgentServer({
+    dataDir,
+    livePacks: {
+      "budget-live": fakeLivePack
+    }
+  });
+
+  try {
+    const createResponse = await fetch(`${server.baseUrl}/watches`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        goal: "Always watch the bounded inbox",
+        livePack: "budget-live",
+        preferredSurface: "desktop",
+        pollIntervalMs: 50,
+        inputs: {
+          automationPolicy: "allow"
+        },
+        governance: {
+          maxAutoActionsPerDay: 1
+        }
+      })
+    });
+    const { watch } = await createResponse.json();
+
+    const triggeredTask = await waitForWatchTask(server.baseUrl, watch.id);
+    const completedTask = await waitForTask(server.baseUrl, triggeredTask.id, (task) => task.status === "completed");
+    assert.equal(completedTask.status, "completed");
+
+    const pendingDraft = await waitForDraft(
+      server.baseUrl,
+      (draft) => draft.watchRuleId === watch.id && draft.status === "pending"
+    );
+    assert.equal(pendingDraft.riskDecision.action, "draft");
+    assert.ok(
+      pendingDraft.riskDecision.reasons.some((reason) => String(reason).includes("max auto actions per day"))
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test("watch governance can degrade immediately after one failure", async () => {
+  const dataDir = await createTempDir();
+  const fakeLivePack = {
+    async detectNewItems() {
+      throw new Error("governance failure");
+    }
+  };
+  const server = await startAgentServer({
+    dataDir,
+    livePacks: {
+      "governance-failure-live": fakeLivePack
+    }
+  });
+
+  try {
+    const createResponse = await fetch(`${server.baseUrl}/watches`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        goal: "Always watch the fragile inbox",
+        livePack: "governance-failure-live",
+        preferredSurface: "desktop",
+        pollIntervalMs: 50,
+        governance: {
+          maxConsecutiveFailures: 1
+        }
+      })
+    });
+    const { watch } = await createResponse.json();
+
+    const degraded = await waitForWatchRule(server.baseUrl, watch.id, (current) => current.status === "degraded");
+    assert.equal(degraded.health.failureCount, 1);
+    assert.match(String(degraded.lastError ?? ""), /governance failure/);
+  } finally {
+    await server.close();
+  }
+});
+
 test("draft-only watch rules create pending drafts that can be approved into tasks", async () => {
   const dataDir = await createTempDir();
   const fakeLivePack = {

@@ -1,12 +1,13 @@
 import fs from "node:fs";
 import fsp from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
 import { resolveConfig } from "../src/config.js";
+import { getDaemonInstallStatus, launchAgentPath } from "../src/daemon-autostart.js";
 import {
   daemonLogPath,
   readDaemonRuntime,
@@ -25,6 +26,7 @@ export const config = resolveConfig();
 export const distBinDir = path.dirname(fileURLToPath(import.meta.url));
 export const distRoot = path.resolve(distBinDir, "..");
 export const runtimeEntry = path.join(distRoot, "src/index.js");
+const execFileAsync = promisify(execFile);
 
 export type CliOptionScalar = string | boolean;
 export type CliOptionValue = CliOptionScalar | CliOptionScalar[];
@@ -225,6 +227,12 @@ export async function daemonStart(options: CliOptions) {
     return;
   } catch {}
 
+  const runtime = await readDaemonRuntime(config.daemonDir);
+  if (runtime.running && runtime.state?.pid) {
+    const runningPort = runtime.state.port ? ` on port ${runtime.state.port}` : "";
+    throw new Error(`AgentOS daemon is already running with pid ${runtime.state.pid}${runningPort}.`);
+  }
+
   await fsp.mkdir(config.daemonDir, { recursive: true });
   await rotateDaemonLogs(config.daemonDir);
   const logPath = daemonLogPath(config.daemonDir);
@@ -294,10 +302,6 @@ export async function daemonLogs(options: CliOptions) {
   print(options.json ? { logPath, content } : content || "No daemon log found yet.", options);
 }
 
-export function launchAgentPath() {
-  return path.join(os.homedir(), "Library/LaunchAgents", "com.agentos.daemon.plist");
-}
-
 export async function daemonInstall(options: CliOptions) {
   if (process.platform === "darwin") {
     const plistPath = launchAgentPath();
@@ -335,18 +339,34 @@ export async function daemonInstall(options: CliOptions) {
     await fsp.mkdir(path.dirname(plistPath), { recursive: true });
     await fsp.mkdir(config.daemonDir, { recursive: true });
     await fsp.writeFile(plistPath, plist, "utf8");
-    print(options.json ? { installed: true, path: plistPath } : `Installed launchd agent at ${plistPath}`, options);
+    const uid = process.getuid?.();
+    if (uid != null) {
+      const domain = `gui/${uid}`;
+      await execFileAsync("launchctl", ["bootout", domain, plistPath]).catch(() => {});
+      await execFileAsync("launchctl", ["bootstrap", domain, plistPath]);
+      await execFileAsync("launchctl", ["enable", `${domain}/com.agentos.daemon`]).catch(() => {});
+      await execFileAsync("launchctl", ["kickstart", "-k", `${domain}/com.agentos.daemon`]).catch(() => {});
+    }
+    const install = await getDaemonInstallStatus();
+    print(
+      options.json ? { installed: true, path: plistPath, install } : `Installed launchd agent at ${plistPath}`,
+      options
+    );
     return;
   }
 
   if (process.platform === "win32") {
+    const taskCommand = `"${process.execPath}" "${runtimeEntry}"`;
+    await execFileAsync("schtasks", ["/Create", "/SC", "ONLOGON", "/TN", "AgentOS", "/TR", taskCommand, "/F"]);
+    const install = await getDaemonInstallStatus();
     print(
       options.json
         ? {
             installed: true,
-            command: `schtasks /Create /SC ONLOGON /TN AgentOS /TR "\\"${process.execPath}\\" \\"${runtimeEntry}\\"" /F`
+            command: `schtasks /Create /SC ONLOGON /TN AgentOS /TR "${taskCommand}" /F`,
+            install
           }
-        : "Windows auto-start is configured through Task Scheduler. Run the generated command manually on Windows.",
+        : "Installed the AgentOS Task Scheduler entry.",
       options
     );
     return;
@@ -358,14 +378,19 @@ export async function daemonInstall(options: CliOptions) {
 export async function daemonUninstall(options: CliOptions) {
   if (process.platform === "darwin") {
     const plistPath = launchAgentPath();
+    const uid = process.getuid?.();
+    if (uid != null) {
+      await execFileAsync("launchctl", ["bootout", `gui/${uid}`, plistPath]).catch(() => {});
+    }
     await fsp.rm(plistPath, { force: true }).catch(() => {});
     print(options.json ? { removed: true, path: plistPath } : `Removed ${plistPath}`, options);
     return;
   }
 
   if (process.platform === "win32") {
+    await execFileAsync("schtasks", ["/Delete", "/TN", "AgentOS", "/F"]).catch(() => {});
     print(
-      options.json ? { removed: true, command: "schtasks /Delete /TN AgentOS /F" } : "Remove the Task Scheduler entry on Windows with: schtasks /Delete /TN AgentOS /F",
+      options.json ? { removed: true, command: "schtasks /Delete /TN AgentOS /F" } : "Removed the AgentOS Task Scheduler entry.",
       options
     );
     return;

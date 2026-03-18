@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 
 import { rotateDaemonLogs } from "../src/daemon-state.js";
 import { ControlPlaneStore } from "../src/runtime/store.js";
+import { createServer } from "../src/server.js";
 import { getRuntimeVersionInfo } from "../src/version.js";
 import { createTempDir, startAgentServer } from "./helpers.js";
 
@@ -39,6 +40,18 @@ test("doctor bundle and version endpoints expose hardening metadata", async () =
     assert.equal(typeof doctorPayload.doctor.store.schemaVersion, "number");
     assert.equal(typeof doctorPayload.doctor.version.appVersion, "string");
     assert.equal(typeof doctorPayload.doctor.native.compatible, "boolean");
+    assert.equal(typeof doctorPayload.doctor.pendingProposalCount, "number");
+    assert.equal(typeof doctorPayload.doctor.awaitingApprovalWatchCount, "number");
+    assert.equal(typeof doctorPayload.doctor.backoffWatchCount, "number");
+    assert.equal(typeof doctorPayload.doctor.install.mode, "string");
+    assert.equal(Array.isArray(doctorPayload.doctor.recentErrors), true);
+
+    const daemonPayload = await (await fetch(`${server.baseUrl}/daemon/status`)).json();
+    assert.equal(typeof daemonPayload.daemon.degradedWatchCount, "number");
+    assert.equal(typeof daemonPayload.daemon.pendingDraftCount, "number");
+    assert.equal(typeof daemonPayload.daemon.pendingProposalCount, "number");
+    assert.equal(typeof daemonPayload.daemon.install.mode, "string");
+    assert.equal(Array.isArray(daemonPayload.daemon.recentErrors), true);
 
     const bundlePayload = await (
       await fetch(`${server.baseUrl}/doctor/bundle`, { method: "POST" })
@@ -70,6 +83,19 @@ test("daemon logs rotate when they exceed the configured size", async () => {
   const older = await fs.readFile(`${logPath}.2`, "utf8");
   assert.equal(rotated.length, 256);
   assert.equal(older, "older");
+});
+
+test("server listen refuses a second daemon for the same data directory", async () => {
+  const dataDir = await createTempDir();
+  const primary = await createServer({ dataDir, port: 0, headless: true });
+  const secondary = await createServer({ dataDir, port: 0, headless: true });
+
+  try {
+    await primary.listen();
+    await assert.rejects(() => secondary.listen(), /already running/i);
+  } finally {
+    await primary.close();
+  }
 });
 
 test("cli version and doctor bundle commands use the daemon API", async () => {

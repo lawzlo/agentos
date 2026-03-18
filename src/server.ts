@@ -6,7 +6,7 @@ import { WebSocketServer } from "ws";
 
 import { resolveConfig } from "./config.js";
 import { createControlPlane } from "./runtime/control-plane.js";
-import { appendDaemonMarker, clearDaemonState, writeDaemonState } from "./daemon-state.js";
+import { appendDaemonMarker, clearDaemonState, readDaemonRuntime, writeDaemonState } from "./daemon-state.js";
 import { dispatchApiRoute } from "./server/route-dispatcher.js";
 import { serveStatic } from "./server/http-utils.js";
 
@@ -65,9 +65,27 @@ export async function createServer(overrides = {}) {
     config,
     controlPlane,
     server,
-    listen() {
+    async listen() {
+      const runtime = await readDaemonRuntime(config.daemonDir);
+      if (runtime.running) {
+        const runningPort = runtime.state?.port ? ` on port ${runtime.state.port}` : "";
+        await appendDaemonMarker(config.daemonDir, "daemon.start_blocked", {
+          pid: process.pid,
+          existingPid: runtime.state?.pid ?? null,
+          reason: "already_running"
+        }).catch(() => {});
+        throw new Error(`AgentOS daemon is already running with pid ${runtime.state?.pid}${runningPort}.`);
+      }
+
       return new Promise<number>((resolve, reject) => {
+        const onError = (error: Error) => {
+          server.off("error", onError);
+          reject(error);
+        };
+
+        server.once("error", onError);
         server.listen(config.port, () => {
+          server.off("error", onError);
           const address = server.address();
           void controlPlane
             .start()

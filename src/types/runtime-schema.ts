@@ -232,12 +232,26 @@ export interface WatchHealth {
   summary: string | null;
 }
 
+export interface WatchQuietHours {
+  startHour: number;
+  endHour: number;
+}
+
+export interface WatchGovernance {
+  approvalMode?: "auto" | "draft_only" | "confirm_required" | "blocked";
+  cooldownMs?: number;
+  maxAutoActionsPerDay?: number;
+  maxConsecutiveFailures?: number;
+  quietHours?: WatchQuietHours | null;
+}
+
 export interface WatchProfile {
   triggerTexts?: string[];
   anchors?: Array<{ text: string; role: string }>;
   actionTemplate?: RuntimeStep[];
   recoveryHints?: string[];
   executionMode?: "planned" | "autonomous";
+  governance?: WatchGovernance;
   liveHints?: {
     openTargetQuery?: string | null;
     composeTargetQuery?: string | null;
