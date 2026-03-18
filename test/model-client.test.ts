@@ -142,6 +142,8 @@ test("anthropic model client uses the Messages API", async () => {
     const body = captured?.body as Record<string, unknown>;
     assert.equal(body.model, "claude-sonnet-4-5");
     assert.equal(Array.isArray(body.messages), true);
+    assert.equal("output_config" in body, false);
+    assert.match(String((body.messages as Array<{ content?: string }>)?.[0]?.content ?? ""), /JSON Schema:/);
   } finally {
     await server.close();
   }

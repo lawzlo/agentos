@@ -90,6 +90,16 @@ function joinGeminiText(payload: {
     .trim();
 }
 
+function anthropicJsonPrompt(schemaName: string, schema: Record<string, unknown>, userPayload: unknown): string {
+  return [
+    `Schema name: ${schemaName}`,
+    "Return only valid JSON that matches this JSON Schema exactly.",
+    "Do not include markdown fences, prose, or extra keys.",
+    `JSON Schema:\n${JSON.stringify(schema)}`,
+    `Payload:\n${JSON.stringify(userPayload)}`
+  ].join("\n\n");
+}
+
 export class AgentModelClient {
   config: AgentModelConfig;
   constructor(config: AgentModelConfig) {
@@ -222,16 +232,10 @@ export class AgentModelClient {
         max_tokens: 2048,
         temperature,
         system: systemPrompt,
-        output_config: {
-          format: {
-            type: "json_schema",
-            schema
-          }
-        },
         messages: [
           {
             role: "user",
-            content: `Schema name: ${schemaName}\nPayload:\n${JSON.stringify(userPayload)}`
+            content: anthropicJsonPrompt(schemaName, schema, userPayload)
           }
         ]
       }),

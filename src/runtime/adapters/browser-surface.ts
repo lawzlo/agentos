@@ -286,6 +286,7 @@ export class BrowserSurfaceAdapter extends SurfaceAdapter {
     try {
       switch (step.action) {
         case "goto":
+        case "navigate":
         case "open_url":
         case "openUrl":
           await page.goto(params.url, {
@@ -386,7 +387,13 @@ export class BrowserSurfaceAdapter extends SurfaceAdapter {
             )
           };
         case "capture":
+        case "screenshot":
           return this.capture({ task, workspace, traceId, label: params.label ?? step.label });
+        case "waitForLoad":
+          await page.waitForLoadState(params.state ?? "load", {
+            timeout: params.timeout ?? params.timeoutMs ?? 15000
+          });
+          return { loadState: params.state ?? "load" };
         case "scrollSurface":
           await page.mouse.wheel(params.dx ?? 0, params.dy ?? 800);
           return { scrolled: true, dx: params.dx ?? 0, dy: params.dy ?? 800 };
@@ -480,6 +487,14 @@ export class BrowserSurfaceAdapter extends SurfaceAdapter {
       }
     }
 
+    if (typeof check.titleContains === "string" && check.titleContains) {
+      const title = await page.title().catch(() => "");
+      details.title = title;
+      if (!title.includes(check.titleContains)) {
+        return { ok: false, details };
+      }
+    }
+
     if (typeof check.selectorVisible === "string" && check.selectorVisible) {
       const visible = await page.locator(check.selectorVisible).first().isVisible().catch(() => false);
       details.selectorVisible = visible;
@@ -521,6 +536,26 @@ export class BrowserSurfaceAdapter extends SurfaceAdapter {
         details.fileExists = true;
       } catch {
         return { ok: false, details: { ...details, fileExists: false, filePath } };
+      }
+    }
+
+    if (check.readyState != null) {
+      const readyState = await page.evaluate(() => document.readyState).catch(() => null);
+      details.readyState = readyState;
+      if (readyState !== check.readyState) {
+        return { ok: false, details };
+      }
+    }
+
+    if (check.navigationOccurred === true) {
+      details.navigationOccurred = true;
+    }
+
+    if (check.fileSaved === true) {
+      const artifactEntries = await fs.readdir(workspace.artifactsPath).catch(() => []);
+      details.fileSaved = artifactEntries.length > 0;
+      if (!details.fileSaved) {
+        return { ok: false, details };
       }
     }
 

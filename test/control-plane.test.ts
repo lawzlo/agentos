@@ -106,7 +106,63 @@ test("browser tasks accept planner open_url aliases", async () => {
 
     const completed = await waitForTask(server.baseUrl, task.id, (current) => current.status === "completed");
     assert.equal(completed.status, "completed");
-    assert.equal(completed.result.outputs.status.text, "Not submitted yet");
+    assert.equal(completed.result.outputs.status.text, "Waiting");
+  } finally {
+    await fixture.close();
+    await server.close();
+  }
+});
+
+test("browser tasks accept Claude-style browser action aliases", async () => {
+  const dataDir = await createTempDir();
+  const fixture = await startFixtureServer();
+  const server = await startAgentServer({ dataDir });
+
+  try {
+    const createResponse = await fetch(`${server.baseUrl}/tasks`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        goal: "Open the demo page using Claude-style browser actions.",
+        preferredSurface: "browser",
+        steps: [
+          {
+            label: "Navigate to the demo page",
+            surface: "browser",
+            action: "navigate",
+            params: { url: fixture.url },
+            expect: { textVisible: "AgentOS Demo" }
+          },
+          {
+            label: "Click the More information link",
+            surface: "browser",
+            action: "click",
+            params: { selector: "a", textContent: "More information" },
+            expect: { navigationOccurred: true }
+          },
+          {
+            label: "Wait for load",
+            surface: "browser",
+            action: "waitForLoad",
+            params: { state: "load", timeout: 10000 },
+            expect: { readyState: "complete" }
+          },
+          {
+            label: "Capture screenshot",
+            surface: "browser",
+            action: "screenshot",
+            params: { label: "claude-alias-capture", fullPage: true },
+            expect: { fileSaved: true },
+            saveAs: "capture"
+          }
+        ]
+      })
+    });
+    const { task } = await createResponse.json();
+
+    const completed = await waitForTask(server.baseUrl, task.id, (current) => current.status === "completed");
+    assert.equal(completed.status, "completed");
+    assert.ok(completed.artifacts.some((artifact) => artifact.kind === "screenshot"));
   } finally {
     await fixture.close();
     await server.close();
