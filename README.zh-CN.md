@@ -45,11 +45,6 @@ AgentOS 的能力足够强，可以操作浏览器、桌面应用、本地文件
 - 下午：上传文件、更新文档、截图，并把结果保存进 workspace
 - 晚上：生成 digest，记住今天发生了什么，并排出下一批 proposal
 
-## 路线图
-
-- 中文路线图: [ROADMAP.zh-CN.md](./ROADMAP.zh-CN.md)
-- English roadmap: [ROADMAP.md](./ROADMAP.md)
-
 ## 当前已实现能力
 
 - 本地 HTTP + WebSocket control plane

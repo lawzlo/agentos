@@ -45,11 +45,6 @@ AgentOS es lo bastante potente como para operar navegadores, aplicaciones de esc
 - Tarde: subir archivos, actualizar documentos, capturar pantallas y guardar resultados en workspaces
 - Noche: generar un digest, recordar lo que cambió y preparar las siguientes proposals
 
-## Roadmap
-
-- English roadmap: [ROADMAP.md](./ROADMAP.md)
-- 简体中文路线图: [ROADMAP.zh-CN.md](./ROADMAP.zh-CN.md)
-
 ## Capacidades actuales
 
 - Control plane local HTTP + WebSocket

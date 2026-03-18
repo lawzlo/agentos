@@ -45,11 +45,6 @@ AgentOS is powerful enough to operate browsers, desktop apps, local files, and l
 - Afternoon: upload files, update docs, capture screenshots, and save outputs into workspaces
 - Evening: generate a digest, remember what changed, and queue the next proposals
 
-## Roadmap
-
-- English roadmap: [ROADMAP.md](./ROADMAP.md)
-- 简体中文路线图: [ROADMAP.zh-CN.md](./ROADMAP.zh-CN.md)
-
 ## Current capability summary
 
 - Local HTTP + WebSocket control plane
