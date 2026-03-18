@@ -16,6 +16,7 @@
     "cli:unlink": "npm unlink -g agentos",
     "typecheck": "tsc --noEmit",
     "native:build": "cargo build --manifest-path rust/agentos-native/Cargo.toml --release",
+    "package:prepare-runtime": "node scripts/prepare-bundled-node.mjs --json",
     "package:release": "node scripts/package-release.mjs",
     "package:macos": "node scripts/build-macos-pkg.mjs",
     "package:windows": "node scripts/build-windows-msi.mjs"
