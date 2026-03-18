@@ -64,6 +64,19 @@ async function waitForDraft(baseUrl, matcher, timeoutMs = 10000) {
   throw new Error("Timed out waiting for draft");
 }
 
+async function waitForValue(read, matcher, timeoutMs = 10000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const current = await read();
+    if (matcher(current)) {
+      return current;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+
+  throw new Error("Timed out waiting for value");
+}
+
 async function waitForWatchDeletion(baseUrl, watchRuleId, timeoutMs = 10000) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
@@ -705,6 +718,9 @@ test("doctor and packs endpoints expose live runtime diagnostics", async () => {
     assert.ok(packsPayload.packs.some((pack) => pack.name === "google-drive-browser"));
     assert.ok(packsPayload.packs.some((pack) => pack.name === "google-docs-browser"));
     assert.ok(packsPayload.packs.some((pack) => pack.name === "feishu-docs-browser"));
+    assert.equal(packsPayload.packs.find((pack) => pack.name === "slack-browser")?.defaultReplyPolicy, "auto_send");
+    assert.equal(packsPayload.packs.find((pack) => pack.name === "generic-mail-browser")?.defaultReplyPolicy, "draft_first");
+    assert.equal(packsPayload.packs.find((pack) => pack.name === "boss-browser")?.defaultReplyPolicy, "draft_first");
   } finally {
     await server.close();
   }
@@ -1358,6 +1374,61 @@ test("boss browser watch rules draft candidate replies and approved drafts send 
     state = await boss.getState();
     assert.equal(state.sentReplies.length, 1);
     assert.equal(state.sentReplies[0].message, "你好，我已看到你的信息，会尽快查看并和你沟通后续。");
+  } finally {
+    await server.close();
+    await boss.close();
+  }
+});
+
+test("boss browser watch rules can auto-send follow-ups after one approval when reply policy allows it", async () => {
+  const dataDir = await createTempDir();
+  const boss = await startBossFixtureServer();
+  const server = await startAgentServer({ dataDir });
+
+  try {
+    const createResponse = await fetch(`${server.baseUrl}/watches`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        goal: "Always watch BOSS直聘 and reply to candidate messages",
+        preferredSurface: "browser",
+        workspaceName: "boss-browser-reply-auto-main",
+        pollIntervalMs: 50,
+        governance: {
+          replyPolicy: "approve_once_then_auto",
+          replyApprovalWindowMs: 600000
+        },
+        inputs: {
+          startUrl: `${boss.url}/boss`
+        }
+      })
+    });
+    const { watch } = await createResponse.json();
+
+    const pendingDraft = await waitForDraft(
+      server.baseUrl,
+      (draft) => draft.watchRuleId === watch.id && draft.livePack === "boss-browser" && draft.status === "pending"
+    );
+    const approvedResponse = await fetch(`${server.baseUrl}/drafts/${pendingDraft.id}/approve`, {
+      method: "POST"
+    });
+    const approvedPayload = await approvedResponse.json();
+    const firstCompleted = await waitForTask(server.baseUrl, approvedPayload.draft.taskId, (task) => task.status === "completed");
+    assert.equal(firstCompleted.status, "completed");
+
+    let state = await waitForValue(() => boss.getState(), (current) => current.sentReplies.length === 1);
+    assert.equal(state.sentReplies[0].message, "你好，我已看到你的信息，会尽快查看并和你沟通后续。");
+
+    await boss.pushIncomingMessage("候选人: 我这周三下午可以沟通。");
+
+    state = await waitForValue(() => boss.getState(), (current) => current.sentReplies.length === 2, 15000);
+    assert.equal(state.sentReplies[1].message, "你好，我已看到你的信息，会尽快查看并和你沟通后续。");
+
+    const draftsPayload = await (await fetch(`${server.baseUrl}/drafts`)).json();
+    assert.equal(draftsPayload.drafts.filter((draft) => draft.watchRuleId === watch.id).length, 1);
+
+    const tasksPayload = await (await fetch(`${server.baseUrl}/tasks`)).json();
+    assert.equal(tasksPayload.tasks.filter((task) => task.triggerSource === `watch:${watch.id}`).length, 2);
   } finally {
     await server.close();
     await boss.close();

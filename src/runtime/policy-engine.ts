@@ -1,4 +1,5 @@
 import type { RiskGateDecision, RuntimeStep, TaskSpec, WatchDetection, WatchRule } from "../types/runtime-schema.js";
+import { resolveReplyPolicy } from "./reply-policy.js";
 
 const HIGH_RISK_KEYWORDS = ["pay", "payment", "wire", "delete", "submit", "send", "sign", "invoice", "合同", "付款", "删除", "提交", "发送", "签署"];
 const HIGH_RISK_AUTOMATION_KEYWORDS = ["pay", "payment", "wire", "delete", "invoice", "sign", "合同", "付款", "删除", "签署"];
@@ -69,15 +70,18 @@ export class PolicyEngine {
     taskSpec,
     watchRule = null,
     detection = null,
-    replyText = ""
+    replyText = "",
+    replyApprovalActive = false
   }: {
     taskSpec: TaskSpec;
     watchRule?: WatchRule | null;
     detection?: WatchDetection | null;
     replyText?: string;
+    replyApprovalActive?: boolean;
   }): RiskGateDecision {
     const livePack = String(watchRule?.livePack ?? "");
     const configuredPolicy = configuredAutomationPolicy(watchRule, taskSpec);
+    const replyPolicy = resolveReplyPolicy({ watchRule, taskSpec, livePack });
     const text = [
       taskSpec?.goal,
       taskSpec?.doneCondition,
@@ -149,11 +153,20 @@ export class PolicyEngine {
       };
     }
 
-    if (["generic-mail-desktop", "generic-mail-browser"].includes(livePack)) {
+    if (replyPolicy === "blocked") {
+      return {
+        policy: "blocked",
+        riskLevel,
+        reasons: reasons.length ? reasons : [`replyPolicy=${replyPolicy}`],
+        action: "block"
+      };
+    }
+
+    if (replyPolicy === "draft_first") {
       return {
         policy: "confirm_required",
         riskLevel,
-        reasons: reasons.length ? reasons : ["mail replies require approval by default"],
+        reasons: reasons.length ? reasons : [`replyPolicy=${replyPolicy}`],
         action: "draft"
       };
     }
@@ -167,11 +180,22 @@ export class PolicyEngine {
       };
     }
 
-    if (["slack-desktop", "slack-browser", "wechat-desktop"].includes(livePack)) {
+    if (replyPolicy === "approve_once_then_auto") {
+      return {
+        policy: replyApprovalActive ? "allow" : "confirm_required",
+        riskLevel,
+        reasons: reasons.length
+          ? reasons
+          : [replyApprovalActive ? "replyPolicy=approve_once_then_auto(active_grant)" : "replyPolicy=approve_once_then_auto"],
+        action: replyApprovalActive ? "send" : "draft"
+      };
+    }
+
+    if (replyPolicy === "auto_send") {
       return {
         policy: "allow",
         riskLevel,
-        reasons,
+        reasons: reasons.length ? reasons : [`replyPolicy=${replyPolicy}`],
         action: "send"
       };
     }
@@ -179,7 +203,7 @@ export class PolicyEngine {
     return {
       policy: "draft_only",
       riskLevel,
-      reasons: reasons.length ? reasons : ["generic live pack defaults to draft-only"],
+      reasons: reasons.length ? reasons : [`replyPolicy=${replyPolicy}`],
       action: "draft"
     };
   }

@@ -237,8 +237,12 @@ export interface WatchQuietHours {
   endHour: number;
 }
 
+export type ReplyPolicyMode = "pack_default" | "auto_send" | "draft_first" | "approve_once_then_auto" | "blocked";
+
 export interface WatchGovernance {
   approvalMode?: "auto" | "draft_only" | "confirm_required" | "blocked";
+  replyPolicy?: ReplyPolicyMode;
+  replyApprovalWindowMs?: number;
   cooldownMs?: number;
   maxAutoActionsPerDay?: number;
   maxConsecutiveFailures?: number;
@@ -396,6 +400,7 @@ export interface LivePackInfo {
   surface: "desktop" | "browser";
   supportsDrafts: boolean;
   supportsAutoSend: boolean;
+  defaultReplyPolicy: Exclude<ReplyPolicyMode, "pack_default">;
   description: string;
 }
 

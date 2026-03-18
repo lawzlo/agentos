@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import type { ControlPlane } from "./control-plane.js";
+import { packDefaultReplyPolicy } from "./reply-policy.js";
 import type { SurfaceRegistry } from "./surface-registry.js";
 import type {
   InteractionCandidate,
@@ -1094,6 +1095,7 @@ function createDocumentPack({
       surface: "browser",
       supportsDrafts: false,
       supportsAutoSend: false,
+      defaultReplyPolicy: packDefaultReplyPolicy(name),
       description
     },
     async activate({ rule, workspace, surfaceRegistry }) {
@@ -1292,6 +1294,7 @@ function createSlackPack({
       surface,
       supportsDrafts: true,
       supportsAutoSend: true,
+      defaultReplyPolicy: packDefaultReplyPolicy(name),
       description
     },
     async activate({ rule, workspace, surfaceRegistry }) {
@@ -1443,6 +1446,7 @@ function createWeChatPack(): LivePack {
       surface: "desktop",
       supportsDrafts: true,
       supportsAutoSend: true,
+      defaultReplyPolicy: packDefaultReplyPolicy("wechat-desktop"),
       description: "WeChat desktop watcher that detects unread conversations, extracts context, and sends low-risk replies."
     },
     async activate({ rule, workspace, surfaceRegistry }) {
@@ -1740,6 +1744,7 @@ function createMailPack({
       surface,
       supportsDrafts: true,
       supportsAutoSend: false,
+      defaultReplyPolicy: packDefaultReplyPolicy(name),
       description
     },
     async activate({ rule, workspace, surfaceRegistry }) {
@@ -1891,6 +1896,7 @@ function createBossPack(): LivePack {
       surface: "browser",
       supportsDrafts: true,
       supportsAutoSend: false,
+      defaultReplyPolicy: packDefaultReplyPolicy("boss-browser"),
       description: "BOSS browser watcher that detects new candidates, opens conversation context, and drafts approval-first follow-ups."
     },
     async activate({ rule, workspace, surfaceRegistry }) {
@@ -2061,6 +2067,7 @@ function createVisualDesktopPack({
       surface: "desktop",
       supportsDrafts: true,
       supportsAutoSend: family === "chat",
+      defaultReplyPolicy: packDefaultReplyPolicy(name),
       description
     },
     async activate({ rule, workspace, surfaceRegistry }) {

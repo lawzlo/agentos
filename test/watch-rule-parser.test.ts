@@ -110,6 +110,8 @@ test("normalizeWatchRule normalizes governance settings", async () => {
     goal: "Watch Slack and keep actions bounded",
     governance: {
       approvalMode: "draft_only",
+      replyPolicy: "approve_once_then_auto",
+      replyApprovalWindowMs: 120000,
       cooldownMs: 30_500,
       maxAutoActionsPerDay: 2,
       maxConsecutiveFailures: 1,
@@ -122,6 +124,8 @@ test("normalizeWatchRule normalizes governance settings", async () => {
 
   assert.deepEqual(watch.watchProfile.governance, {
     approvalMode: "draft_only",
+    replyPolicy: "approve_once_then_auto",
+    replyApprovalWindowMs: 120000,
     cooldownMs: 30500,
     maxAutoActionsPerDay: 2,
     maxConsecutiveFailures: 1,

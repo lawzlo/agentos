@@ -579,6 +579,10 @@ test("cli watch add posts composed payload and exposes created watch", async () 
         "mode=monitor",
         "--approval",
         "confirm_required",
+        "--reply-policy",
+        "approve_once_then_auto",
+        "--reply-approval-window-ms",
+        "120000",
         "--cooldown-ms",
         "60000",
         "--max-auto-actions-per-day",
@@ -601,6 +605,8 @@ test("cli watch add posts composed payload and exposes created watch", async () 
     assert.deepEqual(api.state.lastWatchBody?.inputs, { mode: "monitor" });
     assert.deepEqual(api.state.lastWatchBody?.governance, {
       approvalMode: "confirm_required",
+      replyPolicy: "approve_once_then_auto",
+      replyApprovalWindowMs: 120000,
       cooldownMs: 60000,
       maxAutoActionsPerDay: 2,
       maxConsecutiveFailures: 4,

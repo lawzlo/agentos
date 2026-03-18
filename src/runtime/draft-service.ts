@@ -1,4 +1,5 @@
 import { decorateDraft } from "./watch-presenters.js";
+import { recordReplyApprovalGrant, replyApprovalWindowMs, resolveReplyPolicy } from "./reply-policy.js";
 import type { EventBus } from "./event-bus.js";
 import type { ControlPlaneStore } from "./store.js";
 import type { DecoratedDraftRecord } from "./watch-presenters.js";
@@ -116,17 +117,37 @@ export class DraftService {
     if (draft.watchRuleId) {
       const watchRule = this.store.getWatchRule(draft.watchRuleId);
       if (watchRule) {
+        const replyPolicy = resolveReplyPolicy({
+          watchRule,
+          taskSpec: draft.taskSpec,
+          livePack: draft.livePack ?? watchRule.livePack
+        });
+        const replyThreadKey = String(draft.metadata?.replyThreadKey ?? "").trim();
+        const dedupeState =
+          replyPolicy === "approve_once_then_auto" && replyThreadKey
+            ? recordReplyApprovalGrant(
+                {
+                  ...(watchRule.dedupeState ?? {}),
+                  activeTaskId: task.id,
+                  activeDraftId: null,
+                  lastFingerprint: draft.fingerprint ?? watchRule.dedupeState?.lastFingerprint ?? null,
+                  lastSummary: draft.summary ?? watchRule.dedupeState?.lastSummary ?? null
+                },
+                replyThreadKey,
+                Date.now() + replyApprovalWindowMs(watchRule.watchProfile?.governance)
+              )
+            : {
+                ...(watchRule.dedupeState ?? {}),
+                activeTaskId: task.id,
+                activeDraftId: null,
+                lastFingerprint: draft.fingerprint ?? watchRule.dedupeState?.lastFingerprint ?? null,
+                lastSummary: draft.summary ?? watchRule.dedupeState?.lastSummary ?? null
+              };
         const updated = this.store.putWatchRule({
           ...watchRule,
           status: "watching",
           lastError: null,
-          dedupeState: {
-            ...(watchRule.dedupeState ?? {}),
-            activeTaskId: task.id,
-            activeDraftId: null,
-            lastFingerprint: draft.fingerprint ?? watchRule.dedupeState?.lastFingerprint ?? null,
-            lastSummary: draft.summary ?? watchRule.dedupeState?.lastSummary ?? null
-          }
+          dedupeState
         });
         this.eventBus.broadcast("watch.updated", this.decorateWatchRule(updated));
       }

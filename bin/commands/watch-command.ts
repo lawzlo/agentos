@@ -35,6 +35,12 @@ function parseGovernance(options: CliOptions) {
   if (options.approval) {
     governance.approvalMode = String(options.approval);
   }
+  if (options.replyPolicy) {
+    governance.replyPolicy = String(options.replyPolicy);
+  }
+  if (options.replyApprovalWindowMs != null) {
+    governance.replyApprovalWindowMs = Number(options.replyApprovalWindowMs);
+  }
   if (options.cooldownMs != null) {
     governance.cooldownMs = Number(options.cooldownMs);
   }

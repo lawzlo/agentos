@@ -99,7 +99,16 @@ function normalizeGovernance(value: WatchGovernance | null | undefined): WatchGo
   const approvalMode = ["auto", "draft_only", "confirm_required", "blocked"].includes(String(value.approvalMode))
     ? (String(value.approvalMode) as WatchGovernance["approvalMode"])
     : undefined;
+  const replyPolicy = ["pack_default", "auto_send", "draft_first", "approve_once_then_auto", "blocked"].includes(
+    String(value.replyPolicy)
+  )
+    ? (String(value.replyPolicy) as WatchGovernance["replyPolicy"])
+    : undefined;
   const quietHours = normalizeQuietHours(value.quietHours);
+  const replyApprovalWindowMs =
+    value.replyApprovalWindowMs == null
+      ? undefined
+      : clampNonNegative(value.replyApprovalWindowMs, 0, 7 * 24 * 60 * 60 * 1000);
   const cooldownMs = value.cooldownMs == null ? undefined : clampNonNegative(value.cooldownMs, 0, 7 * 24 * 60 * 60 * 1000);
   const maxAutoActionsPerDay =
     value.maxAutoActionsPerDay == null ? undefined : clampPositiveInteger(value.maxAutoActionsPerDay, 1, 500);
@@ -108,7 +117,9 @@ function normalizeGovernance(value: WatchGovernance | null | undefined): WatchGo
 
   const normalized: WatchGovernance = {
     ...(approvalMode ? { approvalMode } : {}),
+    ...(replyPolicy ? { replyPolicy } : {}),
     ...(quietHours ? { quietHours } : {}),
+    ...(replyApprovalWindowMs != null ? { replyApprovalWindowMs } : {}),
     ...(cooldownMs != null ? { cooldownMs } : {}),
     ...(maxAutoActionsPerDay != null ? { maxAutoActionsPerDay } : {}),
     ...(maxConsecutiveFailures != null ? { maxConsecutiveFailures } : {})

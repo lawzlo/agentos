@@ -348,6 +348,11 @@ export async function startBossFixtureServer({
     sentReplies: [] as Array<{ message: string; createdAt: string }>
   };
 
+  const latestIncomingMessage = () =>
+    state.messages
+      .filter((message) => String(message).startsWith("候选人"))
+      .at(-1) ?? state.messages[0] ?? "";
+
   const renderListPage = () => `<!doctype html>
     <html>
       <body>
@@ -363,7 +368,7 @@ export async function startBossFixtureServer({
                   aria-label="新候选人: ${state.candidateName} ${state.candidateRole}"
                 >新候选人: ${state.candidateName} · ${state.candidateRole}</a>
                 <p class="candidate-meta">${state.candidateExperience} · ${state.candidateLocation}</p>
-                <p class="candidate-preview">${state.messages[0]}</p>
+                <p class="candidate-preview">${latestIncomingMessage()}</p>
               </li>
             </ul>
           </section>
@@ -456,6 +461,21 @@ export async function startBossFixtureServer({
       return;
     }
 
+    if (req.method === "POST" && url.pathname === "/api/incoming-message") {
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      }
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      const message = String(body.message ?? "").trim();
+      if (message) {
+        state.messages.push(message);
+      }
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
     res.writeHead(404);
     res.end();
   });
@@ -467,6 +487,13 @@ export async function startBossFixtureServer({
     async getState() {
       const response = await fetch(`http://127.0.0.1:${address.port}/api/state`);
       return response.json();
+    },
+    async pushIncomingMessage(message: string) {
+      await fetch(`http://127.0.0.1:${address.port}/api/incoming-message`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message })
+      });
     },
     async close() {
       await new Promise<void>((resolve) => server.close(() => resolve()));

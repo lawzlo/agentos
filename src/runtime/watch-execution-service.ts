@@ -1,5 +1,6 @@
 import { nowIso } from "./id.js";
 import { materializeWatchActionTemplate } from "./watch-profile.js";
+import { clearExpiredReplyApprovalGrant, deriveReplyThreadKey, hasActiveReplyApprovalGrant } from "./reply-policy.js";
 import type { ControlPlane } from "./control-plane.js";
 import type { EventBus } from "./event-bus.js";
 import type { LivePack, LivePackDraftResponse, LivePackRegistry } from "./live-pack-registry.js";
@@ -31,7 +32,7 @@ function isActiveTask(task?: TaskLike | null): boolean {
 
 function clearWatchFailureState(dedupeState: Record<string, unknown> = {}) {
   return {
-    ...dedupeState,
+    ...clearExpiredReplyApprovalGrant(dedupeState),
     failureCount: 0,
     retryAfter: null,
     backoffMs: 0
@@ -267,35 +268,47 @@ export class WatchExecutionService {
       return;
     }
 
-    const retryAfter = Number(rule.dedupeState?.retryAfter ?? 0);
+    const cleanedDedupeState = clearExpiredReplyApprovalGrant(rule.dedupeState ?? {});
+    const grantStateChanged =
+      cleanedDedupeState.replyApprovalThreadKey !== (rule.dedupeState ?? {}).replyApprovalThreadKey ||
+      cleanedDedupeState.replyApprovalExpiresAt !== (rule.dedupeState ?? {}).replyApprovalExpiresAt;
+    const hydratedRule = grantStateChanged
+      ? this.store.putWatchRule({
+          ...rule,
+          dedupeState: cleanedDedupeState
+        })
+      : rule;
+    const activeRule = hydratedRule ?? rule;
+
+    const retryAfter = Number(activeRule.dedupeState?.retryAfter ?? 0);
     if (retryAfter && retryAfter > Date.now()) {
       return;
     }
 
-    const pack = this.livePackRegistry.get(rule.livePack);
+    const pack = this.livePackRegistry.get(activeRule.livePack);
     if (!pack) {
       const degraded = this.store.putWatchRule({
-        ...rule,
+        ...activeRule,
         status: "degraded",
-        lastError: `Unknown live pack: ${rule.livePack}`
+        lastError: `Unknown live pack: ${activeRule.livePack}`
       });
       this.eventBus.broadcast("watch.updated", this.controlPlane.watchService.decorate(degraded));
       return;
     }
 
     try {
-      const activeTaskId = String(rule.dedupeState?.activeTaskId ?? "") || null;
+      const activeTaskId = String(activeRule.dedupeState?.activeTaskId ?? "") || null;
       const activeTask = activeTaskId ? this.store.getTask(activeTaskId) : null;
-      const activeDraftId = String(rule.dedupeState?.activeDraftId ?? "") || null;
+      const activeDraftId = String(activeRule.dedupeState?.activeDraftId ?? "") || null;
       const activeDraft = activeDraftId ? this.store.getDraft(activeDraftId) : null;
       if (isActiveTask(activeTask)) {
         const updated = this.store.putWatchRule({
-          ...rule,
+          ...activeRule,
           lastObservedAt: nowIso(),
           lastError: null,
           status: "watching",
           dedupeState: clearWatchFailureState({
-            ...(rule.dedupeState ?? {}),
+            ...(activeRule.dedupeState ?? {}),
             activeTaskId
           })
         });
@@ -305,12 +318,12 @@ export class WatchExecutionService {
 
       if (activeDraft?.status === "pending") {
         const updated = this.store.putWatchRule({
-          ...rule,
+          ...activeRule,
           lastObservedAt: nowIso(),
           lastError: null,
           status: "awaiting_approval",
           dedupeState: clearWatchFailureState({
-            ...(rule.dedupeState ?? {}),
+            ...(activeRule.dedupeState ?? {}),
             activeDraftId
           })
         });
@@ -320,26 +333,26 @@ export class WatchExecutionService {
 
       if (activeDraftId && activeDraft && ["approved", "rejected", "expired"].includes(activeDraft.status)) {
         const cleared = this.store.putWatchRule({
-          ...rule,
+          ...activeRule,
           dedupeState: {
-            ...(rule.dedupeState ?? {}),
+            ...(activeRule.dedupeState ?? {}),
             activeDraftId: null
           }
         });
         this.eventBus.broadcast("watch.updated", this.controlPlane.watchService.decorate(cleared));
       }
 
-      if (activeTaskId && activeTask?.status === "completed" && rule.dedupeState?.lastHandledTaskId !== activeTaskId) {
+      if (activeTaskId && activeTask?.status === "completed" && activeRule.dedupeState?.lastHandledTaskId !== activeTaskId) {
         await pack.markHandled?.({
-          rule,
+          rule: activeRule,
           task: activeTask,
           controlPlane: this.controlPlane
         });
 
         const acknowledged = this.store.putWatchRule({
-          ...rule,
+          ...activeRule,
           dedupeState: {
-            ...(rule.dedupeState ?? {}),
+            ...(activeRule.dedupeState ?? {}),
             lastHandledTaskId: activeTaskId,
             activeTaskId: null
           }
@@ -347,15 +360,15 @@ export class WatchExecutionService {
         this.eventBus.broadcast("watch.updated", this.controlPlane.watchService.decorate(acknowledged));
       }
 
-      const workspaceName = rule.workspaceName ?? `${rule.livePack}-live`;
+      const workspaceName = activeRule.workspaceName ?? `${activeRule.livePack}-live`;
       const workspace = await this.controlPlane.workspaceManager.prepareProfile(workspaceName, {
         purpose: "live-watch",
-        livePack: rule.livePack,
-        appTarget: rule.appTarget ?? null
+        livePack: activeRule.livePack,
+        appTarget: activeRule.appTarget ?? null
       });
 
       await pack.activate?.({
-        rule,
+        rule: activeRule,
         workspace,
         surfaceRegistry: this.controlPlane.surfaceRegistry,
         controlPlane: this.controlPlane
@@ -363,7 +376,7 @@ export class WatchExecutionService {
 
       const worldState = pack.observeInbox
         ? await pack.observeInbox({
-            rule,
+            rule: activeRule,
             workspace,
             surfaceRegistry: this.controlPlane.surfaceRegistry,
             controlPlane: this.controlPlane
@@ -371,9 +384,9 @@ export class WatchExecutionService {
         : null;
 
       let detection = await pack.detectNewItems?.({
-        rule,
+        rule: activeRule,
         worldState,
-        dedupeState: rule.dedupeState ?? {},
+        dedupeState: activeRule.dedupeState ?? {},
         workspace,
         surfaceRegistry: this.controlPlane.surfaceRegistry,
         controlPlane: this.controlPlane
@@ -381,7 +394,7 @@ export class WatchExecutionService {
 
       if (detection && pack.extractContext) {
         const context = await pack.extractContext({
-          rule,
+          rule: activeRule,
           detection,
           worldState,
           workspace,
@@ -408,12 +421,12 @@ export class WatchExecutionService {
 
       if (!detection) {
         const updated = this.store.putWatchRule({
-          ...rule,
+          ...activeRule,
           lastObservedAt: nowIso(),
           lastError: null,
           status: "watching",
           dedupeState: clearWatchFailureState({
-            ...(rule.dedupeState ?? {}),
+            ...(activeRule.dedupeState ?? {}),
             failureCount: 0,
             activeTaskId: null
           })
@@ -422,28 +435,30 @@ export class WatchExecutionService {
         return;
       }
 
-      const replyDraft = shouldDraftReply(rule, detection)
+      const replyDraft = shouldDraftReply(activeRule, detection)
         ? await this.draftReply({
-            watchRule: rule,
+            watchRule: activeRule,
             detection,
             pack
           })
         : null;
-      const taskSpec = this.buildTaskSpecFromWatchRule(rule, detection, {
+      const taskSpec = this.buildTaskSpecFromWatchRule(activeRule, detection, {
         replyText: replyDraft?.replyText ?? null,
         autoSend: true
       });
+      const replyApprovalActive = hasActiveReplyApprovalGrant(activeRule, detection);
       const automation = this.controlPlane.policyEngine.evaluateAutomation({
         taskSpec,
-        watchRule: rule,
+        watchRule: activeRule,
         detection,
-        replyText: replyDraft?.replyText ?? ""
+        replyText: replyDraft?.replyText ?? "",
+        replyApprovalActive
       }) as RiskGateDecision;
-      const governance = watchGovernance(rule);
+      const governance = watchGovernance(activeRule);
 
-      if (automation.action !== "block" && withinCooldown(rule, governance)) {
+      if (automation.action !== "block" && withinCooldown(activeRule, governance)) {
         const updated = this.store.putWatchRule({
-          ...rule,
+          ...activeRule,
           lastObservedAt: nowIso(),
           lastError: null,
           status: "watching"
@@ -457,7 +472,7 @@ export class WatchExecutionService {
         return;
       }
 
-      const autoActionsToday = autoActionCount(rule);
+      const autoActionsToday = autoActionCount(activeRule);
       const maxAutoActionsPerDay = Math.max(0, Number(governance.maxAutoActionsPerDay ?? 0));
       const governedAutomation =
         automation.action === "send" && maxAutoActionsPerDay > 0 && autoActionsToday >= maxAutoActionsPerDay
@@ -468,12 +483,12 @@ export class WatchExecutionService {
 
       if (governedAutomation.action === "block") {
         const updated = this.store.putWatchRule({
-          ...rule,
+          ...activeRule,
           lastObservedAt: nowIso(),
           lastError: governedAutomation.reasons.join("; ") || "automation blocked",
           status: "degraded",
           dedupeState: {
-            ...(rule.dedupeState ?? {}),
+            ...(activeRule.dedupeState ?? {}),
             lastFingerprint: detection.fingerprint ?? detection.summary ?? null,
             lastSummary: detection.summary ?? null,
             lastContext: detection.context ?? [],
@@ -492,25 +507,26 @@ export class WatchExecutionService {
 
       if (governedAutomation.action === "draft") {
         const draft = this.controlPlane.draftService.create({
-          watchRule: rule,
+          watchRule: activeRule,
           taskSpec,
           detection: detection as Record<string, unknown>,
           riskDecision: governedAutomation,
           replyText: replyDraft?.replyText ?? null,
           summary: detection.summary ?? null,
           metadata: {
+            replyThreadKey: deriveReplyThreadKey(detection),
             reply: replyDraft?.metadata ?? {},
             context: detection.context ?? []
           }
         });
         const updated = this.store.putWatchRule({
-          ...rule,
+          ...activeRule,
           lastObservedAt: nowIso(),
           lastTriggeredAt: nowIso(),
           lastError: null,
           status: "awaiting_approval",
           dedupeState: clearWatchFailureState({
-            ...(rule.dedupeState ?? {}),
+            ...(activeRule.dedupeState ?? {}),
             lastFingerprint: detection.fingerprint ?? detection.summary ?? draft.id,
             lastSummary: detection.summary ?? null,
             lastContext: detection.context ?? [],
@@ -530,13 +546,13 @@ export class WatchExecutionService {
 
       const task = await this.controlPlane.createTask(taskSpec);
       const updated = this.store.putWatchRule({
-        ...rule,
+        ...activeRule,
         lastObservedAt: nowIso(),
         lastTriggeredAt: nowIso(),
         lastError: null,
         status: "watching",
         dedupeState: clearWatchFailureState({
-          ...recordAutoAction(rule.dedupeState ?? {}),
+          ...recordAutoAction(activeRule.dedupeState ?? {}),
           lastFingerprint: detection.fingerprint ?? detection.summary ?? task.id,
           lastSummary: detection.summary ?? null,
           lastContext: detection.context ?? [],
