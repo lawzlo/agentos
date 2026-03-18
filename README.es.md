@@ -4,6 +4,13 @@ Idiomas: [English](./README.md) | [简体中文](./README.zh-CN.md) | [日本語
 
 AgentOS es un runtime local-first para agentes personales que operan navegadores y aplicaciones de escritorio en nombre del usuario. No es un sistema operativo bare-metal. Es una capa de agente que corre sobre macOS o Windows y mantiene tareas, workspaces, traces, aprendizaje y watch rules dentro de un solo runtime local.
 
+## Un agente personal real, no solo una caja de chat
+
+- Opera el navegador y las aplicaciones de escritorio que ya usas
+- Puede vigilar inboxes, documentos y rutinas recurrentes de forma permanente
+- Empieza con drafts y aprobaciones, y solo gana más autonomía cuando ya hay confianza
+- Deja traces, memoria y artifacts en vez de desaparecer cuando termina la conversación
+
 ## Despliegue recomendado
 
 AgentOS es lo bastante potente como para operar navegadores, aplicaciones de escritorio, archivos locales y watch rules permanentes. Debe tratarse como un operador real, no como un script pequeño.
@@ -30,6 +37,13 @@ AgentOS es lo bastante potente como para operar navegadores, aplicaciones de esc
 - Empieza redactando respuestas, resúmenes y follow-ups, y solo amplía la autonomía cuando ya hay confianza
 - Convierte una tarea exitosa en watch profile o job recurrente para no empezar desde cero mañana
 - Mantiene traces, memoria, credenciales y contexto operativo en local en vez de enviarlo todo a un control plane SaaS alojado
+
+## Un día típico con AgentOS
+
+- Mañana: ejecutar un browser scan, barrer inboxes y reunir lo que necesita atención
+- Mediodía: redactar correos, Slack, WeChat o seguimientos de recruiting mientras los casos riesgosos quedan en cola para aprobación
+- Tarde: subir archivos, actualizar documentos, capturar pantallas y guardar resultados en workspaces
+- Noche: generar un digest, recordar lo que cambió y preparar las siguientes proposals
 
 ## Capacidades actuales
 

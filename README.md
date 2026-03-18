@@ -4,6 +4,13 @@ Languages: [English](./README.md) | [简体中文](./README.zh-CN.md) | [日本�
 
 AgentOS is a local-first runtime for personal agents that operate browsers and desktop apps on behalf of a user. It is not a bare-metal operating system. It is an always-on agent layer that runs on top of macOS or Windows and keeps tasks, workspaces, traces, learning, and watch rules in one local runtime.
 
+## A real personal agent, not just a chat box
+
+- Works the browser and desktop apps you already use
+- Keeps standing watch over inboxes, docs, and recurring routines
+- Starts with drafts and approvals, then earns more autonomy over time
+- Leaves behind traces, memory, and artifacts instead of disappearing after the chat ends
+
 ## Recommended deployment
 
 AgentOS is powerful enough to operate browsers, desktop apps, local files, and long-running watch rules. Treat it like a real operator, not a small helper script.
@@ -30,6 +37,13 @@ AgentOS is powerful enough to operate browsers, desktop apps, local files, and l
 - Draft replies, summaries, and follow-ups first, then let trust expand gradually
 - Reuse a successful task as a watch profile or recurring job instead of starting from zero tomorrow
 - Keep traces, memory, credentials, and operating context local instead of shipping everything to a hosted SaaS control plane
+
+## A typical day with AgentOS
+
+- Morning: run a browser scan, sweep inboxes, and collect what needs attention
+- Midday: draft email, Slack, WeChat, or recruiting follow-ups while leaving risky items queued for approval
+- Afternoon: upload files, update docs, capture screenshots, and save outputs into workspaces
+- Evening: generate a digest, remember what changed, and queue the next proposals
 
 ## Current capability summary
 

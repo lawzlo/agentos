@@ -4,6 +4,13 @@ Languages: [English](./README.md) | [简体中文](./README.zh-CN.md) | [日本�
 
 AgentOS は、ユーザーの代わりにブラウザやデスクトップアプリを操作するためのローカルファーストな personal agent runtime です。ベアメタル OS ではなく、macOS / Windows 上で動作する常駐 agent layer であり、タスク、workspace、trace、学習、watch rule を 1 つのローカル runtime にまとめます。
 
+## ただのチャット欄ではなく、実際に動く personal agent
+
+- すでに使っている browser や desktop app をそのまま操作できる
+- inbox、document、定期ルーチンを常時監視できる
+- 最初は draft と approval から始まり、信頼に応じて自律性を広げられる
+- 会話が終わっても消えず、trace、memory、artifact を残せる
+
 ## 推奨デプロイ方法
 
 AgentOS は、ブラウザ、デスクトップアプリ、ローカルファイル、常駐 watch rule を操作できるほど強力です。小さな補助スクリプトではなく、実際のオペレーターとして扱うべきです。
@@ -30,6 +37,13 @@ AgentOS は、ブラウザ、デスクトップアプリ、ローカルファイ
 - まず返信、要約、フォローアップを草稿として出し、信頼に応じて徐々に自律性を広げられる
 - 一度うまくいった task を watch profile や定期ジョブに変えて、翌日ゼロからやり直さなくてよい
 - trace、memory、資格情報、実行コンテキストをローカルに残し、ホスト型 SaaS control plane に丸ごと渡さなくてよい
+
+## AgentOS の典型的な一日
+
+- 朝: browser scan を走らせ、inbox を sweep し、その日の attention item を集める
+- 日中: メール、Slack、WeChat、採用 follow-up を草稿化し、リスクが高いものは承認待ちに残す
+- 午後: ファイルのアップロード、document 更新、スクリーンショット取得を行い、結果を workspace に保存する
+- 夜: digest を生成し、何が変わったかを記録し、次の proposal を並べる
 
 ## 現在の実装範囲
 
