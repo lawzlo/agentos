@@ -52,6 +52,7 @@ interface LearningServiceOptions {
     | "getMemoryEntitySnapshot"
     | "listMemoryEntities"
     | "countMemoryEntities"
+    | "getWatchRule"
     | "createMemoryFact"
     | "createKnowledgeChunk"
     | "searchKnowledge"
@@ -154,6 +155,25 @@ function buildQuestionProposal(summary: string, contextText: string): ProposalTy
 
 function uniqueStrings(values: Array<string | null | undefined>): string[] {
   return [...new Set(values.map((entry) => String(entry ?? "").trim()).filter(Boolean))];
+}
+
+function watchRuleIdFromTask(task: TaskSnapshot): string | null {
+  const taskSpec = (task.taskSpec ?? {}) as TaskSpec;
+  const taskInputs = (taskSpec.inputs ?? {}) as Record<string, unknown>;
+  const inputRuleId = String(taskInputs.watchRuleId ?? "").trim();
+  if (inputRuleId) {
+    return inputRuleId;
+  }
+
+  return task.triggerSource?.startsWith("watch:") ? task.triggerSource.slice("watch:".length).trim() || null : null;
+}
+
+function isReplyStyleTask(task: TaskSnapshot): boolean {
+  const taskSpec = (task.taskSpec ?? {}) as TaskSpec;
+  const taskInputs = (taskSpec.inputs ?? {}) as Record<string, unknown>;
+  return [taskInputs.typeTarget, taskInputs.sendTarget, taskInputs.typeText].some(
+    (value) => typeof value === "string" && value.trim().length > 0
+  );
 }
 
 export class LearningService {
@@ -573,6 +593,11 @@ export class LearningService {
       return;
     }
 
+    const watchRuleId = watchRuleIdFromTask(task);
+    const watchRule = watchRuleId ? this.store.getWatchRule(watchRuleId) : null;
+    const livePack = String(watchRule?.livePack ?? "").trim() || null;
+    const replyStylePreferenceKey = livePack && isReplyStyleTask(task) ? `reply-style:${livePack}` : null;
+
     const correctionSource = this.store.putLearningSource({
       kind: "user-corrections",
       enabled: true,
@@ -590,6 +615,9 @@ export class LearningService {
         taskId: task.id,
         preferredSurface: task.preferredSurface,
         triggerSource: task.triggerSource,
+        watchRuleId,
+        livePack,
+        replyStylePreferenceKey,
         manualCorrections
       },
       extractedText: manualCorrections
@@ -957,6 +985,32 @@ export class LearningService {
         },
         sourceObservationId: observation.id
       });
+
+      const replyStylePreferenceKey = String(metadata.replyStylePreferenceKey ?? "").trim();
+      if (replyStylePreferenceKey) {
+        const livePack = String(metadata.livePack ?? "").trim();
+        const replyStyleEntity = this.store.upsertMemoryEntity({
+          type: "preference",
+          key: replyStylePreferenceKey,
+          title: livePack ? `Reply style preferences for ${livePack}` : "Reply style preferences",
+          summary: observation.summary ?? null,
+          metadata: {
+            preferredSurface,
+            livePack: livePack || null,
+            triggerSource: metadata.triggerSource ?? null
+          },
+          lastObservedAt: observation.createdAt
+        });
+        entityIds.push(replyStyleEntity.id);
+        this.store.createMemoryFact({
+          entityId: replyStyleEntity.id,
+          kind: "manual-correction",
+          value: {
+            notes: Array.isArray(metadata.manualCorrections) ? metadata.manualCorrections : []
+          },
+          sourceObservationId: observation.id
+        });
+      }
     }
 
     if (entityIds.length) {

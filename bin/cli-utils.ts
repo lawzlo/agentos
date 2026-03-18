@@ -232,6 +232,31 @@ async function startDetachedDaemon(): Promise<DaemonStatus> {
   return waitForDaemon();
 }
 
+export async function restartLocalDaemon(timeoutMs = 10000): Promise<{
+  restarted: boolean;
+  daemon: DaemonStatus | null;
+}> {
+  const runtime = await readDaemonRuntime(config.daemonDir);
+  if (!runtime.running || !runtime.state?.pid) {
+    return { restarted: false, daemon: null };
+  }
+
+  process.kill(Number(runtime.state.pid), "SIGTERM");
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const current = await readDaemonRuntime(config.daemonDir);
+    if (!current.running) {
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+
+  return {
+    restarted: true,
+    daemon: await startDetachedDaemon()
+  };
+}
+
 export async function ensureDaemonRunning(options: CliOptions = {}): Promise<{
   daemon: DaemonStatus;
   startedDaemon: boolean;
@@ -320,17 +345,15 @@ export async function daemonStop(options: CliOptions) {
 }
 
 export async function daemonRestart(options: CliOptions) {
-  const runtime = await readDaemonRuntime(config.daemonDir);
-  if (runtime.running && runtime.state?.pid) {
-    process.kill(Number(runtime.state.pid), "SIGTERM");
-    const started = Date.now();
-    while (Date.now() - started < Number(options.timeout ?? 10000)) {
-      const current = await readDaemonRuntime(config.daemonDir);
-      if (!current.running) {
-        break;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 200));
-    }
+  const restarted = await restartLocalDaemon(Number(options.timeout ?? 10000));
+  if (restarted.restarted) {
+    print(
+      options.json
+        ? restarted.daemon
+        : `Restarted AgentOS daemon on http://127.0.0.1:${restarted.daemon?.port ?? config.port}`,
+      options
+    );
+    return;
   }
 
   await daemonStart(options);

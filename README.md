@@ -85,16 +85,22 @@ npm run cli:link
 agentos setup
 ```
 
-3. If AgentOS reports low-risk local fixes such as runtime directories or auto-start, let it apply them:
+3. Configure model access in the product flow instead of hand-writing env vars. `agentos model setup` lets you choose OpenAI, Claude, Gemini, or a custom OpenAI-compatible endpoint, then paste the API key:
+
+```bash
+agentos model setup
+```
+
+4. If AgentOS reports low-risk local fixes such as runtime directories or auto-start, let it apply them:
 
 ```bash
 agentos setup --fix --dry-run
 agentos setup --fix
 ```
 
-`setup --fix` only applies low-risk local fixes. Browser sign-in, model credentials, and desktop permissions remain explicit human steps, and `agentos setup` will list them under manual steps.
+`setup --fix` only applies low-risk local fixes. Browser sign-in and desktop permissions remain explicit human steps, and `agentos setup` will list them under manual steps. Model access should go through `agentos model setup`.
 
-4. Start the interactive shell or run a first one-off task:
+5. Start the interactive shell or run a first one-off task:
 
 ```bash
 agentos
@@ -102,7 +108,7 @@ agentos
 agentos "Open example.com, click More information, then capture a screenshot" --surface browser
 ```
 
-5. Add a first always-on watch rule:
+6. Add a first always-on watch rule:
 
 ```bash
 agentos watch add \
@@ -119,7 +125,7 @@ If `agentos` is not on your PATH yet, run `npm run cli:link` from the source che
 
 - `agentos setup --fix` can create missing runtime directories and install daemon auto-start for the current user
 - It does not log into Slack, email, BOSS, Drive, or Docs for you
-- It does not inject model credentials for you
+- Use `agentos model setup` for model access; `setup --fix` does not ask for API keys
 - It does not bypass Accessibility or Screen Recording permissions on desktop platforms
 - After `setup --fix`, rerun `agentos setup` and then start with one smoke test plus one low-risk always-on workflow
 
@@ -128,6 +134,7 @@ If `agentos` is not on your PATH yet, run `npm run cli:link` from the source che
 If you want the fastest path to value, try these in order:
 
 ```bash
+agentos model setup
 agentos "Open example.com, click More information, then capture a screenshot" --surface browser
 agentos "Open a local text editor, type a short note, and wait for me" --surface desktop
 agentos jobs add daily_digest --hour 18

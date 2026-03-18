@@ -17,7 +17,8 @@ import type {
   WorkspaceRecord
 } from "../types/runtime-schema.js";
 
-interface LivePackControlPlane extends Pick<ControlPlane, "modelClient" | "surfaceRegistry"> {}
+interface LivePackControlPlane
+  extends Pick<ControlPlane, "modelClient" | "surfaceRegistry" | "listReplyStylePreferences"> {}
 
 interface LivePackActivationArgs {
   rule: WatchRule;
@@ -307,31 +308,138 @@ function draftHeuristicReply({
   family,
   goal,
   summary,
-  context
+  context,
+  stylePreferences = []
 }: {
   family: "chat" | "mail" | "generic";
   goal: string;
   summary: string;
   context: string[];
+  stylePreferences?: string[];
 }): LivePackDraftResponse {
   const combinedContext = [summary, ...context].filter(Boolean).join("\n");
   const chinese = /[\u4e00-\u9fff]/u.test(`${goal} ${combinedContext}`);
+  const styleHints = stylePreferences.join(" ").toLowerCase();
+  const wantsConcise = /(short|concise|brief|terse|直接|简短|简洁)/iu.test(styleHints);
+  const wantsWarm = /(warm|friendly|polite|礼貌|温和|友好)/iu.test(styleHints);
   const replyText =
     family === "mail"
       ? chinese
-        ? "收到你的邮件，我会尽快处理并回复。"
-        : "Thanks for your email. I received it and will follow up shortly."
+        ? wantsConcise
+          ? "收到邮件，我会尽快回复。"
+          : wantsWarm
+            ? "收到你的邮件了，谢谢你，我会尽快处理并回复。"
+            : "收到你的邮件，我会尽快处理并回复。"
+        : wantsConcise
+          ? "Received your email. I will reply shortly."
+          : wantsWarm
+            ? "Thanks for your email. I received it and will follow up shortly."
+            : "Thanks for your email. I received it and will follow up shortly."
       : chinese
-        ? "收到，我会尽快处理。"
-        : "Got it. I will follow up shortly.";
+        ? wantsConcise
+          ? "收到，我尽快处理。"
+          : wantsWarm
+            ? "收到啦，谢谢你，我会尽快处理。"
+            : "收到，我会尽快处理。"
+        : wantsConcise
+          ? "Got it. Will follow up shortly."
+          : wantsWarm
+            ? "Got it. I will follow up shortly."
+            : "Got it. I will follow up shortly.";
   return {
     replyText,
     metadata: {
       confidence: null,
       rationale: "heuristic fallback",
-      source: "heuristic"
+      source: "heuristic",
+      stylePreferences
     }
   };
+}
+
+function learnedReplyStylePreferences({
+  controlPlane,
+  livePack,
+  preferredSurface
+}: {
+  controlPlane: LivePackControlPlane;
+  livePack: string;
+  preferredSurface: LivePackSurface;
+}): string[] {
+  return controlPlane.listReplyStylePreferences({
+    livePack,
+    preferredSurface,
+    limit: 6
+  });
+}
+
+async function draftPackReply({
+  controlPlane,
+  livePack,
+  preferredSurface,
+  family,
+  goal,
+  summary,
+  context
+}: {
+  controlPlane: LivePackControlPlane;
+  livePack: string;
+  preferredSurface: LivePackSurface;
+  family: "chat" | "mail" | "generic";
+  goal: string;
+  summary: string;
+  context: string[];
+}): Promise<LivePackDraftResponse> {
+  const stylePreferences = learnedReplyStylePreferences({
+    controlPlane,
+    livePack,
+    preferredSurface
+  });
+  if (controlPlane.modelClient.isConfigured()) {
+    const drafted = await controlPlane.modelClient.draftReply({
+      goal,
+      livePack,
+      summary,
+      context,
+      stylePreferences
+    });
+    return {
+      replyText: String(drafted.replyText ?? "").trim(),
+      metadata: {
+        confidence: drafted.confidence ?? null,
+        rationale: drafted.rationale ?? null,
+        source: "model",
+        stylePreferences
+      }
+    };
+  }
+
+  if (livePack === "boss-browser") {
+    const chinese = /[\u4e00-\u9fff]/u.test(`${goal} ${summary} ${context.join(" ")} ${stylePreferences.join(" ")}`);
+    return {
+      replyText: chinese
+        ? /(?:short|concise|brief|直接|简短|简洁)/iu.test(stylePreferences.join(" "))
+          ? "你好，已看到你的信息，我会尽快跟进。"
+          : "你好，我已看到你的信息，会尽快查看并和你沟通后续。"
+        : /(?:short|concise|brief)/iu.test(stylePreferences.join(" "))
+          ? "Thanks, I saw your message and will follow up soon."
+          : "Thanks for reaching out. I reviewed your profile and will follow up shortly.",
+      metadata: {
+        confidence: null,
+        rationale: "heuristic recruiting follow-up",
+        source: "heuristic",
+        stylePreferences
+      }
+    };
+  }
+
+  return draftHeuristicReply({
+    family,
+    goal,
+    summary,
+    context,
+    stylePreferences
+  });
 }
 
 function defaultPackCategory(family: LivePackInfo["family"]): LivePackCategory {
@@ -1573,24 +1681,10 @@ function createSlackPack({
     async draftReply({ rule, detection, controlPlane }) {
       const summary = String(detection?.summary ?? "").trim();
       const context = Array.isArray(detection?.context) ? detection.context : [];
-      if (controlPlane.modelClient.isConfigured()) {
-        const drafted = await controlPlane.modelClient.draftReply({
-          goal: rule.goal,
-          livePack: name,
-          summary,
-          context
-        });
-        return {
-          replyText: String(drafted.replyText ?? "").trim(),
-          metadata: {
-            confidence: drafted.confidence ?? null,
-            rationale: drafted.rationale ?? null,
-            source: "model"
-          }
-        };
-      }
-
-      return draftHeuristicReply({
+      return draftPackReply({
+        controlPlane,
+        livePack: name,
+        preferredSurface: surface,
         family: "chat",
         goal: rule.goal,
         summary,
@@ -1742,24 +1836,10 @@ function createWeChatPack(): LivePack {
     async draftReply({ rule, detection, controlPlane }) {
       const summary = String(detection?.summary ?? "").trim();
       const context = Array.isArray(detection?.context) ? detection.context : [];
-      if (controlPlane.modelClient.isConfigured()) {
-        const drafted = await controlPlane.modelClient.draftReply({
-          goal: rule.goal,
-          livePack: "wechat-desktop",
-          summary,
-          context
-        });
-        return {
-          replyText: String(drafted.replyText ?? "").trim(),
-          metadata: {
-            confidence: drafted.confidence ?? null,
-            rationale: drafted.rationale ?? null,
-            source: "model"
-          }
-        };
-      }
-
-      return draftHeuristicReply({
+      return draftPackReply({
+        controlPlane,
+        livePack: "wechat-desktop",
+        preferredSurface: "desktop",
         family: "chat",
         goal: rule.goal,
         summary,
@@ -2055,24 +2135,10 @@ function createMailPack({
     async draftReply({ rule, detection, controlPlane }) {
       const summary = String(detection?.summary ?? "").trim();
       const context = Array.isArray(detection?.context) ? detection.context : [];
-      if (controlPlane.modelClient.isConfigured()) {
-        const drafted = await controlPlane.modelClient.draftReply({
-          goal: rule.goal,
-          livePack: name,
-          summary,
-          context
-        });
-        return {
-          replyText: String(drafted.replyText ?? "").trim(),
-          metadata: {
-            confidence: drafted.confidence ?? null,
-            rationale: drafted.rationale ?? null,
-            source: "model"
-          }
-        };
-      }
-
-      return draftHeuristicReply({
+      return draftPackReply({
+        controlPlane,
+        livePack: name,
+        preferredSurface: surface,
         family: "mail",
         goal: rule.goal,
         summary,
@@ -2226,34 +2292,15 @@ function createBossPack(): LivePack {
     async draftReply({ rule, detection, controlPlane }) {
       const summary = String(detection?.summary ?? "").trim();
       const context = Array.isArray(detection?.context) ? detection.context : [];
-      if (controlPlane.modelClient.isConfigured()) {
-        const drafted = await controlPlane.modelClient.draftReply({
-          goal: rule.goal,
-          livePack: "boss-browser",
-          summary,
-          context
-        });
-        return {
-          replyText: String(drafted.replyText ?? "").trim(),
-          metadata: {
-            confidence: drafted.confidence ?? null,
-            rationale: drafted.rationale ?? null,
-            source: "model"
-          }
-        };
-      }
-
-      const chinese = /[\u4e00-\u9fff]/u.test(`${rule.goal} ${summary} ${context.join(" ")}`);
-      return {
-        replyText: chinese
-          ? "你好，我已看到你的信息，会尽快查看并和你沟通后续。"
-          : "Thanks for reaching out. I reviewed your profile and will follow up shortly.",
-        metadata: {
-          confidence: null,
-          rationale: "heuristic recruiting follow-up",
-          source: "heuristic"
-        }
-      };
+      return draftPackReply({
+        controlPlane,
+        livePack: "boss-browser",
+        preferredSurface: "browser",
+        family: "generic",
+        goal: rule.goal,
+        summary,
+        context
+      });
     }
   };
 }
@@ -2365,24 +2412,10 @@ function createVisualDesktopPack({
     async draftReply({ rule, detection, controlPlane }) {
       const summary = String(detection?.summary ?? "").trim();
       const context = Array.isArray(detection?.context) ? detection.context : [];
-      if (controlPlane.modelClient.isConfigured()) {
-        const drafted = await controlPlane.modelClient.draftReply({
-          goal: rule.goal,
-          livePack: name,
-          summary,
-          context
-        });
-        return {
-          replyText: String(drafted.replyText ?? "").trim(),
-          metadata: {
-            confidence: drafted.confidence ?? null,
-            rationale: drafted.rationale ?? null,
-            source: "model"
-          }
-        };
-      }
-
-      return draftHeuristicReply({
+      return draftPackReply({
+        controlPlane,
+        livePack: name,
+        preferredSurface: "desktop",
         family,
         goal: rule.goal,
         summary,

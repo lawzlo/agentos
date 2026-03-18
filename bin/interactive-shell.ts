@@ -7,6 +7,7 @@ import { commandDrafts } from "./commands/drafts-command.js";
 import { commandMemory } from "./commands/memory-command.js";
 import { commandProposals } from "./commands/proposals-command.js";
 import { commandJobs } from "./commands/jobs-command.js";
+import { commandModel } from "./commands/model-command.js";
 import { buildSetupReport, commandSetup, renderOnboardingNotice } from "./commands/setup-command.js";
 import {
   apiRequest,
@@ -28,8 +29,8 @@ function banner() {
   return [
     "AgentOS interactive shell",
     "Type a task in plain language and press Enter.",
-    "Start with /setup, then a plain-language goal, then a watch or job when you want always-on behavior.",
-    "Slash commands: /help /setup [--fix] [--dry-run] /status /doctor /ps /watch <goal> /watches /jobs /drafts /approve <draft-id> /reject <draft-id> [reason] /surface browser|desktop /workspace <name|clear> /wait on|off /exit"
+    "Start with /setup and /model setup, then a plain-language goal, then a watch or job when you want always-on behavior.",
+    "Slash commands: /help /setup [--fix] [--dry-run] /model [status|setup|clear] /status /doctor /ps /watch <goal> /watches /jobs /drafts /approve <draft-id> /reject <draft-id> [reason] /surface browser|desktop /workspace <name|clear> /wait on|off /exit"
   ].join("\n");
 }
 
@@ -139,6 +140,12 @@ async function handleSlashCommand(input: string, state: InteractiveSessionState)
 
   if (name === "doctor") {
     await commandDoctor({});
+    return false;
+  }
+
+  if (name === "model") {
+    const next = firstWord(rest);
+    await commandModel(next || "status", [], {});
     return false;
   }
 

@@ -84,16 +84,22 @@ npm run cli:link
 agentos setup
 ```
 
-3. Si AgentOS detecta arreglos locales de bajo riesgo, como directorios del runtime o autoarranque, aplícalos primero:
+3. No configures el modelo escribiendo variables de entorno a mano. Usa `agentos model setup`, elige OpenAI, Claude, Gemini o un endpoint OpenAI-compatible y pega la API key:
+
+```bash
+agentos model setup
+```
+
+4. Si AgentOS detecta arreglos locales de bajo riesgo, como directorios del runtime o autoarranque, aplícalos primero:
 
 ```bash
 agentos setup --fix --dry-run
 agentos setup --fix
 ```
 
-`setup --fix` solo aplica arreglos locales de bajo riesgo. El inicio de sesión en navegador, las credenciales del modelo y los permisos de escritorio siguen siendo pasos humanos explícitos, y `agentos setup` los mostrará como pasos manuales.
+`setup --fix` solo aplica arreglos locales de bajo riesgo. El inicio de sesión en navegador y los permisos de escritorio siguen siendo pasos humanos explícitos, y `agentos setup` los mostrará como pasos manuales. La configuración del modelo debe pasar por `agentos model setup`.
 
-4. Entra en la shell interactiva o ejecuta una primera tarea puntual:
+5. Entra en la shell interactiva o ejecuta una primera tarea puntual:
 
 ```bash
 agentos
@@ -101,7 +107,7 @@ agentos
 agentos "Abrir example.com, hacer clic en More information y capturar una pantalla" --surface browser
 ```
 
-5. Añade una primera watch rule permanente:
+6. Añade una primera watch rule permanente:
 
 ```bash
 agentos watch add \
@@ -118,7 +124,7 @@ Si `agentos` todavía no está en tu PATH, ejecuta primero `npm run cli:link` de
 
 - `agentos setup --fix` puede crear directorios faltantes del runtime e instalar el autoarranque del daemon para el usuario actual
 - No inicia sesión por ti en Slack, correo, BOSS, Drive o Docs
-- No inyecta credenciales del modelo por ti
+- Usa `agentos model setup` para el acceso al modelo; `setup --fix` no pide API keys
 - No evita los permisos de Accessibility o Screen Recording en plataformas de escritorio
 - Después de `setup --fix`, vuelve a ejecutar `agentos setup` y empieza con una smoke test y luego con un flujo continuo de bajo riesgo
 
@@ -127,6 +133,7 @@ Si `agentos` todavía no está en tu PATH, ejecuta primero `npm run cli:link` de
 Si quieres sentir valor rápido, prueba esto en este orden:
 
 ```bash
+agentos model setup
 agentos "Abrir example.com, hacer clic en More information y capturar una pantalla" --surface browser
 agentos "Abrir un editor de texto local, escribir una nota corta y devolverme el control" --surface desktop
 agentos jobs add daily_digest --hour 18

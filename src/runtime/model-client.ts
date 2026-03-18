@@ -1,4 +1,9 @@
-import type { AgentModelConfig } from "../config.js";
+import type {
+  AgentModelConfig,
+  AgentModelProvider,
+  AgentModelTier
+} from "../config.js";
+import { modelProviderLabel } from "../config.js";
 import type { RuntimeStep, TaskSpec, WorldState } from "../types/runtime-schema.js";
 
 interface JsonSchemaRequest<TPayload> {
@@ -27,14 +32,83 @@ interface ModelDraftReply {
   rationale?: string | null;
 }
 
-export class OpenAICompatibleModelClient {
+export interface ModelClientStatus {
+  configured: boolean;
+  provider: AgentModelProvider | null;
+  providerLabel: string | null;
+  modelName: string | null;
+  baseUrl: string | null;
+  tier: AgentModelTier | null;
+}
+
+function stripCodeFence(text: string): string {
+  const trimmed = String(text ?? "").trim();
+  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]+?)\s*```$/u);
+  return fenced?.[1]?.trim() ?? trimmed;
+}
+
+function extractJsonText(text: string): string {
+  const normalized = stripCodeFence(text);
+  const firstBrace = normalized.search(/[{\[]/u);
+  const lastBrace = Math.max(normalized.lastIndexOf("}"), normalized.lastIndexOf("]"));
+  if (firstBrace >= 0 && lastBrace >= firstBrace) {
+    return normalized.slice(firstBrace, lastBrace + 1);
+  }
+  return normalized;
+}
+
+function parseJsonPayload<TResponse>(text: string, schemaName: string): TResponse {
+  try {
+    return JSON.parse(extractJsonText(text)) as TResponse;
+  } catch (error) {
+    throw new Error(
+      `${schemaName} model returned invalid JSON: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+}
+
+function joinAnthropicText(payload: {
+  content?: Array<{ type?: string; text?: string }>;
+}): string {
+  return (payload.content ?? [])
+    .filter((block) => block?.type === "text" && typeof block.text === "string")
+    .map((block) => String(block.text ?? ""))
+    .join("\n")
+    .trim();
+}
+
+function joinGeminiText(payload: {
+  candidates?: Array<{
+    content?: {
+      parts?: Array<{ text?: string }>;
+    };
+  }>;
+}): string {
+  return (payload.candidates?.[0]?.content?.parts ?? [])
+    .map((part) => String(part?.text ?? ""))
+    .join("\n")
+    .trim();
+}
+
+export class AgentModelClient {
   config: AgentModelConfig;
   constructor(config: AgentModelConfig) {
     this.config = config;
   }
 
   isConfigured(): boolean {
-    return Boolean(this.config.baseUrl && this.config.apiKey && this.config.name);
+    return Boolean(this.config.apiKey && this.config.name && this.config.baseUrl);
+  }
+
+  describe(): ModelClientStatus {
+    return {
+      configured: this.isConfigured(),
+      provider: this.config.provider ?? null,
+      providerLabel: this.config.provider ? modelProviderLabel(this.config.provider) : null,
+      modelName: this.config.name ?? null,
+      baseUrl: this.config.baseUrl ?? null,
+      tier: this.config.tier ?? null
+    };
   }
 
   async #requestJson<TPayload, TResponse>({
@@ -44,7 +118,47 @@ export class OpenAICompatibleModelClient {
     userPayload,
     temperature = 0.1
   }: JsonSchemaRequest<TPayload>): Promise<TResponse> {
-    const response = await fetch(`${this.config.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+    if (!this.isConfigured()) {
+      throw new Error("Model client is not configured.");
+    }
+
+    if (this.config.provider === "anthropic") {
+      return this.#requestAnthropicJson({
+        schemaName,
+        schema,
+        systemPrompt,
+        userPayload,
+        temperature
+      });
+    }
+
+    if (this.config.provider === "gemini") {
+      return this.#requestGeminiJson({
+        schemaName,
+        schema,
+        systemPrompt,
+        userPayload,
+        temperature
+      });
+    }
+
+    return this.#requestOpenAICompatibleJson({
+      schemaName,
+      schema,
+      systemPrompt,
+      userPayload,
+      temperature
+    });
+  }
+
+  async #requestOpenAICompatibleJson<TPayload, TResponse>({
+    schemaName,
+    schema,
+    systemPrompt,
+    userPayload,
+    temperature
+  }: JsonSchemaRequest<TPayload>): Promise<TResponse> {
+    const response = await fetch(`${String(this.config.baseUrl).replace(/\/$/, "")}/chat/completions`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -87,6 +201,116 @@ export class OpenAICompatibleModelClient {
     }
 
     return JSON.parse(content) as TResponse;
+  }
+
+  async #requestAnthropicJson<TPayload, TResponse>({
+    schemaName,
+    schema,
+    systemPrompt,
+    userPayload,
+    temperature
+  }: JsonSchemaRequest<TPayload>): Promise<TResponse> {
+    const response = await fetch(`${String(this.config.baseUrl).replace(/\/$/, "")}/v1/messages`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": String(this.config.apiKey),
+        "anthropic-version": "2023-06-01"
+      },
+      body: JSON.stringify({
+        model: this.config.name,
+        max_tokens: 2048,
+        temperature,
+        system: systemPrompt,
+        output_config: {
+          format: {
+            type: "json_schema",
+            schema
+          }
+        },
+        messages: [
+          {
+            role: "user",
+            content: `Schema name: ${schemaName}\nPayload:\n${JSON.stringify(userPayload)}`
+          }
+        ]
+      }),
+      signal: AbortSignal.timeout(this.config.timeoutMs)
+    });
+
+    if (!response.ok) {
+      throw new Error(`planner model request failed: ${response.status}`);
+    }
+
+    const payload = (await response.json()) as {
+      content?: Array<{ type?: string; text?: string }>;
+    };
+    const content = joinAnthropicText(payload);
+    if (!content) {
+      throw new Error(`${schemaName} model returned no content`);
+    }
+
+    return parseJsonPayload<TResponse>(content, schemaName);
+  }
+
+  async #requestGeminiJson<TPayload, TResponse>({
+    schemaName,
+    schema,
+    systemPrompt,
+    userPayload,
+    temperature
+  }: JsonSchemaRequest<TPayload>): Promise<TResponse> {
+    const baseUrl = String(this.config.baseUrl).replace(/\/$/, "");
+    const model = encodeURIComponent(String(this.config.name));
+    const response = await fetch(`${baseUrl}/models/${model}:generateContent?key=${encodeURIComponent(String(this.config.apiKey))}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        systemInstruction: {
+          parts: [
+            {
+              text: `${systemPrompt}\nReturn only valid JSON that matches the provided schema.`
+            }
+          ]
+        },
+        contents: [
+          {
+            role: "user",
+            parts: [
+              {
+                text: `Schema name: ${schemaName}\nJSON schema:\n${JSON.stringify(schema)}\n\nPayload:\n${JSON.stringify(userPayload)}`
+              }
+            ]
+          }
+        ],
+        generationConfig: {
+          temperature,
+          responseMimeType: "application/json",
+          responseJsonSchema: schema
+        }
+      }),
+      signal: AbortSignal.timeout(this.config.timeoutMs)
+    });
+
+    if (!response.ok) {
+      throw new Error(`planner model request failed: ${response.status}`);
+    }
+
+    const payload = (await response.json()) as {
+      candidates?: Array<{
+        content?: {
+          parts?: Array<{ text?: string }>;
+        };
+      }>;
+    };
+    const content = joinGeminiText(payload);
+    if (!content) {
+      throw new Error(`${schemaName} model returned no content`);
+    }
+
+    return parseJsonPayload<TResponse>(content, schemaName);
   }
 
   async planTask(taskSpec: TaskSpec): Promise<ModelPlanResponse> {
@@ -168,6 +392,7 @@ export class OpenAICompatibleModelClient {
     livePack: string;
     summary: string;
     context: string[];
+    stylePreferences?: string[];
   }): Promise<ModelDraftReply> {
     return this.#requestJson<typeof payload, ModelDraftReply>({
       schemaName: "agentos_live_reply",
@@ -182,9 +407,11 @@ export class OpenAICompatibleModelClient {
         additionalProperties: false
       },
       systemPrompt:
-        "You draft concise, low-risk replies for a personal local agent. Acknowledge the message, avoid making commitments you cannot verify, and prefer a short confirmation style.",
+        "You draft concise, low-risk replies for a personal local agent. Acknowledge the message, avoid making commitments you cannot verify, and follow any learned reply style preferences when they are compatible with the current context.",
       userPayload: payload,
       temperature: 0.2
     });
   }
 }
+
+export { AgentModelClient as OpenAICompatibleModelClient };

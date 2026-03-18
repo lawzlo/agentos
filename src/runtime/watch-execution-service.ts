@@ -138,7 +138,14 @@ function downgradeToDraft(
 interface WatchExecutionServiceOptions {
   controlPlane: Pick<
     ControlPlane,
-    "modelClient" | "createTask" | "workspaceManager" | "watchService" | "draftService" | "surfaceRegistry" | "policyEngine"
+    | "modelClient"
+    | "createTask"
+    | "workspaceManager"
+    | "watchService"
+    | "draftService"
+    | "surfaceRegistry"
+    | "policyEngine"
+    | "listReplyStylePreferences"
   >;
   store: Pick<ControlPlaneStore, "getWatchRule" | "putWatchRule" | "getTask" | "getDraft">;
   eventBus: EventBus;

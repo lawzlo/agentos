@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 
 import { ControlPlaneStore } from "../src/runtime/store.js";
 import type { ProposalRecord } from "../src/types/learning.js";
-import { createTempDir, startAgentServer, waitForTask } from "./helpers.js";
+import { createTempDir, startAgentServer, startModelServer, waitForTask } from "./helpers.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -238,6 +238,150 @@ test("manual corrections are learned into preference memory after task completio
     }
   } finally {
     await server.close();
+  }
+});
+
+test("learned manual reply corrections are passed into later live-pack reply drafts", async () => {
+  const dataDir = await createTempDir();
+  const modelRequests: Array<Record<string, unknown>> = [];
+  const model = await startModelServer(async (body) => {
+    modelRequests.push(body as Record<string, unknown>);
+    return {
+      replyText: "Short follow-up from learned preferences.",
+      confidence: 0.91,
+      rationale: "used learned style"
+    };
+  });
+  const server = await startAgentServer({
+    dataDir,
+    model: {
+      baseUrl: model.baseUrl,
+      apiKey: "test-key",
+      name: "fake-model",
+      timeoutMs: 5000
+    },
+    learning: {
+      metadataRoots: [dataDir],
+      contentRoots: [dataDir],
+      excludedPaths: [],
+      scanIntervalMs: 100,
+      maxFilesPerScan: 100,
+      maxDepth: 2
+    }
+  });
+
+  try {
+    const watch = server.app.controlPlane.createWatchRule({
+      goal: "Always watch email and reply to unread messages",
+      preferredSurface: "browser",
+      workspaceName: "mail-learning-main",
+      livePack: "generic-mail-browser",
+      enabled: false,
+      inputs: {
+        startUrl: "https://mail.example.test"
+      }
+    });
+    assert.ok(watch);
+
+    const taskResponse = await fetchJson<{ task: { id: string } }>(`${server.baseUrl}/tasks`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        goal: "Pause long enough to record a mail reply correction",
+        preferredSurface: "browser",
+        inputs: {
+          watchRuleId: watch!.id,
+          typeTarget: "Reply box",
+          sendTarget: "Send",
+          typeText: "Draft a short follow-up"
+        },
+        steps: [
+          {
+            label: "Wait one",
+            surface: "browser",
+            action: "wait",
+            params: { ms: 250 },
+            checkpoint: false
+          },
+          {
+            label: "Wait two",
+            surface: "browser",
+            action: "wait",
+            params: { ms: 250 },
+            checkpoint: false
+          }
+        ]
+      })
+    });
+
+    await waitForValue(
+      async () => fetchJson<{ task: { status: string } }>(`${server.baseUrl}/tasks/${taskResponse.task.id}`),
+      (payload) => payload.task.status === "running"
+    );
+
+    await fetch(`${server.baseUrl}/tasks/${taskResponse.task.id}/control`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        action: "request_takeover",
+        note: "Keep future mail replies concise and direct."
+      })
+    });
+    await fetch(`${server.baseUrl}/tasks/${taskResponse.task.id}/control`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        action: "return_to_agent",
+        note: "Keep future mail replies concise and direct."
+      })
+    });
+
+    await waitForTask(server.baseUrl, taskResponse.task.id, (task) => task.status === "completed");
+
+    await waitForValue(
+      async () => {
+        const store = new ControlPlaneStore(path.join(dataDir, "agentos.sqlite"));
+        try {
+          return store.listMemoryEntities(50).some((entity) => entity.key === "reply-style:generic-mail-browser");
+        } finally {
+          store.close();
+        }
+      },
+      Boolean
+    );
+
+    const draft = await server.app.controlPlane.watchExecutionService.draftReply({
+      watchRule: watch!,
+      detection: {
+        summary: "Customer: Can you send a brief pricing update?",
+        context: [
+          "Customer: Can you send a brief pricing update?",
+          "Need a reply that acknowledges the request."
+        ]
+      },
+      pack: server.app.controlPlane.livePackRegistry.get("generic-mail-browser")!
+    });
+
+    assert.equal(draft.replyText, "Short follow-up from learned preferences.");
+    assert.equal(Array.isArray(draft.metadata.stylePreferences), true);
+    assert.equal(
+      (draft.metadata.stylePreferences as string[]).some((entry) => /concise and direct/i.test(entry)),
+      true
+    );
+    assert.equal(modelRequests.length > 0, true);
+
+    const userMessage = (modelRequests.at(-1)?.messages as Array<{ role?: string; content?: string }> | undefined)?.find(
+      (entry) => entry.role === "user"
+    );
+    const modelPayload = JSON.parse(String(userMessage?.content ?? "{}"));
+    assert.equal(Array.isArray(modelPayload.stylePreferences), true);
+    assert.equal(
+      modelPayload.stylePreferences.some((entry: string) => /concise and direct/i.test(entry)),
+      true
+    );
+  } finally {
+    await server.close();
+    await model.close();
   }
 });
 

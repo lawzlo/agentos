@@ -440,6 +440,61 @@ export class ControlPlane {
     return this.draftService.reject(draftId, reason);
   }
 
+  listReplyStylePreferences({
+    livePack,
+    preferredSurface = null,
+    limit = 6
+  }: {
+    livePack: string;
+    preferredSurface?: string | null;
+    limit?: number;
+  }): string[] {
+    const keys = new Set(
+      [livePack ? `reply-style:${livePack}` : null, preferredSurface ? `surface:${preferredSurface}` : null]
+        .map((entry) => String(entry ?? "").trim())
+        .filter(Boolean)
+    );
+    if (!keys.size) {
+      return [];
+    }
+
+    const notes: string[] = [];
+    const seen = new Set<string>();
+    for (const entity of this.store.listMemoryEntities(200)) {
+      if (entity.type !== "preference" || !keys.has(entity.key)) {
+        continue;
+      }
+
+      const snapshot = this.store.getMemoryEntitySnapshot(entity.id);
+      for (const fact of [...(snapshot?.facts ?? [])].reverse()) {
+        if (fact.kind !== "manual-correction") {
+          continue;
+        }
+
+        const candidates = Array.isArray((fact.value as { notes?: unknown[] } | null)?.notes)
+          ? ((fact.value as { notes?: unknown[] }).notes ?? [])
+          : [];
+        for (const entry of candidates) {
+          const note = String((entry as { note?: unknown } | null)?.note ?? "").trim();
+          if (!note) {
+            continue;
+          }
+          const dedupeKey = note.toLowerCase();
+          if (seen.has(dedupeKey)) {
+            continue;
+          }
+          seen.add(dedupeKey);
+          notes.push(note);
+          if (notes.length >= limit) {
+            return notes;
+          }
+        }
+      }
+    }
+
+    return notes;
+  }
+
   getVersionInfo(): RuntimeVersionInfo {
     return getRuntimeVersionInfo();
   }
@@ -486,6 +541,7 @@ export class ControlPlane {
 
   async doctor(): Promise<DoctorReport> {
     const base = this.watchService.doctor();
+    const model = this.modelClient.describe();
     const version = this.getVersionInfo();
     const schemaVersion = this.store.getSchemaVersion();
     const native = await this.#collectNativeDiagnostics();
@@ -566,6 +622,12 @@ export class ControlPlane {
         (process.platform === "linux" || native.available) &&
         (!native.available || native.compatible),
       warnings,
+      modelConfigured: model.configured,
+      modelProvider: model.provider,
+      modelProviderLabel: model.providerLabel,
+      modelName: model.modelName,
+      modelBaseUrl: model.baseUrl,
+      modelTier: model.tier,
       learning,
       version,
       install,

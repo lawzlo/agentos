@@ -84,16 +84,22 @@ npm run cli:link
 agentos setup
 ```
 
-3. runtime ディレクトリや自動起動などの低リスクなローカル修復が必要なら、先に AgentOS に適用させます。
+3. model は環境変数を手で書く代わりに `agentos model setup` を使います。OpenAI、Claude、Gemini、または独自の OpenAI-compatible endpoint を選んで、API key を貼り付けます。
+
+```bash
+agentos model setup
+```
+
+4. runtime ディレクトリや自動起動などの低リスクなローカル修復が必要なら、先に AgentOS に適用させます。
 
 ```bash
 agentos setup --fix --dry-run
 agentos setup --fix
 ```
 
-`setup --fix` は低リスクなローカル修復だけを適用します。browser のログイン、model の認証情報、desktop 権限は人間が行う必要があり、`agentos setup` の manual step に表示されます。
+`setup --fix` は低リスクなローカル修復だけを適用します。browser のログインと desktop 権限は人間が行う必要があり、`agentos setup` の manual step に表示されます。model access は `agentos model setup` を使います。
 
-4. 対話シェルを開くか、最初の単発タスクを実行します。
+5. 対話シェルを開くか、最初の単発タスクを実行します。
 
 ```bash
 agentos
@@ -101,7 +107,7 @@ agentos
 agentos "example.com を開き、More information をクリックして、スクリーンショットを撮る" --surface browser
 ```
 
-5. 最初の常駐 watch rule を追加します。
+6. 最初の常駐 watch rule を追加します。
 
 ```bash
 agentos watch add \
@@ -118,7 +124,7 @@ agentos watch add \
 
 - `agentos setup --fix` は不足している runtime ディレクトリの作成と、現在のユーザー向け daemon 自動起動の導入ができます
 - Slack、メール、BOSS、Drive、Docs へのログインは自動では行いません
-- model の資格情報は自動では設定しません
+- model access は `agentos model setup` で行い、`setup --fix` は API key を扱いません
 - desktop の Accessibility や Screen Recording 権限を迂回しません
 - `setup --fix` の後にもう一度 `agentos setup` を実行し、まず smoke test を 1 つ、その後に低リスクな常駐 workflow を 1 つ追加するのが安全です
 
@@ -127,6 +133,7 @@ agentos watch add \
 価値を最短で感じたいなら、次の順で試すのが分かりやすいです。
 
 ```bash
+agentos model setup
 agentos "example.com を開き、More information をクリックして、スクリーンショットを撮る" --surface browser
 agentos "ローカルのテキストエディタを開き、短いメモを入力して、私に制御を返す" --surface desktop
 agentos jobs add daily_digest --hour 18

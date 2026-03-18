@@ -22,6 +22,7 @@ import { commandDigest } from "./commands/digest-command.js";
 import { commandProposals } from "./commands/proposals-command.js";
 import { commandJobs } from "./commands/jobs-command.js";
 import { commandSetup } from "./commands/setup-command.js";
+import { commandModel } from "./commands/model-command.js";
 import { commandUninstall } from "./commands/uninstall-command.js";
 import { runInteractiveShell } from "./interactive-shell.js";
 import { boolOption, parseArgs, print, type CliOptions } from "./cli-utils.js";
@@ -29,6 +30,7 @@ import { boolOption, parseArgs, print, type CliOptions } from "./cli-utils.js";
 function helpText() {
   return `agentos
 agentos "<goal>" [--surface browser|desktop] [--workspace name] [--wait]
+agentos model setup|status|clear [--provider openai|anthropic|gemini|openai_compatible] [--tier fast|balanced|strong] [--api-key ...] [--model ...] [--base-url ...]
 agentos setup [--fix] [--dry-run]
 agentos uninstall [--purge] [--dry-run]
 agentos daemon start|stop|status|logs|restart|install|uninstall
@@ -62,6 +64,7 @@ function isKnownCommand(command: string | undefined) {
     "daemon",
     "run",
     "setup",
+    "model",
     "uninstall",
     "doctor",
     "version",
@@ -145,6 +148,11 @@ async function main() {
 
   if (command === "setup") {
     await commandSetup(sharedOptions);
+    return;
+  }
+
+  if (command === "model") {
+    await commandModel(subcommand, positionals, sharedOptions);
     return;
   }
 

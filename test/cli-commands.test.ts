@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import http from "node:http";
+import path from "node:path";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { AddressInfo } from "node:net";
@@ -235,6 +236,11 @@ const server = http.createServer(async (req, res) => {
           ],
           browserExecutable: null,
           modelConfigured: false,
+          modelProvider: null,
+          modelProviderLabel: null,
+          modelName: null,
+          modelBaseUrl: null,
+          modelTier: null,
           livePackCount: 4,
           readyLivePackCount: 2,
           blockedLivePackCount: 2,
@@ -941,6 +947,7 @@ test("cli setup summarizes readiness and recommended next steps", async () => {
     assert.match(result.stdout, /Good first always-on workflows:/);
     assert.match(result.stdout, /Recommended next steps:/);
     assert.match(result.stdout, /agentos setup --fix/);
+    assert.match(result.stdout, /agentos model setup/);
     assert.match(result.stdout, /agentos packs ls/);
   } finally {
     await api.close();
@@ -976,7 +983,7 @@ test("cli setup --json returns structured onboarding data", async () => {
     assert.equal(Array.isArray(payload.fixableActions), true);
     assert.equal(payload.fixableActions.some((entry: string) => entry.includes("agentos setup --fix")), true);
     assert.equal(Array.isArray(payload.manualSteps), true);
-    assert.equal(payload.manualSteps.some((entry: string) => entry.includes("MODEL_API_KEY")), true);
+    assert.equal(payload.manualSteps.some((entry: string) => entry.includes("agentos model setup")), true);
     assert.equal(Array.isArray(payload.onboardingGuides), true);
     assert.equal(payload.onboardingGuides.some((entry: { id: string }) => entry.id === "model-access"), true);
     assert.equal(
@@ -1000,6 +1007,7 @@ test("cli setup --json returns structured onboarding data", async () => {
     );
     assert.equal(Array.isArray(payload.recommendedActions), true);
     assert.equal(payload.recommendedActions.some((entry: string) => entry.includes("agentos setup --fix")), true);
+    assert.equal(payload.recommendedActions.some((entry: string) => entry.includes("agentos model setup")), true);
     assert.equal(Array.isArray(payload.blockingIssues), true);
   } finally {
     await api.close();
@@ -1098,6 +1106,61 @@ test("cli interactive shell can run /setup --fix --dry-run", async () => {
     assert.match(session.stdout, /Install daemon auto-start for the current user/);
   } finally {
     await api.close();
+    await fs.rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("cli model setup saves a provider config and model status reads it back", async () => {
+  const dataDir = await createTempDir("agentos-model-");
+  const env = {
+    ...process.env,
+    AGENTOS_DATA_DIR: dataDir
+  };
+
+  try {
+    const setupResult = await execFileAsync(
+      process.execPath,
+      [
+        "dist/bin/agentos.js",
+        "model",
+        "setup",
+        "--provider",
+        "anthropic",
+        "--tier",
+        "balanced",
+        "--api-key",
+        "sk-ant-test",
+        "--json"
+      ],
+      {
+        cwd: process.cwd(),
+        env
+      }
+    );
+    const setupPayload = JSON.parse(setupResult.stdout);
+    assert.equal(setupPayload.provider, "anthropic");
+    assert.equal(setupPayload.model, "claude-sonnet-4-5");
+    assert.equal(setupPayload.tier, "balanced");
+
+    const saved = JSON.parse(await fs.readFile(path.join(dataDir, "model-config.json"), "utf8"));
+    assert.equal(saved.provider, "anthropic");
+    assert.equal(saved.name, "claude-sonnet-4-5");
+
+    const statusResult = await execFileAsync(
+      process.execPath,
+      ["dist/bin/agentos.js", "model", "status", "--json"],
+      {
+        cwd: process.cwd(),
+        env
+      }
+    );
+    const statusPayload = JSON.parse(statusResult.stdout);
+    assert.equal(statusPayload.configured, true);
+    assert.equal(statusPayload.provider, "anthropic");
+    assert.equal(statusPayload.model, "claude-sonnet-4-5");
+    assert.equal(statusPayload.apiKey, "sk-a***test");
+    assert.equal(statusPayload.source, "saved_config");
+  } finally {
     await fs.rm(dataDir, { recursive: true, force: true });
   }
 });

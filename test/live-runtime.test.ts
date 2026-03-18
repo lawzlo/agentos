@@ -512,10 +512,10 @@ test("watch governance max auto actions per day downgrades later triggers into d
         preferredSurface: "desktop",
         steps: [
           {
-            label: "Wait briefly",
+            label: "Write a marker file",
             surface: "desktop",
-            action: "wait",
-            params: { ms: 10 },
+            action: "writeFileText",
+            params: { path: "budget-first.txt", text: "first automatic action" },
             checkpoint: false
           }
         ]
@@ -529,10 +529,10 @@ test("watch governance max auto actions per day downgrades later triggers into d
         preferredSurface: "desktop",
         steps: [
           {
-            label: "Wait briefly",
+            label: "Write a marker file",
             surface: "desktop",
-            action: "wait",
-            params: { ms: 10 },
+            action: "writeFileText",
+            params: { path: "budget-second.txt", text: "second automatic action" },
             checkpoint: false
           }
         ]

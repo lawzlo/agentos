@@ -778,6 +778,17 @@ export async function startAgentServer({ dataDir, ...overrides }) {
     port: 0,
     dataDir,
     headless: true,
+    ...(overrides.model
+      ? {}
+      : {
+          model: {
+            provider: "openai_compatible",
+            baseUrl: "",
+            apiKey: "",
+            name: "",
+            timeoutMs: 5000
+          }
+        }),
     ...overrides
   });
   const port = await app.listen();

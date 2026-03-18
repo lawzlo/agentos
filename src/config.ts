@@ -21,10 +21,25 @@ const CHROME_CANDIDATES: Record<string, string[]> = {
 };
 
 export interface AgentModelConfig {
+  provider: AgentModelProvider;
   baseUrl?: string;
   apiKey?: string;
   name?: string;
+  tier?: AgentModelTier;
   timeoutMs: number;
+}
+
+export type AgentModelProvider = "openai" | "anthropic" | "gemini" | "openai_compatible";
+export type AgentModelTier = "fast" | "balanced" | "strong";
+
+export interface PersistedModelConfig {
+  provider?: AgentModelProvider;
+  baseUrl?: string;
+  apiKey?: string;
+  name?: string;
+  tier?: AgentModelTier;
+  timeoutMs?: number;
+  updatedAt?: string;
 }
 
 export interface AgentOsConfig {
@@ -74,6 +89,153 @@ function firstExisting(paths: string[]): string | undefined {
   return paths.find((entry) => fs.existsSync(entry));
 }
 
+const DEFAULT_MODEL_TIER: AgentModelTier = "balanced";
+
+const MODEL_LABELS: Record<AgentModelProvider, string> = {
+  openai: "OpenAI",
+  anthropic: "Anthropic Claude",
+  gemini: "Google Gemini",
+  openai_compatible: "OpenAI-compatible"
+};
+
+const PROVIDER_DEFAULT_BASE_URL: Partial<Record<AgentModelProvider, string>> = {
+  openai: "https://api.openai.com/v1",
+  anthropic: "https://api.anthropic.com",
+  gemini: "https://generativelanguage.googleapis.com/v1beta"
+};
+
+const PROVIDER_DEFAULT_MODELS: Record<AgentModelProvider, Record<AgentModelTier, string | null>> = {
+  openai: {
+    fast: "gpt-5-mini",
+    balanced: "gpt-5",
+    strong: "gpt-5"
+  },
+  anthropic: {
+    fast: "claude-haiku-4-5",
+    balanced: "claude-sonnet-4-5",
+    strong: "claude-opus-4-5"
+  },
+  gemini: {
+    fast: "gemini-2.0-flash",
+    balanced: "gemini-2.5-flash",
+    strong: "gemini-2.5-pro"
+  },
+  openai_compatible: {
+    fast: null,
+    balanced: null,
+    strong: null
+  }
+};
+
+function normalizeModelProvider(value: unknown): AgentModelProvider | null {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+
+  if (normalized === "openai-compatible" || normalized === "openai_compatible" || normalized === "compatible") {
+    return "openai_compatible";
+  }
+
+  if (normalized === "claude") {
+    return "anthropic";
+  }
+
+  return ["openai", "anthropic", "gemini", "openai_compatible"].includes(normalized)
+    ? (normalized as AgentModelProvider)
+    : null;
+}
+
+function normalizeModelTier(value: unknown): AgentModelTier | null {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+  return ["fast", "balanced", "strong"].includes(normalized)
+    ? (normalized as AgentModelTier)
+    : null;
+}
+
+function providerEnvApiKey(provider: AgentModelProvider): string | null {
+  if (provider === "openai") {
+    return process.env.OPENAI_API_KEY ?? null;
+  }
+  if (provider === "anthropic") {
+    return process.env.ANTHROPIC_API_KEY ?? null;
+  }
+  if (provider === "gemini") {
+    return process.env.GEMINI_API_KEY ?? null;
+  }
+  return null;
+}
+
+function resolveModelProvider({
+  overrideProvider,
+  envProvider,
+  persistedProvider,
+  inferredBaseUrl
+}: {
+  overrideProvider?: unknown;
+  envProvider?: unknown;
+  persistedProvider?: unknown;
+  inferredBaseUrl?: unknown;
+}): AgentModelProvider {
+  const explicit =
+    normalizeModelProvider(overrideProvider) ??
+    normalizeModelProvider(envProvider) ??
+    normalizeModelProvider(persistedProvider);
+  if (explicit) {
+    return explicit;
+  }
+
+  return String(inferredBaseUrl ?? "").trim() ? "openai_compatible" : "openai";
+}
+
+export function defaultModelBaseUrl(provider: AgentModelProvider): string | undefined {
+  return PROVIDER_DEFAULT_BASE_URL[provider];
+}
+
+export function defaultModelName(
+  provider: AgentModelProvider,
+  tier: AgentModelTier = DEFAULT_MODEL_TIER
+): string | undefined {
+  return PROVIDER_DEFAULT_MODELS[provider][tier] ?? undefined;
+}
+
+export function modelProviderLabel(provider: AgentModelProvider | null | undefined): string {
+  if (!provider) {
+    return "Not configured";
+  }
+  return MODEL_LABELS[provider];
+}
+
+export function defaultModelTier(): AgentModelTier {
+  return DEFAULT_MODEL_TIER;
+}
+
+export function modelConfigPath(dataDir = defaultDataDir()): string {
+  return path.join(dataDir, "model-config.json");
+}
+
+export function readPersistedModelConfig(dataDir = defaultDataDir()): PersistedModelConfig | null {
+  const target = modelConfigPath(dataDir);
+  try {
+    const raw = fs.readFileSync(target, "utf8");
+    const parsed = JSON.parse(raw) as PersistedModelConfig;
+    return {
+      provider: normalizeModelProvider(parsed.provider) ?? undefined,
+      baseUrl: typeof parsed.baseUrl === "string" ? parsed.baseUrl : undefined,
+      apiKey: typeof parsed.apiKey === "string" ? parsed.apiKey : undefined,
+      name: typeof parsed.name === "string" ? parsed.name : undefined,
+      tier: normalizeModelTier(parsed.tier) ?? undefined,
+      timeoutMs: Number.isFinite(Number(parsed.timeoutMs)) ? Number(parsed.timeoutMs) : undefined,
+      updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : undefined
+    };
+  } catch {
+    return null;
+  }
+}
+
 export function defaultDataDir(): string {
   return path.join(os.homedir(), ".agentos");
 }
@@ -91,6 +253,18 @@ export function resolveConfig(overrides: ConfigOverrides = {}): AgentOsConfig {
     overrides.dataDir ??
     process.env.AGENTOS_DATA_DIR ??
     defaultDataDir();
+  const persistedModel = readPersistedModelConfig(dataDir) ?? {};
+  const resolvedModelProvider = resolveModelProvider({
+    overrideProvider: overrides.model?.provider,
+    envProvider: process.env.MODEL_PROVIDER,
+    persistedProvider: persistedModel.provider,
+    inferredBaseUrl: overrides.model?.baseUrl ?? process.env.MODEL_BASE_URL ?? persistedModel.baseUrl
+  });
+  const resolvedModelTier =
+    normalizeModelTier(overrides.model?.tier) ??
+    normalizeModelTier(process.env.MODEL_TIER) ??
+    normalizeModelTier(persistedModel.tier) ??
+    DEFAULT_MODEL_TIER;
   const daemonDir = path.join(dataDir, "daemon");
   const homeDir = os.homedir();
   const learningMetadataRoots = overrides.learning?.metadataRoots ?? [homeDir];
@@ -126,11 +300,25 @@ export function resolveConfig(overrides: ConfigOverrides = {}): AgentOsConfig {
     browserExecutable: overrides.browserExecutable ?? detectBrowserExecutable(),
     livePacks: overrides.livePacks ?? null,
     model: {
-      baseUrl: overrides.model?.baseUrl ?? process.env.MODEL_BASE_URL,
-      apiKey: overrides.model?.apiKey ?? process.env.MODEL_API_KEY,
-      name: overrides.model?.name ?? process.env.MODEL_NAME,
+      provider: resolvedModelProvider,
+      baseUrl:
+        overrides.model?.baseUrl ??
+        process.env.MODEL_BASE_URL ??
+        persistedModel.baseUrl ??
+        defaultModelBaseUrl(resolvedModelProvider),
+      apiKey:
+        overrides.model?.apiKey ??
+        process.env.MODEL_API_KEY ??
+        providerEnvApiKey(resolvedModelProvider) ??
+        persistedModel.apiKey,
+      name:
+        overrides.model?.name ??
+        process.env.MODEL_NAME ??
+        persistedModel.name ??
+        defaultModelName(resolvedModelProvider, resolvedModelTier),
+      tier: resolvedModelTier,
       timeoutMs: Number(
-        overrides.model?.timeoutMs ?? process.env.MODEL_TIMEOUT_MS ?? 45000
+        overrides.model?.timeoutMs ?? process.env.MODEL_TIMEOUT_MS ?? persistedModel.timeoutMs ?? 45000
       )
     },
     learning: {

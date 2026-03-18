@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
 import os from "node:os";
+import fs from "node:fs/promises";
 
 import { createTempDir } from "./helpers.js";
 import { defaultDataDir, detectBrowserExecutable, resolveConfig } from "../src/config.js";
@@ -115,4 +116,25 @@ test("defaultDataDir resolves under the user's home directory", () => {
       process.env.AGENTOS_DATA_DIR = previous;
     }
   }
+});
+
+test("resolveConfig reads saved model config from the data directory", async () => {
+  const dataDir = await createTempDir("agentos-config-model-");
+  await fs.writeFile(
+    path.join(dataDir, "model-config.json"),
+    JSON.stringify({
+      provider: "anthropic",
+      tier: "balanced",
+      apiKey: "sk-ant-test",
+      name: "claude-sonnet-4-5"
+    }),
+    "utf8"
+  );
+
+  const config = resolveConfig({ dataDir });
+  assert.equal(config.model.provider, "anthropic");
+  assert.equal(config.model.tier, "balanced");
+  assert.equal(config.model.apiKey, "sk-ant-test");
+  assert.equal(config.model.name, "claude-sonnet-4-5");
+  assert.equal(config.model.baseUrl, "https://api.anthropic.com");
 });

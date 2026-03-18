@@ -8,6 +8,7 @@ import type {
 import type { LearningStatus, ProposalRecord } from "./learning.js";
 import type { RuntimeVersionInfo } from "../version.js";
 import type { SidecarHealthResult, SidecarPermissionsResult } from "./native-sidecar.js";
+import type { AgentModelProvider, AgentModelTier } from "../config.js";
 
 export type InstallSource = "source" | "macos_pkg" | "windows_msi" | "unknown";
 
@@ -105,6 +106,11 @@ export interface DoctorReport {
   warnings: string[];
   browserExecutable: string | null;
   modelConfigured: boolean;
+  modelProvider?: AgentModelProvider | null;
+  modelProviderLabel?: string | null;
+  modelName?: string | null;
+  modelBaseUrl?: string | null;
+  modelTier?: AgentModelTier | null;
   livePackCount: number;
   readyLivePackCount: number;
   blockedLivePackCount: number;

@@ -84,16 +84,22 @@ npm run cli:link
 agentos setup
 ```
 
-3. 如果 setup 提示有低风险本地修复项，比如 runtime 目录或自启动，就让 AgentOS 先修掉：
+3. 模型不要再手填环境变量。直接走产品化入口 `agentos model setup`，选择 OpenAI、Claude、Gemini，或者自定义 OpenAI-compatible 服务，再粘贴 API key：
+
+```bash
+agentos model setup
+```
+
+4. 如果 setup 提示有低风险本地修复项，比如 runtime 目录或自启动，就让 AgentOS 先修掉：
 
 ```bash
 agentos setup --fix --dry-run
 agentos setup --fix
 ```
 
-`setup --fix` 只会处理低风险本地修复。浏览器登录态、模型凭据、桌面权限这些仍然需要人手完成，`agentos setup` 会把它们列在手动步骤里。
+`setup --fix` 只会处理低风险本地修复。浏览器登录态和桌面权限这些仍然需要人手完成，`agentos setup` 会把它们列在手动步骤里。模型接入请走 `agentos model setup`。
 
-4. 然后直接进入交互模式，或者先跑一个一次性任务：
+5. 然后直接进入交互模式，或者先跑一个一次性任务：
 
 ```bash
 agentos
@@ -101,7 +107,7 @@ agentos
 agentos "打开 example.com，点击 More information，然后截图" --surface browser
 ```
 
-5. 再加一个长期 watch rule：
+6. 再加一个长期 watch rule：
 
 ```bash
 agentos watch add \
@@ -118,7 +124,7 @@ agentos watch add \
 
 - `agentos setup --fix` 可以补 runtime 目录，并为当前用户安装 daemon 自启动
 - 它不会替你登录 Slack、邮箱、BOSS、Drive、Docs
-- 它不会替你注入模型凭据
+- 模型接入请用 `agentos model setup`，`setup --fix` 不会代你处理 API key
 - 它不会绕过桌面端的辅助功能或屏幕录制权限
 - 跑完 `setup --fix` 之后，建议再跑一遍 `agentos setup`，然后先做一个 smoke test，再加一个低风险长期值守 workflow
 
@@ -127,6 +133,7 @@ agentos watch add \
 如果你想最快感受到价值，可以按这个顺序试：
 
 ```bash
+agentos model setup
 agentos "打开 example.com，点击 More information，然后截图" --surface browser
 agentos "打开一个本地文本编辑器，输入一段短笔记，然后等待我接管" --surface desktop
 agentos jobs add daily_digest --hour 18

@@ -101,6 +101,17 @@ function buildSuggestedCommands({
 }): SetupCommandTemplate[] {
   const commands: SetupCommandTemplate[] = [];
 
+  if (!doctor.modelConfigured) {
+    commands.push({
+      id: "model-setup",
+      label: "Model setup",
+      command: "agentos model setup",
+      reason: "Choose GPT, Claude, Gemini, or a custom OpenAI-compatible endpoint so planning and drafting are fully enabled.",
+      category: "smoke_test",
+      risk: "low"
+    });
+  }
+
   if (doctor.browserExecutable) {
     commands.push({
       id: "browser-smoke",
@@ -325,9 +336,9 @@ function buildStatusChecks({
       status: doctor.modelConfigured ? "ready" : "blocking",
       actionKind: doctor.modelConfigured ? "none" : "manual",
       detail: doctor.modelConfigured
-        ? "Model access is configured."
+        ? `Model access is configured${doctor.modelProviderLabel ? ` via ${doctor.modelProviderLabel}` : ""}${doctor.modelName ? ` (${doctor.modelName})` : ""}.`
         : "Model access is missing, so planning and reply drafting will stay degraded.",
-      nextStep: doctor.modelConfigured ? null : "Set `MODEL_API_KEY`, `MODEL_BASE_URL`, and `MODEL_NAME`."
+      nextStep: doctor.modelConfigured ? null : "Run `agentos model setup` and choose a provider plus API key."
     },
     {
       id: "native-sidecar",
@@ -438,10 +449,10 @@ function buildOnboardingGuides(report: SetupReport): SetupGuide[] {
       actions:
         modelCheck?.status === "blocking"
           ? [
-              "Set `MODEL_API_KEY`, `MODEL_BASE_URL`, and `MODEL_NAME` in the shell or launch environment where you run AgentOS.",
+              "Run `agentos model setup`, choose OpenAI, Claude, Gemini, or a custom OpenAI-compatible provider, then paste the API key.",
               "Rerun `agentos setup` to confirm planning and drafting are enabled."
             ]
-          : ["Model access is ready. You can move on to browser or desktop setup."]
+          : [`Model access is ready${report.doctor.modelProviderLabel ? ` via ${report.doctor.modelProviderLabel}` : ""}. You can move on to browser or desktop setup.`]
     },
     {
       id: "browser-apps",
