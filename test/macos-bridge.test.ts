@@ -28,6 +28,7 @@ rl.on("line", (line) => {
     ocr_image: { observations: [{ text: "Hello AgentOS", confidence: 0.98 }] },
     permissions_status: { accessibility: true, screenRecording: true },
     list_windows: { windows: [{ ownerName: "Finder", windowName: "Desktop", ownerPID: 1, windowNumber: 7, layer: 0, alpha: 1, bounds: { x: 0, y: 0, width: 1440, height: 900, centerX: 720, centerY: 450 } }] },
+    accessibility_snapshot: { appName: "Finder", windows: [{ title: "Desktop", bounds: { x: 0, y: 0, width: 1440, height: 900, centerX: 720, centerY: 450 } }], elements: [{ id: "ax-1", role: "AXButton", title: "Desktop", actions: ["AXPress"], bounds: { x: 10, y: 10, width: 50, height: 20, centerX: 35, centerY: 20 } }] },
     click_at: { ok: true, x: request.params.x, y: request.params.y }
   }[request.method] ?? { ok: true };
   process.stdout.write(JSON.stringify({ id: request.id, ok: true, result }) + "\\n");
@@ -64,6 +65,10 @@ rl.on("line", (line) => {
     const windows = await bridge.listWindows();
     assert.equal(windows.windows[0].ownerName, "Finder");
 
+    const accessibility = await bridge.getAccessibilitySnapshot("Finder");
+    assert.equal(accessibility.appName, "Finder");
+    assert.equal(accessibility.elements[0].role, "AXButton");
+
     const click = await bridge.clickAt(120, 240) as Record<string, any>;
     assert.equal(click.ok, true);
     await bridge.shutdown();
@@ -99,7 +104,8 @@ rl.on("line", (line) => {
     ocr_image: { observations: [{ text: "Sidecar OCR", confidence: 0.91, box: { x: 0, y: 0, width: 10, height: 10, centerX: 5, centerY: 5 } }] },
     find_text: { found: true, match: { text: request.params.query, confidence: 0.99, box: { x: 10, y: 20, width: 30, height: 40, centerX: 25, centerY: 40 } }, count: 1 },
     permissions_status: { accessibility: true, screenRecording: false },
-    list_windows: { windows: [{ ownerName: "SidecarApp", windowName: "Inbox", ownerPID: 99, windowNumber: 1, layer: 0, alpha: 1, bounds: { x: 1, y: 2, width: 3, height: 4, centerX: 2.5, centerY: 4 } }] }
+    list_windows: { windows: [{ ownerName: "SidecarApp", windowName: "Inbox", ownerPID: 99, windowNumber: 1, layer: 0, alpha: 1, bounds: { x: 1, y: 2, width: 3, height: 4, centerX: 2.5, centerY: 4 } }] },
+    accessibility_snapshot: { appName: "SidecarApp", windows: [{ title: "Inbox", bounds: { x: 1, y: 2, width: 3, height: 4, centerX: 2.5, centerY: 4 } }], elements: [{ id: "ax-compose", role: "AXTextArea", description: "Message", actions: ["AXPress"], bounds: { x: 10, y: 20, width: 100, height: 30, centerX: 60, centerY: 35 } }] }
   };
   process.stdout.write(JSON.stringify({ id: request.id, ok: true, result: results[request.method] ?? { ok: true } }) + "\\n");
 });`,
@@ -129,6 +135,10 @@ rl.on("line", (line) => {
 
     const windows = await bridge.listWindows();
     assert.equal(windows.windows[0].windowName, "Inbox");
+
+    const accessibility = await bridge.getAccessibilitySnapshot("SidecarApp");
+    assert.equal(accessibility.windows[0].title, "Inbox");
+    assert.equal(accessibility.elements[0].description, "Message");
 
     await bridge.shutdown();
   } finally {

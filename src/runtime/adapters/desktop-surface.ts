@@ -4,7 +4,9 @@ import path from "node:path";
 import { SurfaceAdapter } from "./surface-adapter.js";
 import { MacOSHostBridge } from "../host-bridges/macos-bridge.js";
 import { WindowsHostBridge } from "../host-bridges/windows-bridge.js";
-import { createInteractionCandidate, createWorldState, normalizeOcrBlocks, summarizeRecentActions } from "../world-state.js";
+import { createInteractionCandidate, createWorldState, normalizeBounds, normalizeOcrBlocks, summarizeRecentActions } from "../world-state.js";
+import type { BoundsLike } from "../world-state.js";
+import type { SidecarAccessibilityElementInfo, SidecarAccessibilitySnapshotResult } from "../../types/native-sidecar.js";
 
 function pickBridge(options) {
   if (process.platform === "darwin") {
@@ -35,6 +37,181 @@ function resolveAppName(params: Record<string, unknown>) {
 
   const appName = typeof params.appName === "string" && params.appName.trim() ? params.appName : null;
   return appName;
+}
+
+function uniqueStrings(values: unknown[]) {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of values) {
+    const text = String(value ?? "").trim();
+    if (!text) {
+      continue;
+    }
+    const key = text.toLowerCase();
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    result.push(text);
+  }
+  return result;
+}
+
+function normalizeAppKey(value: unknown) {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase();
+}
+
+function pointWithinBounds(x: number, y: number, bounds: { x: number; y: number; width: number; height: number }) {
+  return x >= bounds.x && x <= bounds.x + bounds.width && y >= bounds.y && y <= bounds.y + bounds.height;
+}
+
+function filterOcrBlocksToFrontmostWindows({
+  ocrBlocks,
+  frontmostApp,
+  windows
+}: {
+  ocrBlocks: Array<{ text?: string; bounds?: { centerX?: number; centerY?: number } }>;
+  frontmostApp: Record<string, unknown> | null;
+  windows: Array<Record<string, unknown>>;
+}) {
+  const appKey = normalizeAppKey(frontmostApp?.appName);
+  if (!appKey) {
+    return ocrBlocks;
+  }
+
+  const matchingWindows = windows.filter((windowInfo) => {
+    const ownerName = normalizeAppKey(windowInfo.ownerName);
+    const windowName = normalizeAppKey(windowInfo.windowName);
+    return ownerName.includes(appKey) || windowName.includes(appKey);
+  });
+
+  if (!matchingWindows.length) {
+    return ocrBlocks;
+  }
+
+  const filtered = ocrBlocks.filter((block) => {
+    const centerX = Number(block?.bounds?.centerX);
+    const centerY = Number(block?.bounds?.centerY);
+    if (!Number.isFinite(centerX) || !Number.isFinite(centerY)) {
+      return false;
+    }
+
+    return matchingWindows.some((windowInfo) => {
+      const bounds = windowInfo.bounds as { x: number; y: number; width: number; height: number } | undefined;
+      if (!bounds) {
+        return false;
+      }
+      return pointWithinBounds(centerX, centerY, bounds);
+    });
+  });
+
+  return filtered.length ? filtered : ocrBlocks;
+}
+
+function normalizeAccessibilityRole(role: unknown, subrole: unknown) {
+  const roleKey = String(role ?? "").trim().toLowerCase();
+  const subroleKey = String(subrole ?? "").trim().toLowerCase();
+
+  if (roleKey.includes("text area") || roleKey.includes("text field") || roleKey.includes("search field")) {
+    return "textbox";
+  }
+  if (roleKey.includes("button")) {
+    return "button";
+  }
+  if (roleKey.includes("link")) {
+    return "link";
+  }
+  if (roleKey.includes("row")) {
+    return "row";
+  }
+  if (roleKey.includes("checkbox")) {
+    return "checkbox";
+  }
+  if (roleKey.includes("static text") || roleKey.includes("text")) {
+    return "text";
+  }
+  if (roleKey.includes("group") && subroleKey.includes("text")) {
+    return "text";
+  }
+
+  return roleKey || null;
+}
+
+function accessibilityElementText(element: SidecarAccessibilityElementInfo) {
+  const values = uniqueStrings([element.title, element.value, element.description]);
+  return values[0] ?? "";
+}
+
+function isAccessibilityElementInteractive(element: SidecarAccessibilityElementInfo, role: string | null) {
+  const actions = Array.isArray(element.actions) ? element.actions.map((entry) => String(entry ?? "").toLowerCase()) : [];
+  if (actions.some((action) => action.includes("press") || action.includes("confirm"))) {
+    return true;
+  }
+
+  return ["textbox", "button", "link", "row", "checkbox"].includes(String(role ?? "").toLowerCase());
+}
+
+function createAccessibilityCandidates(snapshot: SidecarAccessibilitySnapshotResult | null, surface = "desktop") {
+  const elements = Array.isArray(snapshot?.elements) ? snapshot.elements : [];
+  return elements
+    .map((element, index) => {
+      const role = normalizeAccessibilityRole(element.role, element.subrole);
+      const text = accessibilityElementText(element);
+      const bounds = element.bounds ? normalizeBounds(element.bounds as BoundsLike) : null;
+      if (!text || !bounds) {
+        return null;
+      }
+
+      return createInteractionCandidate(
+        {
+          id: element.id ?? `${surface}-ax-${index + 1}`,
+          kind: "element",
+          text,
+          role,
+          bounds,
+          confidence: 0.98,
+          sourceHints: {
+            source: "accessibility",
+            ariaLabel: element.title ?? "",
+            placeholder: element.description ?? "",
+            value: element.value ?? "",
+            roleDescription: element.subrole ?? "",
+            actions: Array.isArray(element.actions) ? element.actions : [],
+            windowTitle: element.windowTitle ?? "",
+            axRole: element.role ?? "",
+            axSubrole: element.subrole ?? "",
+            focused: Boolean(element.focused),
+            enabled: element.enabled !== false
+          },
+          isInteractive: isAccessibilityElementInteractive(element, role)
+        },
+        index,
+        surface
+      );
+    })
+    .filter(Boolean);
+}
+
+function dedupeInteractionCandidates(candidates: Array<Record<string, unknown>>) {
+  const seen = new Set<string>();
+  const result: Array<Record<string, unknown>> = [];
+  for (const candidate of candidates) {
+    const bounds = (candidate.bounds ?? {}) as Record<string, unknown>;
+    const key = [
+      String(candidate.text ?? "").trim().toLowerCase(),
+      String(candidate.role ?? "").trim().toLowerCase(),
+      Math.round(Number(bounds.centerX ?? 0)),
+      Math.round(Number(bounds.centerY ?? 0))
+    ].join(":");
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    result.push(candidate);
+  }
+  return result;
 }
 
 export class DesktopSurfaceAdapter extends SurfaceAdapter {
@@ -73,6 +250,15 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
     );
   }
 
+  #visibleText(accessibilityCandidates, ocrBlocks) {
+    return uniqueStrings([
+      ...accessibilityCandidates.map((candidate) => candidate.text),
+      ...ocrBlocks.map((block) => block.text)
+    ])
+      .join("\n")
+      .slice(0, 4000);
+  }
+
   async discover() {
     return this.#requireBridge().getFrontmostApp();
   }
@@ -90,7 +276,21 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
         ? bridge.getPermissionsStatus().catch(() => null)
         : null
     ]);
-    const ocrBlocks = normalizeOcrBlocks(ocr.observations ?? [], "desktop");
+    const accessibility =
+      typeof bridge.getAccessibilitySnapshot === "function" && frontmostApp?.appName
+        ? await bridge.getAccessibilitySnapshot(String(frontmostApp.appName)).catch(() => null)
+        : null;
+    const ocrBlocks = filterOcrBlocksToFrontmostWindows({
+      ocrBlocks: normalizeOcrBlocks(ocr.observations ?? [], "desktop"),
+      frontmostApp: (frontmostApp ?? null) as Record<string, unknown> | null,
+      windows: Array.isArray(windows.windows) ? (windows.windows as Array<Record<string, unknown>>) : []
+    });
+    const accessibilityCandidates = createAccessibilityCandidates(accessibility, "desktop");
+    const interactionCandidates = dedupeInteractionCandidates([
+      ...accessibilityCandidates,
+      ...this.#createCandidates(ocrBlocks)
+    ]);
+    const visibleText = this.#visibleText(accessibilityCandidates, ocrBlocks);
 
     return createWorldState({
       surface: "desktop",
@@ -98,14 +298,15 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
       appContext: {
         ...frontmostApp,
         windows: windows.windows ?? [],
-        permissions
+        permissions,
+        accessibility
       },
       capture,
       ocrBlocks,
-      interactionCandidates: this.#createCandidates(ocrBlocks),
-      visibleText: ocrBlocks.map((block) => block.text).join("\n").slice(0, 4000),
+      interactionCandidates,
+      visibleText,
       recentActions: summarizeRecentActions(recentActions),
-      summary: `${frontmostApp.appName} with ${ocrBlocks.length} OCR observations across ${(windows.windows ?? []).length} windows`
+      summary: `${frontmostApp.appName} with ${accessibilityCandidates.length} accessibility candidates and ${ocrBlocks.length} OCR observations across ${(windows.windows ?? []).length} windows`
     });
   }
 

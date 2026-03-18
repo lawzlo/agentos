@@ -1381,14 +1381,36 @@ test("slack desktop pack can detect unread threads and build reply steps from a 
     ocrBlocks: [],
     interactionCandidates: [
       {
+        id: "nav-threads",
+        surface: "desktop",
+        kind: "text",
+        text: "@ Threads",
+        role: "button",
+        bounds: { x: 10, y: 10, width: 140, height: 24, centerX: 80, centerY: 22 },
+        confidence: 0.8,
+        sourceHints: { source: "ocr", ariaLabel: "Threads" },
+        isInteractive: true
+      },
+      {
+        id: "nav-drafts",
+        surface: "desktop",
+        kind: "text",
+        text: "Drafts & sent",
+        role: "button",
+        bounds: { x: 10, y: 40, width: 140, height: 24, centerX: 80, centerY: 52 },
+        confidence: 0.8,
+        sourceHints: { source: "ocr" },
+        isInteractive: true
+      },
+      {
         id: "thread-acme",
         surface: "desktop",
         kind: "text",
         text: "Unread: Acme renewal",
-        role: "text",
+        role: "button",
         bounds: { x: 10, y: 10, width: 140, height: 24, centerX: 80, centerY: 22 },
-        confidence: 0.8,
-        sourceHints: { source: "ocr" },
+        confidence: 0.98,
+        sourceHints: { source: "accessibility", ariaLabel: "Unread thread Acme renewal", actions: ["AXPress"] },
         isInteractive: true
       }
     ],
@@ -1418,8 +1440,8 @@ test("slack desktop pack can detect unread threads and build reply steps from a 
         text: "Message",
         role: "textbox",
         bounds: { x: 10, y: 200, width: 240, height: 32, centerX: 130, centerY: 216 },
-        confidence: 0.8,
-        sourceHints: { source: "ocr", placeholder: "Message" },
+        confidence: 0.98,
+        sourceHints: { source: "accessibility", placeholder: "Message", actions: ["AXPress"] },
         isInteractive: true
       },
       {
@@ -1429,8 +1451,8 @@ test("slack desktop pack can detect unread threads and build reply steps from a 
         text: "Send",
         role: "button",
         bounds: { x: 260, y: 200, width: 60, height: 32, centerX: 290, centerY: 216 },
-        confidence: 0.8,
-        sourceHints: { source: "ocr" },
+        confidence: 0.98,
+        sourceHints: { source: "accessibility", actions: ["AXPress"] },
         isInteractive: true
       }
     ],
@@ -1496,6 +1518,8 @@ test("slack desktop pack can detect unread threads and build reply steps from a 
   });
   assert.equal(detection?.summary, "Acme renewal");
   assert.equal(detection?.metadata?.threadKey, "acme renewal");
+  const openCandidate = detection?.metadata?.openCandidate as { sourceHints?: { source?: string } } | undefined;
+  assert.equal(openCandidate?.sourceHints?.source, "accessibility");
 
   const context = await pack?.extractContext?.({
     rule,
@@ -1514,6 +1538,83 @@ test("slack desktop pack can detect unread threads and build reply steps from a 
   assert.equal(Array.isArray(context?.taskSpec?.steps), true);
   assert.equal(context?.taskSpec?.steps?.[0]?.action, "clickTarget");
   assert.equal(context?.taskSpec?.steps?.[2]?.params?.text, "{{typeText}}");
+});
+
+test("slack desktop pack ignores detections when Slack is not the foreground app", async () => {
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({})
+  });
+  const pack = registry.get("slack-desktop");
+  const rule: WatchRule = {
+    id: "watch-slack-background",
+    goal: "Always watch Slack and reply to unread threads",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "slack-desktop-main",
+    skillName: null,
+    appTarget: "Slack",
+    livePack: "slack-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-slack-background",
+    name: "slack-desktop-main",
+    rootPath: "/tmp/slack-desktop-main",
+    profilePath: "/tmp/slack-desktop-main/profile",
+    downloadsPath: "/tmp/slack-desktop-main/downloads",
+    artifactsPath: "/tmp/slack-desktop-main/artifacts",
+    scratchPath: "/tmp/slack-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: {
+      version: 1,
+      surface: "desktop",
+      workspaceId: "workspace-terminal",
+      appContext: {
+        appName: "Terminal",
+        windows: [{ title: "Terminal" }]
+      },
+      capture: null,
+      ocrBlocks: [],
+      interactionCandidates: [
+        {
+          id: "thread-bad-read",
+          surface: "desktop",
+          kind: "text",
+          text: "# bonkr",
+          role: "button",
+          bounds: { x: 10, y: 10, width: 120, height: 24, centerX: 70, centerY: 22 },
+          confidence: 0.8,
+          sourceHints: { source: "ocr", ariaLabel: "Unread thread bonkr" },
+          isInteractive: true
+        }
+      ],
+      visibleText: "Terminal\nnode --trace-warnings\n# bonkr",
+      recentActions: [],
+      summary: "Terminal",
+      timestamp: new Date().toISOString()
+    } as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {} as never
+  });
+
+  assert.equal(detection, null);
 });
 
 test("wechat desktop pack can detect unread conversations and build reply steps from a desktop world state", async () => {

@@ -70,6 +70,31 @@ export interface SidecarListWindowsResult {
   windows: SidecarWindowInfo[];
 }
 
+export interface SidecarAccessibilityWindowInfo {
+  title: string;
+  bounds: SidecarBounds | null;
+}
+
+export interface SidecarAccessibilityElementInfo {
+  id: string;
+  role: string;
+  subrole?: string | null;
+  title?: string | null;
+  value?: string | null;
+  description?: string | null;
+  enabled?: boolean;
+  focused?: boolean;
+  actions?: string[];
+  windowTitle?: string | null;
+  bounds?: SidecarBounds | null;
+}
+
+export interface SidecarAccessibilitySnapshotResult {
+  appName: string;
+  windows: SidecarAccessibilityWindowInfo[];
+  elements: SidecarAccessibilityElementInfo[];
+}
+
 export interface SidecarCaptureParams {
   filePath: string;
 }

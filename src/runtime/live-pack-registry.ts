@@ -56,6 +56,8 @@ const SEND_PATTERN = /(send|reply|submit|发送|回复|提交)/iu;
 const UNREAD_PATTERN = /(unread|mention|new message|new messages|未读|新消息)/iu;
 const SLACK_UI_CHROME_PATTERN =
   /^(search|compose|home|later|activity|more|threads|drafts|canvas|huddle|send|reply|message|messages|slack|搜索|撰写|发送|回复|消息)$/iu;
+const SLACK_NAVIGATION_PATTERN =
+  /^(threads|drafts(?:\s*&\s*sent)?|directories|huddles?|starred|direct messages|channels|later|activity|home|canvas|more)$/iu;
 const WECHAT_UI_CHROME_PATTERN =
   /^(wechat|微信|搜索|search|send|发送|reply|回复|聊天信息|聊天记录|通讯录|contacts|发现|moments|我|me|文件传输助手|表情|图片|文件|语音消息)$/iu;
 const MAIL_UI_CHROME_PATTERN =
@@ -621,8 +623,48 @@ function normalizeSlackSummary(value: string): string {
     .trim();
 }
 
+function slackChromeKey(text: string): string {
+  return normalizeSlackSummary(text)
+    .replace(/^[*@]\s*/u, "")
+    .replace(/^\d+[a-z]?\s+/iu, "")
+    .replace(/\s+/gu, " ")
+    .trim()
+    .toLowerCase();
+}
+
 function isSlackUiChrome(text: string): boolean {
-  return SLACK_UI_CHROME_PATTERN.test(String(text ?? "").trim());
+  const raw = String(text ?? "").trim();
+  const key = slackChromeKey(raw);
+  return (
+    SLACK_UI_CHROME_PATTERN.test(raw) ||
+    SLACK_UI_CHROME_PATTERN.test(key) ||
+    SLACK_NAVIGATION_PATTERN.test(key)
+  );
+}
+
+function isSlackDesktopForeground(worldState: WorldState | null): boolean {
+  if (!worldState || worldState.surface !== "desktop") {
+    return true;
+  }
+
+  const appContext = (worldState.appContext ?? {}) as Record<string, unknown>;
+  const appName = String(appContext.appName ?? "").trim().toLowerCase();
+  if (appName.includes("slack")) {
+    return true;
+  }
+
+  const windows = Array.isArray(appContext.windows) ? (appContext.windows as Array<Record<string, unknown>>) : [];
+  return windows.some((windowInfo) =>
+    String(windowInfo?.title ?? windowInfo?.windowName ?? "").toLowerCase().includes("slack")
+  );
+}
+
+function preferAccessibilityCandidates(worldState: WorldState | null): InteractionCandidate[] {
+  const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
+  const accessibilityCandidates = candidates.filter(
+    (candidate) => String((candidate.sourceHints ?? {}).source ?? "").toLowerCase() === "accessibility"
+  );
+  return accessibilityCandidates.length ? accessibilityCandidates : candidates;
 }
 
 function scoreSlackCandidate({
@@ -641,6 +683,12 @@ function scoreSlackCandidate({
   let score = candidate.isInteractive ? 12 : 4;
   if (candidate.role === "link" || candidate.role === "button") {
     score += 4;
+  }
+  if (String((candidate.sourceHints ?? {}).source ?? "").toLowerCase() === "accessibility") {
+    score += 12;
+  }
+  if (candidate.role === "row") {
+    score += 6;
   }
   if (UNREAD_PATTERN.test(hintText)) {
     score += 30;
@@ -669,7 +717,7 @@ function scoreSlackCandidate({
 }
 
 function findSlackUnreadCandidate(worldState: WorldState | null): InteractionCandidate | null {
-  const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
+  const candidates = preferAccessibilityCandidates(worldState);
   const ranked = candidates
     .map((candidate) => ({ candidate, score: scoreSlackCandidate({ candidate, worldState }) }))
     .filter((entry): entry is { candidate: InteractionCandidate; score: number } => Number.isFinite(entry.score))
@@ -686,7 +734,7 @@ function defaultLocalizedTarget(surface: LivePackSurface, kind: "compose" | "sen
 }
 
 function pickSlackComposeQuery(worldState: WorldState | null, surface: LivePackSurface): string {
-  const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
+  const candidates = preferAccessibilityCandidates(worldState);
   const composeCandidate =
     candidates.find((candidate) => {
       const hintText = candidateHintText(candidate);
@@ -709,7 +757,7 @@ function pickSlackComposeQuery(worldState: WorldState | null, surface: LivePackS
 }
 
 function pickSlackSendQuery(worldState: WorldState | null, surface: LivePackSurface): string {
-  const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
+  const candidates = preferAccessibilityCandidates(worldState);
   const sendCandidate =
     candidates.find((candidate) => {
       const hintText = candidateHintText(candidate);
@@ -1585,6 +1633,37 @@ async function observeWatchSurface({
     return null;
   }
 
+  if (surface === "desktop" && rule.appTarget) {
+    const watchTask = createWatchTask(rule);
+    const watchWorkspace = profileAsWorkspace(rule, workspace);
+    const focusStep = {
+      id: `watch-refocus-${rule.id}`,
+      action: "focusApp",
+      surface,
+      params: { name: rule.appTarget }
+    };
+    if (typeof (adapter as { focus?: unknown }).focus === "function") {
+      await (adapter as { focus: (args: unknown) => Promise<unknown> })
+        .focus({
+          task: watchTask,
+          workspace: watchWorkspace,
+          traceId: null,
+          step: focusStep
+        })
+        .catch(() => null);
+    } else {
+      await adapter
+        .act({
+          task: watchTask,
+          workspace: watchWorkspace,
+          traceId: null,
+          outputs: {},
+          step: focusStep
+        } as never)
+        .catch(() => null);
+    }
+  }
+
   return (await adapter.observe({
     task: createWatchTask(rule),
     workspace: profileAsWorkspace(rule, workspace),
@@ -1736,6 +1815,10 @@ function createSlackPack({
         if (manualIntervention) {
           return manualIntervention;
         }
+      }
+
+      if (surface === "desktop" && !isSlackDesktopForeground(worldState)) {
+        return null;
       }
 
       const candidate = findSlackUnreadCandidate(worldState);
