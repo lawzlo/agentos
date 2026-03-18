@@ -20,10 +20,13 @@ import { commandLearn } from "./commands/learn-command.js";
 import { commandMemory } from "./commands/memory-command.js";
 import { commandDigest } from "./commands/digest-command.js";
 import { commandProposals } from "./commands/proposals-command.js";
+import { runInteractiveShell } from "./interactive-shell.js";
 import { boolOption, parseArgs, print, type CliOptions } from "./cli-utils.js";
 
 function helpText() {
-  return `agentos daemon start|stop|status|logs|restart|install|uninstall
+  return `agentos
+agentos "<goal>" [--surface browser|desktop] [--workspace name] [--wait]
+agentos daemon start|stop|status|logs|restart|install|uninstall
 agentos run "<goal>" [--surface browser|desktop] [--workspace name] [--skill name] [--input key=value] [--wait]
 agentos doctor [--bundle]
 agentos version
@@ -46,8 +49,43 @@ agentos digest run
 agentos proposals ls|accept|reject`;
 }
 
+function isKnownCommand(command: string | undefined) {
+  return [
+    "daemon",
+    "run",
+    "doctor",
+    "version",
+    "ps",
+    "inspect",
+    "logs",
+    "control",
+    "teach-step",
+    "watch",
+    "drafts",
+    "packs",
+    "skills",
+    "learn",
+    "memory",
+    "digest",
+    "proposals",
+    "chat",
+    "shell"
+  ].includes(String(command ?? ""));
+}
+
 async function main() {
-  const [command, rawSubcommand, ...restArgs] = process.argv.slice(2);
+  if (process.argv.length <= 2) {
+    await runInteractiveShell({});
+    return;
+  }
+
+  const allArgs = process.argv.slice(2);
+  const parsedAll = parseArgs(allArgs);
+  const allOptions: CliOptions = {
+    ...parsedAll.options,
+    json: boolOption(parsedAll.options.json)
+  };
+  const [command, rawSubcommand, ...restArgs] = allArgs;
   const subcommand = rawSubcommand?.startsWith("--") ? undefined : rawSubcommand;
   const rest = rawSubcommand?.startsWith("--") ? [rawSubcommand, ...restArgs] : restArgs;
   const { positionals, options } = parseArgs(rest);
@@ -58,6 +96,26 @@ async function main() {
 
   if (!command || command === "help" || command === "--help") {
     print(helpText(), sharedOptions);
+    return;
+  }
+
+  if (String(command).startsWith("--") && !parsedAll.positionals.length) {
+    await runInteractiveShell(allOptions);
+    return;
+  }
+
+  if (command === "chat" || command === "shell") {
+    await runInteractiveShell(sharedOptions);
+    return;
+  }
+
+  if (!isKnownCommand(command)) {
+    const directOptions: CliOptions = {
+      ...parsedAll.options,
+      json: boolOption(parsedAll.options.json),
+      wait: parsedAll.options.wait == null ? true : parsedAll.options.wait
+    };
+    await commandRun(parsedAll.positionals, directOptions);
     return;
   }
 

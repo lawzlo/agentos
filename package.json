@@ -12,6 +12,8 @@
     "dev": "npm run build:ts && node dist/src/index.js",
     "test": "npm run build:ts && node scripts/run-tests.mjs",
     "build:ts": "node scripts/build-ts.mjs",
+    "cli:link": "npm run build:ts && npm link",
+    "cli:unlink": "npm unlink -g agentos",
     "typecheck": "tsc --noEmit",
     "native:build": "cargo build --manifest-path rust/agentos-native/Cargo.toml --release",
     "package:release": "node scripts/package-release.mjs",

@@ -2,13 +2,44 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import http from "node:http";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { AddressInfo } from "node:net";
 
 import { createTempDir } from "./helpers.js";
 
 const execFileAsync = promisify(execFile);
+
+async function runCliSession(args: string[], input: string, env: NodeJS.ProcessEnv) {
+  return new Promise<{ stdout: string; stderr: string; code: number | null }>((resolve, reject) => {
+    const child = spawn(process.execPath, args, {
+      cwd: process.cwd(),
+      env,
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout.on("data", (chunk) => {
+      stdout += String(chunk);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    child.on("error", reject);
+    child.on("exit", (code) => {
+      if (code === 0) {
+        resolve({ stdout, stderr, code });
+        return;
+      }
+      reject(new Error(`CLI session exited with code ${code}: ${stderr || stdout}`));
+    });
+
+    child.stdin.write(input);
+    child.stdin.end();
+  });
+}
 
 interface CliTraceEvent {
   message: string;
@@ -479,6 +510,60 @@ test("cli run --wait returns completed task when polling", async () => {
     );
     const done = JSON.parse(createResult.stdout);
     assert.equal(done.status, "completed");
+  } finally {
+    await api.close();
+    await fs.rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("cli can run a natural-language goal directly without the run subcommand", async () => {
+  const dataDir = await createTempDir("agentos-cli-");
+  const api = await startCliApiFixture();
+  const env = {
+    ...process.env,
+    AGENTOS_BASE_URL: api.baseUrl,
+    AGENTOS_DATA_DIR: dataDir
+  };
+
+  try {
+    const result = await execFileAsync(
+      process.execPath,
+      ["dist/bin/agentos.js", "Prepare quarterly update directly", "--surface", "desktop", "--json"],
+      { cwd: process.cwd(), env }
+    );
+    const payload = JSON.parse(result.stdout);
+    assert.equal(payload.status, "completed");
+    assert.equal(api.state.lastTaskBody?.goal, "Prepare quarterly update directly");
+    assert.equal(api.state.lastTaskBody?.preferredSurface, "desktop");
+  } finally {
+    await api.close();
+    await fs.rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("cli interactive shell accepts natural-language tasks with slash-command defaults", async () => {
+  const dataDir = await createTempDir("agentos-cli-");
+  const api = await startCliApiFixture();
+  const env = {
+    ...process.env,
+    AGENTOS_BASE_URL: api.baseUrl,
+    AGENTOS_DATA_DIR: dataDir
+  };
+
+  try {
+    const session = await runCliSession(
+      ["dist/bin/agentos.js"],
+      "/surface browser\n/workspace cli-main\nPrepare the inbox summary\n/exit\n",
+      env
+    );
+
+    assert.match(session.stdout, /AgentOS interactive shell/);
+    assert.match(session.stdout, /Default surface: browser/);
+    assert.match(session.stdout, /Default workspace: cli-main/);
+    assert.match(session.stdout, /COMPLETED task-1/);
+    assert.equal(api.state.lastTaskBody?.goal, "Prepare the inbox summary");
+    assert.equal(api.state.lastTaskBody?.preferredSurface, "browser");
+    assert.equal(api.state.lastTaskBody?.workspaceName, "cli-main");
   } finally {
     await api.close();
     await fs.rm(dataDir, { recursive: true, force: true });
