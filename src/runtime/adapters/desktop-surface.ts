@@ -27,6 +27,16 @@ function resolveWorkspacePath(workspace, targetPath) {
   return path.isAbsolute(raw) ? raw : path.resolve(workspace.rootPath, raw);
 }
 
+function resolveAppName(params: Record<string, unknown>) {
+  const name = typeof params.name === "string" && params.name.trim() ? params.name : null;
+  if (name) {
+    return name;
+  }
+
+  const appName = typeof params.appName === "string" && params.appName.trim() ? params.appName : null;
+  return appName;
+}
+
 export class DesktopSurfaceAdapter extends SurfaceAdapter {
   artifactStore: any;
   bridge: any;
@@ -116,8 +126,9 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
   async focus(args: { step?: { params?: Record<string, unknown> } } = {}) {
     const bridge = this.#requireBridge();
     const step = args.step;
-    if (step.params?.name) {
-      return bridge.focusApp(step.params.name);
+    const appName = step?.params ? resolveAppName(step.params) : null;
+    if (appName) {
+      return bridge.focusApp(appName);
     }
 
     return { focused: false };
@@ -166,10 +177,20 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
     const bridge = this.#requireBridge();
 
     switch (step.action) {
-      case "launchApp":
-        return bridge.launchApp(params.name);
-      case "focusApp":
-        return bridge.focusApp(params.name);
+      case "launchApp": {
+        const appName = resolveAppName(params);
+        if (!appName) {
+          throw new Error("launchApp requires a name or appName parameter.");
+        }
+        return bridge.launchApp(appName);
+      }
+      case "focusApp": {
+        const appName = resolveAppName(params);
+        if (!appName) {
+          throw new Error("focusApp requires a name or appName parameter.");
+        }
+        return bridge.focusApp(appName);
+      }
       case "typeText":
         return bridge.typeText(params.text ?? "");
       case "pressKey":
