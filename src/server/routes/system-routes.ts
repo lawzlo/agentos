@@ -1,5 +1,6 @@
 import { json } from "../http-utils.js";
 import { getDaemonInstallStatus } from "../../daemon-autostart.js";
+import { detectInstallSource } from "../../install-source.js";
 import type { ApiRouteContext } from "../types.js";
 import type { DaemonStatus } from "../../types/system.js";
 
@@ -12,12 +13,14 @@ export async function handleSystemRoutes({
   activePort,
   startedAt
 }: ApiRouteContext): Promise<boolean> {
+  const installSource = await detectInstallSource();
   const daemon: DaemonStatus = {
     running: true,
     pid: process.pid,
     port: activePort,
     startedAt,
-    dataDir: config.dataDir
+    dataDir: config.dataDir,
+    installSource
   };
 
   if (req.method === "GET" && url.pathname === "/health") {

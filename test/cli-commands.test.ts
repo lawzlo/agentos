@@ -642,6 +642,7 @@ test("cli interactive shell accepts natural-language tasks with slash-command de
       env
     );
 
+    assert.match(session.stdout, /AgentOS onboarding/);
     assert.match(session.stdout, /AgentOS interactive shell/);
     assert.match(session.stdout, /Default surface: browser/);
     assert.match(session.stdout, /Default workspace: cli-main/);
@@ -672,9 +673,10 @@ test("cli setup summarizes readiness and recommended next steps", async () => {
 
     assert.match(result.stdout, /AgentOS setup/);
     assert.match(result.stdout, /Status: needs attention/);
+    assert.match(result.stdout, /Install source: source checkout or npm link/);
     assert.match(result.stdout, /Auto-start: not installed, launchd/);
     assert.match(result.stdout, /Recommended next steps:/);
-    assert.match(result.stdout, /agentos daemon install/);
+    assert.match(result.stdout, /agentos setup --fix/);
     assert.match(result.stdout, /agentos packs ls/);
   } finally {
     await api.close();
@@ -700,10 +702,39 @@ test("cli setup --json returns structured onboarding data", async () => {
     const payload = JSON.parse(result.stdout);
     assert.equal(payload.startedDaemon, false);
     assert.equal(payload.daemon.running, true);
+    assert.equal(payload.installSource.source, "source");
     assert.equal(payload.doctor.modelConfigured, false);
     assert.equal(payload.doctor.blockedLivePackCount, 2);
     assert.equal(Array.isArray(payload.recommendedActions), true);
-    assert.equal(payload.recommendedActions.some((entry: string) => entry.includes("agentos daemon install")), true);
+    assert.equal(payload.recommendedActions.some((entry: string) => entry.includes("agentos setup --fix")), true);
+    assert.equal(Array.isArray(payload.blockingIssues), true);
+  } finally {
+    await api.close();
+    await fs.rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("cli setup --fix --dry-run reports planned low-risk fixes", async () => {
+  const dataDir = await createTempDir("agentos-cli-");
+  const api = await startCliApiFixture();
+  const env = {
+    ...process.env,
+    AGENTOS_BASE_URL: api.baseUrl,
+    AGENTOS_DATA_DIR: dataDir
+  };
+
+  try {
+    const result = await execFileAsync(process.execPath, ["dist/bin/agentos.js", "setup", "--fix", "--dry-run", "--json"], {
+      cwd: process.cwd(),
+      env
+    });
+
+    const payload = JSON.parse(result.stdout);
+    assert.equal(Array.isArray(payload.plannedFixes), true);
+    assert.equal(payload.plannedFixes.some((entry: string) => entry.includes("runtime directory")), true);
+    assert.equal(payload.plannedFixes.some((entry: string) => entry.includes("auto-start")), true);
+    assert.equal(Array.isArray(payload.appliedFixes), true);
+    assert.equal(payload.appliedFixes.length, 0);
   } finally {
     await api.close();
     await fs.rm(dataDir, { recursive: true, force: true });
@@ -724,6 +755,34 @@ test("cli interactive shell exposes the /setup shortcut", async () => {
     assert.match(session.stdout, /AgentOS interactive shell/);
     assert.match(session.stdout, /AgentOS setup/);
     assert.match(session.stdout, /Recommended next steps:/);
+  } finally {
+    await api.close();
+    await fs.rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("cli uninstall --dry-run reports the planned cleanup steps", async () => {
+  const dataDir = await createTempDir("agentos-cli-");
+  const api = await startCliApiFixture();
+  const env = {
+    ...process.env,
+    AGENTOS_BASE_URL: api.baseUrl,
+    AGENTOS_DATA_DIR: dataDir
+  };
+
+  try {
+    const result = await execFileAsync(
+      process.execPath,
+      ["dist/bin/agentos.js", "uninstall", "--purge", "--dry-run", "--json"],
+      { cwd: process.cwd(), env }
+    );
+
+    const payload = JSON.parse(result.stdout);
+    assert.equal(payload.installSource.source, "source");
+    assert.equal(payload.dryRun, true);
+    assert.equal(Array.isArray(payload.plannedActions), true);
+    assert.equal(payload.plannedActions.some((entry: string) => entry.includes("global `agentos` CLI link")), true);
+    assert.equal(payload.plannedActions.some((entry: string) => entry.includes("Delete the data directory")), true);
   } finally {
     await api.close();
     await fs.rm(dataDir, { recursive: true, force: true });

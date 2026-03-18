@@ -67,6 +67,10 @@ function firstExisting(paths: string[]): string | undefined {
   return paths.find((entry) => fs.existsSync(entry));
 }
 
+export function defaultDataDir(): string {
+  return path.join(os.homedir(), ".agentos");
+}
+
 export function detectBrowserExecutable(): string | undefined {
   if (process.env.AGENTOS_BROWSER_EXECUTABLE) {
     return process.env.AGENTOS_BROWSER_EXECUTABLE;
@@ -79,7 +83,7 @@ export function resolveConfig(overrides: ConfigOverrides = {}): AgentOsConfig {
   const dataDir =
     overrides.dataDir ??
     process.env.AGENTOS_DATA_DIR ??
-    path.join(process.cwd(), ".agentos");
+    defaultDataDir();
   const daemonDir = path.join(dataDir, "daemon");
   const homeDir = os.homedir();
   const learningMetadataRoots = overrides.learning?.metadataRoots ?? [homeDir];

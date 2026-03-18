@@ -1,8 +1,8 @@
-import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import { NativeSidecarClient } from "../native-sidecar.js";
+import { defaultDataDir } from "../../config.js";
 import type {
   SidecarFindTextResult,
   SidecarHealthResult,
@@ -27,7 +27,7 @@ export class MacOSHostBridge {
   sidecar: NativeSidecarClient;
 
   constructor(options: MacOSHostBridgeOptions = {}) {
-    const dataDir = options.dataDir ?? path.join(process.cwd(), ".agentos");
+    const dataDir = options.dataDir ?? defaultDataDir();
     this.sidecar = new NativeSidecarClient({
       dataDir,
       executablePath: options.sidecarExecutablePath ?? process.env.AGENTOS_NATIVE_SIDECAR,

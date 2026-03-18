@@ -4,7 +4,7 @@ import path from "node:path";
 import os from "node:os";
 
 import { createTempDir } from "./helpers.js";
-import { detectBrowserExecutable, resolveConfig } from "../src/config.js";
+import { defaultDataDir, detectBrowserExecutable, resolveConfig } from "../src/config.js";
 
 test("resolveConfig uses precedence between environment and explicit overrides", async () => {
   const dataRoot = await createTempDir("agentos-config-env-");
@@ -99,4 +99,20 @@ test("resolveConfig default learning sources include home derived locations", as
   assert.equal(config.learning.excludedPaths.includes(path.join(os.homedir(), ".cache")), true);
   assert.equal(config.learning.metadataRoots.includes(os.homedir()), true);
   assert.equal(config.learning.textExtensions.includes("md"), true);
+});
+
+test("defaultDataDir resolves under the user's home directory", () => {
+  const previous = process.env.AGENTOS_DATA_DIR;
+  delete process.env.AGENTOS_DATA_DIR;
+
+  try {
+    assert.equal(defaultDataDir(), path.join(os.homedir(), ".agentos"));
+    assert.equal(resolveConfig().dataDir, path.join(os.homedir(), ".agentos"));
+  } finally {
+    if (previous === undefined) {
+      delete process.env.AGENTOS_DATA_DIR;
+    } else {
+      process.env.AGENTOS_DATA_DIR = previous;
+    }
+  }
 });

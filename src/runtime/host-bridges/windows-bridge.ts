@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import { NativeSidecarClient } from "../native-sidecar.js";
+import { defaultDataDir } from "../../config.js";
 import type { SidecarFindTextResult, SidecarListWindowsResult, SidecarOcrResult, SidecarPermissionsResult } from "../../types/native-sidecar.js";
 
 const execFileAsync = promisify(execFile);
@@ -174,7 +175,7 @@ export class WindowsHostBridge {
         (platform === process.platform && process.platform === "win32"));
     this.sidecar = shouldUseSidecar
       ? new NativeSidecarClient({
-          dataDir: dataDir ?? path.join(process.cwd(), ".agentos"),
+          dataDir: dataDir ?? defaultDataDir(),
           executablePath: sidecarExecutablePath,
           args: sidecarArgs
         })

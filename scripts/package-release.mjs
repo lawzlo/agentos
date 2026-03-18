@@ -119,6 +119,19 @@ async function main() {
     await fs.mkdir(path.dirname(wrapperPath), { recursive: true });
     await fs.writeFile(wrapperPath, shellWrapper(version), "utf8");
     await fs.chmod(wrapperPath, 0o755);
+    await fs.writeFile(
+      path.join(installRoot, "install-metadata.json"),
+      JSON.stringify(
+        {
+          source: "macos_pkg",
+          installRoot: `/opt/agentos/${version}`,
+          wrapperPath: "/usr/local/bin/agentos"
+        },
+        null,
+        2
+      ),
+      "utf8"
+    );
     await fs.mkdir(scriptsDir, { recursive: true });
     await fs.writeFile(
       path.join(scriptsDir, "postinstall"),
@@ -140,6 +153,19 @@ set -eu
     await fs.copyFile(path.join(rootDir, "LICENSE"), path.join(installRoot, "LICENSE"));
     await fs.copyFile(path.join(rootDir, "README.md"), path.join(installRoot, "README.md"));
     await fs.writeFile(wrapperPath, windowsWrapper(version), "utf8");
+    await fs.writeFile(
+      path.join(installRoot, "install-metadata.json"),
+      JSON.stringify(
+        {
+          source: "windows_msi",
+          installRoot: `AgentOS\\${version}`,
+          wrapperPath: "agentos.cmd"
+        },
+        null,
+        2
+      ),
+      "utf8"
+    );
     manifest.installRoot = `AgentOS\\${version}`;
     manifest.wrapper = "agentos.cmd";
   } else {

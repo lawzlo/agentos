@@ -42,7 +42,7 @@ AgentOS 的能力足够强，可以操作浏览器、桌面应用、本地文件
 - `rust/agentos-native/`：Rust native sidecar
 - `public/`：本地调试用 console
 - `test/`：集成测试与 runtime 测试
-- `.agentos/`：本地数据库、日志、workspace、artifact 和 daemon 状态
+- 默认在 `~/.agentos/`：本地数据库、日志、workspace、artifact 和 daemon 状态
 
 ## 快速开始
 
@@ -80,7 +80,7 @@ agentos watch add \
 
 默认监听 `http://127.0.0.1:3017`。Web console 仍可用于 trace/debug，但主入口是 CLI。
 
-如果你不想注册全局命令，下面所有 `agentos` 示例都可以替换成 `node dist/bin/agentos.js`。
+如果当前 shell 里还没有 `agentos` 命令，先在源码目录执行一次 `npm run cli:link`。
 
 ## 常见个人 Agent 场景
 
@@ -89,7 +89,7 @@ agentos watch add \
 ### 1. 浏览器调研与信息整理
 
 ```bash
-node dist/bin/agentos.js run \
+agentos run \
   "打开目标网站，整理关键要点，并把简短总结保存到 workspace" \
   --surface browser \
   --wait
@@ -98,7 +98,7 @@ node dist/bin/agentos.js run \
 ### 2. 邮件分拣与草稿回复
 
 ```bash
-node dist/bin/agentos.js watch add \
+agentos watch add \
   "一直盯我的邮箱，给新的客户邮件先起草回复，高风险内容保留审批" \
   --surface browser \
   --workspace personal-main
@@ -107,7 +107,7 @@ node dist/bin/agentos.js watch add \
 ### 3. Slack 低风险自动回复
 
 ```bash
-node dist/bin/agentos.js watch add \
+agentos watch add \
   "一直盯 Slack，把低风险未读消息按我的风格自动回复" \
   --surface browser \
   --workspace personal-main
@@ -116,7 +116,7 @@ node dist/bin/agentos.js watch add \
 ### 4. 微信桌面消息辅助
 
 ```bash
-node dist/bin/agentos.js watch add \
+agentos watch add \
   "一直盯微信桌面版，给未读客户消息先起草回复" \
   --surface desktop \
   --workspace personal-main
@@ -125,7 +125,7 @@ node dist/bin/agentos.js watch add \
 ### 5. BOSS 直聘候选人跟进
 
 ```bash
-node dist/bin/agentos.js watch add \
+agentos watch add \
   "一直盯 BOSS直聘，查看新候选人，并起草礼貌的后续沟通" \
   --surface browser \
   --workspace recruiting-main
@@ -134,12 +134,12 @@ node dist/bin/agentos.js watch add \
 ### 6. Google Drive 和文档工作流
 
 ```bash
-node dist/bin/agentos.js run \
+agentos run \
   "打开 Google Drive，把 Downloads 里最新的文件上传，并确认上传完成" \
   --surface browser \
   --wait
 
-node dist/bin/agentos.js run \
+agentos run \
   "打开 Google Docs，更新周报并保存" \
   --surface browser \
   --wait
@@ -148,16 +148,16 @@ node dist/bin/agentos.js run \
 ### 7. 每日学习、摘要和后续建议
 
 ```bash
-node dist/bin/agentos.js learn status
-node dist/bin/agentos.js memory search "报价"
-node dist/bin/agentos.js digest run
-node dist/bin/agentos.js proposals ls
+agentos learn status
+agentos memory search "报价"
+agentos digest run
+agentos proposals ls
 ```
 
 ### 8. 先做一次，再教成长期流程
 
 ```bash
-node dist/bin/agentos.js watch teach \
+agentos watch teach \
   <task-id> \
   "一直盯这个收件箱，遇到类似消息就照刚才的流程处理" \
   --pack generic-mail-desktop \
@@ -208,7 +208,7 @@ AgentOS 目前围绕这些对象工作：
 ### 1. 执行一次浏览器任务
 
 ```bash
-node dist/bin/agentos.js run \
+agentos run \
   "打开 example.com，点击 More information，然后截图" \
   --surface browser \
   --wait
@@ -217,7 +217,7 @@ node dist/bin/agentos.js run \
 ### 2. 执行一次桌面任务
 
 ```bash
-node dist/bin/agentos.js run \
+agentos run \
   "打开 TextEdit，输入一段短笔记，然后等待我接管" \
   --surface desktop
 ```
@@ -225,24 +225,24 @@ node dist/bin/agentos.js run \
 ### 3. 查看任务和 trace
 
 ```bash
-node dist/bin/agentos.js ps
-node dist/bin/agentos.js inspect <task-id>
-node dist/bin/agentos.js logs <task-id>
+agentos ps
+agentos inspect <task-id>
+agentos logs <task-id>
 ```
 
 ### 4. 暂停或接管运行中的任务
 
 ```bash
-node dist/bin/agentos.js control <task-id> pause
-node dist/bin/agentos.js control <task-id> request_takeover
-node dist/bin/agentos.js control <task-id> return_to_agent --note "我已经修正窗口焦点"
-node dist/bin/agentos.js control <task-id> stop
+agentos control <task-id> pause
+agentos control <task-id> request_takeover
+agentos control <task-id> return_to_agent --note "我已经修正窗口焦点"
+agentos control <task-id> stop
 ```
 
 ### 5. 创建长期 watch rule
 
 ```bash
-node dist/bin/agentos.js watch add \
+agentos watch add \
   "一直盯 Slack，把低风险未读消息按我的风格自动回复" \
   --surface browser \
   --workspace personal-main
@@ -251,25 +251,25 @@ node dist/bin/agentos.js watch add \
 查看 watch 健康状态：
 
 ```bash
-node dist/bin/agentos.js watch ls
-node dist/bin/agentos.js watch inspect <watch-id>
-node dist/bin/agentos.js watch health <watch-id>
-node dist/bin/agentos.js watch retry <watch-id>
+agentos watch ls
+agentos watch inspect <watch-id>
+agentos watch health <watch-id>
+agentos watch retry <watch-id>
 ```
 
 ### 6. 查看或批准 draft
 
 ```bash
-node dist/bin/agentos.js drafts ls
-node dist/bin/agentos.js drafts inspect <draft-id>
-node dist/bin/agentos.js drafts approve <draft-id>
-node dist/bin/agentos.js drafts reject <draft-id> --reason "这条需要人工回复"
+agentos drafts ls
+agentos drafts inspect <draft-id>
+agentos drafts approve <draft-id>
+agentos drafts reject <draft-id> --reason "这条需要人工回复"
 ```
 
 ### 7. 把完成过的任务教成 watch profile
 
 ```bash
-node dist/bin/agentos.js watch teach \
+agentos watch teach \
   <task-id> \
   "一直盯这个收件箱，遇到类似消息就照刚才的流程处理" \
   --pack generic-mail-desktop \
@@ -279,12 +279,21 @@ node dist/bin/agentos.js watch teach \
 ### 8. 查看学习层和建议任务
 
 ```bash
-node dist/bin/agentos.js learn status
-node dist/bin/agentos.js learn sources ls
-node dist/bin/agentos.js memory search "合同续签"
-node dist/bin/agentos.js digest run
-node dist/bin/agentos.js proposals ls
-node dist/bin/agentos.js proposals accept <proposal-id>
+agentos learn status
+agentos learn sources ls
+agentos memory search "合同续签"
+agentos digest run
+agentos proposals ls
+agentos proposals accept <proposal-id>
+```
+
+### 9. 修复 setup 或卸载本地安装
+
+```bash
+agentos setup --fix --dry-run
+agentos setup --fix
+agentos uninstall --dry-run
+agentos uninstall --purge
 ```
 
 ## 学习系统
@@ -310,9 +319,9 @@ AgentOS 现在包含一层持续学习系统。
 常见使用方式：
 
 ```bash
-node dist/bin/agentos.js memory search "报价"
-node dist/bin/agentos.js proposals ls
-node dist/bin/agentos.js proposals accept <proposal-id>
+agentos memory search "报价"
+agentos proposals ls
+agentos proposals accept <proposal-id>
 ```
 
 ## JSON 示例
@@ -420,8 +429,8 @@ node dist/bin/agentos.js proposals accept <proposal-id>
 
 ## Runtime 说明
 
-- 所有本地状态都在 `.agentos/`
-- daemon 状态在 `.agentos/daemon/`
+- 默认所有本地状态都在 `~/.agentos/`，除非你显式设置了 `AGENTOS_DATA_DIR`
+- 默认 daemon 状态在 `~/.agentos/daemon/`
 - 浏览器自动化需要 Chrome-compatible executable
 - 浏览器默认 headless
 - macOS 桌面自动化可能需要 Accessibility 和 Screen Recording 权限
@@ -508,7 +517,7 @@ npm test
 本地重建后重启 daemon：
 
 ```bash
-node dist/bin/agentos.js daemon restart
+agentos daemon restart
 ```
 
 准备发布产物：

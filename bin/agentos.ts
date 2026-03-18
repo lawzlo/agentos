@@ -21,13 +21,15 @@ import { commandMemory } from "./commands/memory-command.js";
 import { commandDigest } from "./commands/digest-command.js";
 import { commandProposals } from "./commands/proposals-command.js";
 import { commandSetup } from "./commands/setup-command.js";
+import { commandUninstall } from "./commands/uninstall-command.js";
 import { runInteractiveShell } from "./interactive-shell.js";
 import { boolOption, parseArgs, print, type CliOptions } from "./cli-utils.js";
 
 function helpText() {
   return `agentos
 agentos "<goal>" [--surface browser|desktop] [--workspace name] [--wait]
-agentos setup
+agentos setup [--fix] [--dry-run]
+agentos uninstall [--purge] [--dry-run]
 agentos daemon start|stop|status|logs|restart|install|uninstall
 agentos run "<goal>" [--surface browser|desktop] [--workspace name] [--skill name] [--input key=value] [--wait]
 agentos doctor [--bundle]
@@ -56,6 +58,7 @@ function isKnownCommand(command: string | undefined) {
     "daemon",
     "run",
     "setup",
+    "uninstall",
     "doctor",
     "version",
     "ps",
@@ -137,6 +140,11 @@ async function main() {
 
   if (command === "setup") {
     await commandSetup(sharedOptions);
+    return;
+  }
+
+  if (command === "uninstall") {
+    await commandUninstall(sharedOptions);
     return;
   }
 

@@ -42,7 +42,7 @@ AgentOS は、ブラウザ、デスクトップアプリ、ローカルファイ
 - `rust/agentos-native/`: Rust native sidecar
 - `public/`: ローカル debug console
 - `test/`: integration test と runtime test
-- `.agentos/`: ローカル DB、ログ、workspace、artifact、daemon state
+- デフォルトでは `~/.agentos/`: ローカル DB、ログ、workspace、artifact、daemon state
 
 ## クイックスタート
 
@@ -80,7 +80,7 @@ agentos watch add \
 
 デフォルトでは `http://127.0.0.1:3017` で待ち受けます。Web console は trace / debug 用に残っていますが、主入口は CLI です。
 
-グローバル CLI を使いたくない場合は、以下の `agentos` を `node dist/bin/agentos.js` に置き換えてください。
+まだ `agentos` コマンドが PATH にない場合は、source checkout で先に `npm run cli:link` を実行してください。
 
 ## よくある personal agent シナリオ
 
@@ -89,7 +89,7 @@ agentos watch add \
 ### 1. ブラウザ調査と整理
 
 ```bash
-node dist/bin/agentos.js run \
+agentos run \
   "対象サイトを開き、重要ポイントを集めて、短い要約を workspace に保存する" \
   --surface browser \
   --wait
@@ -98,7 +98,7 @@ node dist/bin/agentos.js run \
 ### 2. メールの仕分けと草稿返信
 
 ```bash
-node dist/bin/agentos.js watch add \
+agentos watch add \
   "メールを監視し、新しい顧客メッセージにはまず草稿を作り、リスクの高い返信は承認待ちにする" \
   --surface browser \
   --workspace personal-main
@@ -107,7 +107,7 @@ node dist/bin/agentos.js watch add \
 ### 3. Slack の低リスク自動返信
 
 ```bash
-node dist/bin/agentos.js watch add \
+agentos watch add \
   "Slack を監視し、低リスクの未読スレッドには自分の文体で返信する" \
   --surface browser \
   --workspace personal-main
@@ -116,7 +116,7 @@ node dist/bin/agentos.js watch add \
 ### 4. WeChat desktop のメッセージ補助
 
 ```bash
-node dist/bin/agentos.js watch add \
+agentos watch add \
   "WeChat desktop を監視し、未読の顧客メッセージには返信草稿を作る" \
   --surface desktop \
   --workspace personal-main
@@ -125,7 +125,7 @@ node dist/bin/agentos.js watch add \
 ### 5. BOSS直聘 の採用フォロー
 
 ```bash
-node dist/bin/agentos.js watch add \
+agentos watch add \
   "BOSS直聘 を監視し、新しい候補者を確認して、丁寧なフォローアップを草稿化する" \
   --surface browser \
   --workspace recruiting-main
@@ -134,12 +134,12 @@ node dist/bin/agentos.js watch add \
 ### 6. Google Drive とドキュメント作業
 
 ```bash
-node dist/bin/agentos.js run \
+agentos run \
   "Google Drive を開き、Downloads の最新ファイルをアップロードして、完了を確認する" \
   --surface browser \
   --wait
 
-node dist/bin/agentos.js run \
+agentos run \
   "Google Docs を開き、週報を更新して保存する" \
   --surface browser \
   --wait
@@ -148,16 +148,16 @@ node dist/bin/agentos.js run \
 ### 7. 毎日の学習、digest、フォローアップ候補
 
 ```bash
-node dist/bin/agentos.js learn status
-node dist/bin/agentos.js memory search "pricing"
-node dist/bin/agentos.js digest run
-node dist/bin/agentos.js proposals ls
+agentos learn status
+agentos memory search "pricing"
+agentos digest run
+agentos proposals ls
 ```
 
 ### 8. 一度やった作業を常駐フローに教える
 
 ```bash
-node dist/bin/agentos.js watch teach \
+agentos watch teach \
   <task-id> \
   "この inbox を見続け、似たメッセージは同じ流れで処理する" \
   --pack generic-mail-desktop \
@@ -208,7 +208,7 @@ npm run native:build
 ### 1. ブラウザタスクを実行する
 
 ```bash
-node dist/bin/agentos.js run \
+agentos run \
   "example.com を開き、More information をクリックして、スクリーンショットを撮る" \
   --surface browser \
   --wait
@@ -217,7 +217,7 @@ node dist/bin/agentos.js run \
 ### 2. デスクトップタスクを実行する
 
 ```bash
-node dist/bin/agentos.js run \
+agentos run \
   "TextEdit を開き、短いメモを入力して待機する" \
   --surface desktop
 ```
@@ -225,24 +225,24 @@ node dist/bin/agentos.js run \
 ### 3. タスクと trace を確認する
 
 ```bash
-node dist/bin/agentos.js ps
-node dist/bin/agentos.js inspect <task-id>
-node dist/bin/agentos.js logs <task-id>
+agentos ps
+agentos inspect <task-id>
+agentos logs <task-id>
 ```
 
 ### 4. 実行中タスクを pause / takeover する
 
 ```bash
-node dist/bin/agentos.js control <task-id> pause
-node dist/bin/agentos.js control <task-id> request_takeover
-node dist/bin/agentos.js control <task-id> return_to_agent --note "Window focus was fixed manually"
-node dist/bin/agentos.js control <task-id> stop
+agentos control <task-id> pause
+agentos control <task-id> request_takeover
+agentos control <task-id> return_to_agent --note "Window focus was fixed manually"
+agentos control <task-id> stop
 ```
 
 ### 5. 常駐 watch rule を作成する
 
 ```bash
-node dist/bin/agentos.js watch add \
+agentos watch add \
   "Slack を監視し、低リスクの未読スレッドには自分の文体で返信する" \
   --surface browser \
   --workspace personal-main
@@ -251,25 +251,25 @@ node dist/bin/agentos.js watch add \
 状態確認:
 
 ```bash
-node dist/bin/agentos.js watch ls
-node dist/bin/agentos.js watch inspect <watch-id>
-node dist/bin/agentos.js watch health <watch-id>
-node dist/bin/agentos.js watch retry <watch-id>
+agentos watch ls
+agentos watch inspect <watch-id>
+agentos watch health <watch-id>
+agentos watch retry <watch-id>
 ```
 
 ### 6. draft を確認または承認する
 
 ```bash
-node dist/bin/agentos.js drafts ls
-node dist/bin/agentos.js drafts inspect <draft-id>
-node dist/bin/agentos.js drafts approve <draft-id>
-node dist/bin/agentos.js drafts reject <draft-id> --reason "Human reply required"
+agentos drafts ls
+agentos drafts inspect <draft-id>
+agentos drafts approve <draft-id>
+agentos drafts reject <draft-id> --reason "Human reply required"
 ```
 
 ### 7. 完了済み task を watch profile に学習する
 
 ```bash
-node dist/bin/agentos.js watch teach \
+agentos watch teach \
   <task-id> \
   "この inbox を見続け、似たメッセージは同じ流れで処理する" \
   --pack generic-mail-desktop \
@@ -279,12 +279,21 @@ node dist/bin/agentos.js watch teach \
 ### 8. learning layer と proposal を確認する
 
 ```bash
-node dist/bin/agentos.js learn status
-node dist/bin/agentos.js learn sources ls
-node dist/bin/agentos.js memory search "renewal"
-node dist/bin/agentos.js digest run
-node dist/bin/agentos.js proposals ls
-node dist/bin/agentos.js proposals accept <proposal-id>
+agentos learn status
+agentos learn sources ls
+agentos memory search "renewal"
+agentos digest run
+agentos proposals ls
+agentos proposals accept <proposal-id>
+```
+
+### 9. setup を修復する、またはローカルインストールをアンインストールする
+
+```bash
+agentos setup --fix --dry-run
+agentos setup --fix
+agentos uninstall --dry-run
+agentos uninstall --purge
 ```
 
 ## Learning loop
@@ -310,9 +319,9 @@ AgentOS には継続学習レイヤーが含まれています。
 典型的な利用:
 
 ```bash
-node dist/bin/agentos.js memory search "pricing"
-node dist/bin/agentos.js proposals ls
-node dist/bin/agentos.js proposals accept <proposal-id>
+agentos memory search "pricing"
+agentos proposals ls
+agentos proposals accept <proposal-id>
 ```
 
 ## JSON 例
@@ -420,8 +429,8 @@ node dist/bin/agentos.js proposals accept <proposal-id>
 
 ## Runtime メモ
 
-- すべてのローカル状態は `.agentos/` 配下に保存されます
-- daemon state は `.agentos/daemon/` に保存されます
+- デフォルトでは、すべてのローカル状態は `~/.agentos/` 配下に保存されます。`AGENTOS_DATA_DIR` を設定した場合はそちらが優先されます
+- デフォルトでは、daemon state は `~/.agentos/daemon/` に保存されます
 - ブラウザ自動化には Chrome 系 executable が必要です
 - ブラウザはデフォルトで headless 実行です
 - macOS では Accessibility と Screen Recording の権限が必要な場合があります
@@ -508,7 +517,7 @@ npm test
 ローカル build 後に daemon を再起動:
 
 ```bash
-node dist/bin/agentos.js daemon restart
+agentos daemon restart
 ```
 
 リリース成果物の準備:

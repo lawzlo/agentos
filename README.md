@@ -43,7 +43,7 @@ AgentOS is powerful enough to operate browsers, desktop apps, local files, and l
 - `rust/agentos-native/`: Rust native sidecar
 - `public/`: optional local debug console
 - `test/`: integration and runtime tests
-- `.agentos/`: local runtime state, database, logs, workspaces, and artifacts
+- `~/.agentos/` by default: local runtime state, database, logs, workspaces, and artifacts
 
 ## Quick start
 
@@ -81,7 +81,7 @@ agentos watch add \
 
 The daemon listens on `http://127.0.0.1:3017` by default. The web console remains available for trace and debug use, but the primary entrypoint is the CLI.
 
-If you do not want a global CLI command, replace `agentos` with `node dist/bin/agentos.js` in the examples below.
+If `agentos` is not on your PATH yet, run `npm run cli:link` from the source checkout first.
 
 ## Common personal agent scenarios
 
@@ -90,7 +90,7 @@ These are the kinds of workflows AgentOS is meant to handle without forcing user
 ### 1. Browser research and capture
 
 ```bash
-node dist/bin/agentos.js run \
+agentos run \
   "Open the target site, gather the key points, and save a short summary in the workspace" \
   --surface browser \
   --wait
@@ -99,7 +99,7 @@ node dist/bin/agentos.js run \
 ### 2. Email triage with drafts first
 
 ```bash
-node dist/bin/agentos.js watch add \
+agentos watch add \
   "Always watch my email, draft replies for new customer messages, and leave risky replies for approval" \
   --surface browser \
   --workspace personal-main
@@ -108,7 +108,7 @@ node dist/bin/agentos.js watch add \
 ### 3. Slack low-risk reply automation
 
 ```bash
-node dist/bin/agentos.js watch add \
+agentos watch add \
   "Always watch Slack and reply to low-risk unread threads in my style" \
   --surface browser \
   --workspace personal-main
@@ -117,7 +117,7 @@ node dist/bin/agentos.js watch add \
 ### 4. WeChat desktop inbox assistance
 
 ```bash
-node dist/bin/agentos.js watch add \
+agentos watch add \
   "Always watch WeChat desktop and draft replies to unread customer messages" \
   --surface desktop \
   --workspace personal-main
@@ -126,7 +126,7 @@ node dist/bin/agentos.js watch add \
 ### 5. Recruiting follow-up on BOSS
 
 ```bash
-node dist/bin/agentos.js watch add \
+agentos watch add \
   "Always watch BOSS直聘, review new candidates, and draft polite follow-ups" \
   --surface browser \
   --workspace recruiting-main
@@ -135,12 +135,12 @@ node dist/bin/agentos.js watch add \
 ### 6. Google Drive and document workflows
 
 ```bash
-node dist/bin/agentos.js run \
+agentos run \
   "Open Google Drive, upload the latest file from Downloads, and confirm the upload finished" \
   --surface browser \
   --wait
 
-node dist/bin/agentos.js run \
+agentos run \
   "Open Google Docs, update the weekly report, and save it" \
   --surface browser \
   --wait
@@ -149,16 +149,16 @@ node dist/bin/agentos.js run \
 ### 7. Daily memory, digest, and follow-up proposals
 
 ```bash
-node dist/bin/agentos.js learn status
-node dist/bin/agentos.js memory search "pricing"
-node dist/bin/agentos.js digest run
-node dist/bin/agentos.js proposals ls
+agentos learn status
+agentos memory search "pricing"
+agentos digest run
+agentos proposals ls
 ```
 
 ### 8. Teach a repeated workflow after doing it once
 
 ```bash
-node dist/bin/agentos.js watch teach \
+agentos watch teach \
   <task-id> \
   "Keep watching this inbox and handle similar messages the same way" \
   --pack generic-mail-desktop \
@@ -209,7 +209,7 @@ AgentOS currently centers around these parts:
 ### 1. Run a browser task
 
 ```bash
-node dist/bin/agentos.js run \
+agentos run \
   "Open example.com, click More information, then capture a screenshot" \
   --surface browser \
   --wait
@@ -218,7 +218,7 @@ node dist/bin/agentos.js run \
 ### 2. Run a desktop task
 
 ```bash
-node dist/bin/agentos.js run \
+agentos run \
   "Open TextEdit, type a short note, and wait for me" \
   --surface desktop
 ```
@@ -226,24 +226,24 @@ node dist/bin/agentos.js run \
 ### 3. Inspect tasks and traces
 
 ```bash
-node dist/bin/agentos.js ps
-node dist/bin/agentos.js inspect <task-id>
-node dist/bin/agentos.js logs <task-id>
+agentos ps
+agentos inspect <task-id>
+agentos logs <task-id>
 ```
 
 ### 4. Pause or take over a task
 
 ```bash
-node dist/bin/agentos.js control <task-id> pause
-node dist/bin/agentos.js control <task-id> request_takeover
-node dist/bin/agentos.js control <task-id> return_to_agent --note "I fixed the window focus"
-node dist/bin/agentos.js control <task-id> stop
+agentos control <task-id> pause
+agentos control <task-id> request_takeover
+agentos control <task-id> return_to_agent --note "I fixed the window focus"
+agentos control <task-id> stop
 ```
 
 ### 5. Create a standing watch rule
 
 ```bash
-node dist/bin/agentos.js watch add \
+agentos watch add \
   "Always watch Slack and reply to low-risk unread threads in my style" \
   --surface browser \
   --workspace personal-main
@@ -252,25 +252,25 @@ node dist/bin/agentos.js watch add \
 Inspect watch health:
 
 ```bash
-node dist/bin/agentos.js watch ls
-node dist/bin/agentos.js watch inspect <watch-id>
-node dist/bin/agentos.js watch health <watch-id>
-node dist/bin/agentos.js watch retry <watch-id>
+agentos watch ls
+agentos watch inspect <watch-id>
+agentos watch health <watch-id>
+agentos watch retry <watch-id>
 ```
 
 ### 6. Review or approve drafts
 
 ```bash
-node dist/bin/agentos.js drafts ls
-node dist/bin/agentos.js drafts inspect <draft-id>
-node dist/bin/agentos.js drafts approve <draft-id>
-node dist/bin/agentos.js drafts reject <draft-id> --reason "Need a human reply"
+agentos drafts ls
+agentos drafts inspect <draft-id>
+agentos drafts approve <draft-id>
+agentos drafts reject <draft-id> --reason "Need a human reply"
 ```
 
 ### 7. Teach a completed task into a watch profile
 
 ```bash
-node dist/bin/agentos.js watch teach \
+agentos watch teach \
   <task-id> \
   "Keep watching this inbox and handle similar messages the same way" \
   --pack generic-mail-desktop \
@@ -280,12 +280,21 @@ node dist/bin/agentos.js watch teach \
 ### 8. Inspect learning and proposals
 
 ```bash
-node dist/bin/agentos.js learn status
-node dist/bin/agentos.js learn sources ls
-node dist/bin/agentos.js memory search "contract renewal"
-node dist/bin/agentos.js digest run
-node dist/bin/agentos.js proposals ls
-node dist/bin/agentos.js proposals accept <proposal-id>
+agentos learn status
+agentos learn sources ls
+agentos memory search "contract renewal"
+agentos digest run
+agentos proposals ls
+agentos proposals accept <proposal-id>
+```
+
+### 9. Repair setup or uninstall the local install
+
+```bash
+agentos setup --fix --dry-run
+agentos setup --fix
+agentos uninstall --dry-run
+agentos uninstall --purge
 ```
 
 ## Learning loop
@@ -311,9 +320,9 @@ Learning source kinds:
 Search and proposal flow:
 
 ```bash
-node dist/bin/agentos.js memory search "pricing"
-node dist/bin/agentos.js proposals ls
-node dist/bin/agentos.js proposals accept <proposal-id>
+agentos memory search "pricing"
+agentos proposals ls
+agentos proposals accept <proposal-id>
 ```
 
 ## JSON examples
@@ -421,8 +430,8 @@ Supported task control actions:
 
 ## Runtime notes
 
-- All local runtime state lives under `.agentos/`.
-- Daemon state lives under `.agentos/daemon/`.
+- By default, local runtime state lives under `~/.agentos/` unless `AGENTOS_DATA_DIR` is set.
+- Daemon state lives under `~/.agentos/daemon/` by default.
 - Browser automation expects a Chrome-compatible executable.
 - Browser automation runs headless by default.
 - Desktop automation on macOS may require Accessibility and Screen Recording permissions.
@@ -509,7 +518,7 @@ npm test
 Restart the daemon after a local rebuild:
 
 ```bash
-node dist/bin/agentos.js daemon restart
+agentos daemon restart
 ```
 
 Prepare release artifacts:

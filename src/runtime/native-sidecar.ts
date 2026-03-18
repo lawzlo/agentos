@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 
 import { createId } from "./id.js";
+import { defaultDataDir } from "../config.js";
 import type { SidecarResponse } from "../types/native-sidecar.js";
 
 const execFileAsync = promisify(execFile);
@@ -45,7 +46,7 @@ export class NativeSidecarClient {
     args = [],
     manifestPath = path.join(process.cwd(), "rust", "agentos-native", "Cargo.toml")
   }: NativeSidecarClientOptions = {}) {
-    this.dataDir = dataDir ?? path.join(process.cwd(), ".agentos");
+    this.dataDir = dataDir ?? defaultDataDir();
     this.executablePath = executablePath ?? null;
     this.args = args;
     this.manifestPath = manifestPath;

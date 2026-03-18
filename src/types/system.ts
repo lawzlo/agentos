@@ -8,6 +8,18 @@ import type { LearningStatus, ProposalRecord } from "./learning.js";
 import type { RuntimeVersionInfo } from "../version.js";
 import type { SidecarHealthResult, SidecarPermissionsResult } from "./native-sidecar.js";
 
+export type InstallSource = "source" | "macos_pkg" | "windows_msi" | "unknown";
+
+export interface InstallSourceInfo {
+  source: InstallSource;
+  label: string;
+  installRoot: string | null;
+  wrapperPath: string | null;
+  metadataPath: string | null;
+  managedInstallation: boolean;
+  uninstallHint?: string | null;
+}
+
 export interface DaemonInstallStatus {
   supported: boolean;
   mode: "launchd" | "task-scheduler" | "unsupported";
@@ -33,6 +45,7 @@ export interface DaemonStatus {
   degradedWatchCount?: number;
   pendingDraftCount?: number;
   pendingProposalCount?: number;
+  installSource?: InstallSourceInfo;
   recentErrors?: Array<{
     id: string;
     status: string;
@@ -123,5 +136,23 @@ export interface SetupReport {
   startedDaemon: boolean;
   daemon: DaemonStatus;
   doctor: DoctorReport;
+  installSource: InstallSourceInfo;
+  blockingIssues: string[];
+  plannedFixes: string[];
+  appliedFixes: string[];
   recommendedActions: string[];
+}
+
+export interface UninstallReport {
+  installSource: InstallSourceInfo;
+  stoppedDaemon: boolean;
+  removedAutostart: boolean;
+  removedCliLink: boolean;
+  removedDataDir: boolean;
+  keptDataDir: boolean;
+  dryRun: boolean;
+  plannedActions: string[];
+  appliedActions: string[];
+  manualSteps: string[];
+  dataDir: string;
 }

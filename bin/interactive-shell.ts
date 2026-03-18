@@ -6,12 +6,10 @@ import { commandWatch } from "./commands/watch-command.js";
 import { commandDrafts } from "./commands/drafts-command.js";
 import { commandMemory } from "./commands/memory-command.js";
 import { commandProposals } from "./commands/proposals-command.js";
-import { commandSetup } from "./commands/setup-command.js";
+import { buildSetupReport, commandSetup, renderOnboardingNotice } from "./commands/setup-command.js";
 import {
   apiRequest,
-  baseUrl,
   boolOption,
-  daemonStart,
   daemonStatus,
   type CliOptions,
   waitForTask
@@ -29,7 +27,7 @@ function banner() {
   return [
     "AgentOS interactive shell",
     "Type a task in plain language and press Enter.",
-    "Slash commands: /help /setup /status /doctor /ps /watches /watch <goal> /drafts /approve <draft-id> /reject <draft-id> [reason] /inspect <task-id> /logs <task-id> /surface browser|desktop /workspace <name|clear> /wait on|off /memory <query> /proposals /exit"
+    "Slash commands: /help /setup /status /doctor /ps /watch <goal> /watches /drafts /approve <draft-id> /reject <draft-id> [reason] /surface browser|desktop /workspace <name|clear> /wait on|off /exit"
   ].join("\n");
 }
 
@@ -94,20 +92,6 @@ function parseToggle(value: string) {
     return false;
   }
   return boolOption(value);
-}
-
-async function ensureInteractiveRuntime() {
-  try {
-    await apiRequest("GET", "/daemon/status");
-    return;
-  } catch (error) {
-    if (process.env.AGENTOS_BASE_URL) {
-      throw error;
-    }
-
-    console.log(`Starting local AgentOS daemon at ${baseUrl()}...`);
-    await daemonStart({});
-  }
 }
 
 async function runInteractiveTask(goal: string, state: InteractiveSessionState) {
@@ -274,7 +258,7 @@ async function handleSlashCommand(input: string, state: InteractiveSessionState)
 }
 
 export async function runInteractiveShell(options: CliOptions = {}) {
-  await ensureInteractiveRuntime();
+  const setupReport = await buildSetupReport();
 
   const state: InteractiveSessionState = {
     surface: typeof options.surface === "string" ? options.surface : undefined,
@@ -282,6 +266,11 @@ export async function runInteractiveShell(options: CliOptions = {}) {
     wait: options.wait == null ? true : boolOption(options.wait),
     timeout: options.timeout
   };
+
+  if (!setupReport.ok || setupReport.startedDaemon) {
+    console.log(renderOnboardingNotice(setupReport));
+    console.log("");
+  }
 
   console.log(banner());
   const readline = createInterface({

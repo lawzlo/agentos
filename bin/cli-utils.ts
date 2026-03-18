@@ -117,6 +117,10 @@ export function baseUrl() {
   return process.env.AGENTOS_BASE_URL ?? `http://127.0.0.1:${config.port}`;
 }
 
+export function isRemoteControlPlaneMode() {
+  return Boolean(process.env.AGENTOS_BASE_URL);
+}
+
 export async function apiRequest<TResponse extends object>(
   method: string,
   pathname: string,
@@ -296,15 +300,23 @@ export async function daemonStart(options: CliOptions) {
   print(options.json ? daemon : `Started AgentOS daemon on http://127.0.0.1:${daemon.port}`, options);
 }
 
-export async function daemonStop(options: CliOptions) {
+export async function stopDaemonProcess() {
   const runtime = await readDaemonRuntime(config.daemonDir);
   if (!runtime.running || !runtime.state?.pid) {
-    print(options.json ? { stopped: false, reason: "not_running" } : "AgentOS daemon is not running.", options);
-    return;
+    return { stopped: false, reason: "not_running" as const };
   }
 
   process.kill(Number(runtime.state.pid), "SIGTERM");
-  print(options.json ? { stopped: true, pid: Number(runtime.state.pid) } : "Stopping AgentOS daemon.", options);
+  return { stopped: true, pid: Number(runtime.state.pid) };
+}
+
+export async function daemonStop(options: CliOptions) {
+  const result = await stopDaemonProcess();
+  if (!result.stopped) {
+    print(options.json ? result : "AgentOS daemon is not running.", options);
+    return;
+  }
+  print(options.json ? result : "Stopping AgentOS daemon.", options);
 }
 
 export async function daemonRestart(options: CliOptions) {
@@ -330,9 +342,10 @@ export async function daemonLogs(options: CliOptions) {
   print(options.json ? { logPath, content } : content || "No daemon log found yet.", options);
 }
 
-export async function daemonInstall(options: CliOptions) {
+export async function installDaemonAutostart() {
   if (process.platform === "darwin") {
     const plistPath = launchAgentPath();
+    const workingDirectory = path.resolve(distRoot, "..");
     const plist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -356,7 +369,7 @@ export async function daemonInstall(options: CliOptions) {
   <key>KeepAlive</key>
   <true/>
   <key>WorkingDirectory</key>
-  <string>${process.cwd()}</string>
+  <string>${workingDirectory}</string>
   <key>StandardOutPath</key>
   <string>${daemonLogPath(config.daemonDir)}</string>
   <key>StandardErrorPath</key>
@@ -376,34 +389,36 @@ export async function daemonInstall(options: CliOptions) {
       await execFileAsync("launchctl", ["kickstart", "-k", `${domain}/com.agentos.daemon`]).catch(() => {});
     }
     const install = await getDaemonInstallStatus();
-    print(
-      options.json ? { installed: true, path: plistPath, install } : `Installed launchd agent at ${plistPath}`,
-      options
-    );
-    return;
+    return { installed: true, path: plistPath, install };
   }
 
   if (process.platform === "win32") {
     const taskCommand = `"${process.execPath}" "${runtimeEntry}"`;
     await execFileAsync("schtasks", ["/Create", "/SC", "ONLOGON", "/TN", "AgentOS", "/TR", taskCommand, "/F"]);
     const install = await getDaemonInstallStatus();
-    print(
-      options.json
-        ? {
-            installed: true,
-            command: `schtasks /Create /SC ONLOGON /TN AgentOS /TR "${taskCommand}" /F`,
-            install
-          }
-        : "Installed the AgentOS Task Scheduler entry.",
-      options
-    );
-    return;
+    return {
+      installed: true,
+      command: `schtasks /Create /SC ONLOGON /TN AgentOS /TR "${taskCommand}" /F`,
+      install
+    };
   }
 
   throw new Error("Auto-install is only implemented for macOS and Windows.");
 }
 
-export async function daemonUninstall(options: CliOptions) {
+export async function daemonInstall(options: CliOptions) {
+  const result = await installDaemonAutostart();
+  print(
+    options.json
+      ? result
+      : process.platform === "darwin"
+        ? `Installed launchd agent at ${String(result.path ?? "")}`
+        : "Installed the AgentOS Task Scheduler entry.",
+    options
+  );
+}
+
+export async function uninstallDaemonAutostart() {
   if (process.platform === "darwin") {
     const plistPath = launchAgentPath();
     const uid = process.getuid?.();
@@ -411,18 +426,41 @@ export async function daemonUninstall(options: CliOptions) {
       await execFileAsync("launchctl", ["bootout", `gui/${uid}`, plistPath]).catch(() => {});
     }
     await fsp.rm(plistPath, { force: true }).catch(() => {});
-    print(options.json ? { removed: true, path: plistPath } : `Removed ${plistPath}`, options);
-    return;
+    return { removed: true, path: plistPath };
   }
 
   if (process.platform === "win32") {
     await execFileAsync("schtasks", ["/Delete", "/TN", "AgentOS", "/F"]).catch(() => {});
-    print(
-      options.json ? { removed: true, command: "schtasks /Delete /TN AgentOS /F" } : "Removed the AgentOS Task Scheduler entry.",
-      options
-    );
-    return;
+    return { removed: true, command: "schtasks /Delete /TN AgentOS /F" };
   }
 
   throw new Error("Auto-uninstall is only implemented for macOS and Windows.");
+}
+
+export async function daemonUninstall(options: CliOptions) {
+  const result = await uninstallDaemonAutostart();
+  print(
+    options.json
+      ? result
+      : process.platform === "darwin"
+        ? `Removed ${String(result.path ?? "")}`
+        : "Removed the AgentOS Task Scheduler entry.",
+    options
+  );
+}
+
+function npmCommand() {
+  return process.platform === "win32" ? "npm.cmd" : "npm";
+}
+
+export async function unlinkGlobalCli() {
+  try {
+    await execFileAsync(npmCommand(), ["unlink", "-g", "agentos"]);
+    return { removed: true };
+  } catch (error) {
+    return {
+      removed: false,
+      reason: error instanceof Error ? error.message : String(error)
+    };
+  }
 }
