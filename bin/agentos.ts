@@ -20,6 +20,7 @@ import { commandLearn } from "./commands/learn-command.js";
 import { commandMemory } from "./commands/memory-command.js";
 import { commandDigest } from "./commands/digest-command.js";
 import { commandProposals } from "./commands/proposals-command.js";
+import { commandJobs } from "./commands/jobs-command.js";
 import { commandSetup } from "./commands/setup-command.js";
 import { commandUninstall } from "./commands/uninstall-command.js";
 import { runInteractiveShell } from "./interactive-shell.js";
@@ -49,6 +50,9 @@ agentos learn status
 agentos learn sources ls
 agentos memory search <query>
 agentos memory inspect <entity-id>
+agentos jobs ls
+agentos jobs add daily_digest|morning_scan|inbox_sweep|proposal_sweep|custom_task [--name "..."] [--goal "..."] [--workspace name] [--surface auto|browser|desktop] [--hour 9] [--interval-minutes 120]
+agentos jobs inspect|run|enable|disable|rm <job-id>
 agentos digest run
 agentos proposals ls|accept|reject`;
 }
@@ -72,6 +76,7 @@ function isKnownCommand(command: string | undefined) {
     "skills",
     "learn",
     "memory",
+    "jobs",
     "digest",
     "proposals",
     "chat",
@@ -210,6 +215,11 @@ async function main() {
 
   if (command === "memory") {
     await commandMemory(subcommand, positionals, sharedOptions);
+    return;
+  }
+
+  if (command === "jobs") {
+    await commandJobs(subcommand, positionals, sharedOptions);
     return;
   }
 

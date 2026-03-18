@@ -44,6 +44,10 @@ export interface DaemonStatus {
   watchCount?: number;
   enabledWatchCount?: number;
   degradedWatchCount?: number;
+  jobCount?: number;
+  enabledJobCount?: number;
+  degradedJobCount?: number;
+  nextJobRunAt?: string | null;
   pendingDraftCount?: number;
   pendingProposalCount?: number;
   installSource?: InstallSourceInfo;
@@ -74,6 +78,10 @@ export interface DoctorReport {
   readyLivePackCount: number;
   blockedLivePackCount: number;
   degradedWatchCount: number;
+  jobCount?: number;
+  enabledJobCount?: number;
+  degradedJobCount?: number;
+  nextJobRunAt?: string | null;
   pendingDraftCount: number;
   pendingProposalCount: number;
   awaitingApprovalWatchCount: number;

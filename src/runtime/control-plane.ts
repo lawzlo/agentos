@@ -22,6 +22,7 @@ import { SkillRegistry } from "./skill-registry.js";
 import { ExecutionController } from "./execution-controller.js";
 import { LivePackRegistry } from "./live-pack-registry.js";
 import { WatchScheduler } from "./watch-scheduler.js";
+import { AutomationJobService } from "./automation-job-service.js";
 import { WatchService } from "./watch-service.js";
 import { DraftService } from "./draft-service.js";
 import { WatchExecutionService } from "./watch-execution-service.js";
@@ -57,6 +58,7 @@ import type {
   MemoryEntitySnapshot,
   ProposalRecord
 } from "../types/learning.js";
+import type { AutomationJobRecord } from "../types/jobs.js";
 import type {
   DaemonStatus,
   DoctorBundle,
@@ -117,6 +119,7 @@ export class ControlPlane {
   watchExecutionService: WatchExecutionService;
   runtimeSupervisor: RuntimeSupervisor;
   learningService: LearningService;
+  automationJobService: AutomationJobService;
 
   constructor(config: AgentOsConfig) {
     this.config = config;
@@ -232,6 +235,13 @@ export class ControlPlane {
       config,
       createTask: async (taskSpec: TaskSpec) => this.createTask(taskSpec)
     });
+    this.automationJobService = new AutomationJobService({
+      store: this.store,
+      eventBus: this.eventBus,
+      config,
+      createTask: async (taskSpec: TaskSpec) => this.createTask(taskSpec),
+      runDigest: async () => this.runDigest()
+    });
   }
 
   async start() {
@@ -241,6 +251,7 @@ export class ControlPlane {
     }
     await this.runtimeSupervisor.restoreRuntimeState();
     await this.watchScheduler.start();
+    await this.automationJobService.start();
   }
 
   decorateTask(task: TaskRecord | null): TaskSnapshot | null {
@@ -473,23 +484,35 @@ export class ControlPlane {
       })
     );
     const learning = this.learningService.status();
+    const jobs = this.automationJobService.status();
     const install = await getDaemonInstallStatus();
     const watches = this.listWatchRules();
+    const automationJobs = this.listAutomationJobs(200);
     const blockedLivePacks = livePacks.filter((pack) => pack.ready === false);
     const readyLivePackCount = livePacks.length - blockedLivePacks.length;
     const pendingProposalCount = learning.pendingProposalCount;
     const awaitingApprovalWatchCount = watches.filter((rule) => rule.status === "awaiting_approval").length;
     const backoffWatchCount = watches.filter((rule) => rule.status === "backoff").length;
-    const recentErrors = watches
-      .filter((rule) => typeof rule.lastError === "string" && rule.lastError.trim())
+    const recentErrors = [
+      ...watches
+        .filter((rule) => typeof rule.lastError === "string" && rule.lastError.trim())
+        .map((rule) => ({
+          id: rule.id,
+          status: rule.status,
+          message: String(rule.lastError ?? ""),
+          updatedAt: rule.updatedAt
+        })),
+      ...automationJobs
+        .filter((job) => typeof job.lastError === "string" && job.lastError.trim())
+        .map((job) => ({
+          id: job.id,
+          status: job.status,
+          message: String(job.lastError ?? ""),
+          updatedAt: job.updatedAt
+        }))
+    ]
       .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))
-      .slice(0, 5)
-      .map((rule) => ({
-        id: rule.id,
-        status: rule.status,
-        message: String(rule.lastError ?? ""),
-        updatedAt: rule.updatedAt
-      }));
+      .slice(0, 5);
     const warnings = [...base.warnings];
 
     if (schemaVersion !== version.storeSchemaVersion) {
@@ -519,6 +542,9 @@ export class ControlPlane {
         `${blockedLivePacks.length} live pack(s) are blocked: ${blockedLivePacks.map((pack) => pack.name).join(", ")}.`
       );
     }
+    if (jobs.degradedJobCount > 0) {
+      warnings.push(`${jobs.degradedJobCount} automation job(s) are degraded.`);
+    }
 
     return {
       ...base,
@@ -535,6 +561,10 @@ export class ControlPlane {
       readyLivePackCount,
       blockedLivePackCount: blockedLivePacks.length,
       pendingProposalCount,
+      jobCount: jobs.jobCount,
+      enabledJobCount: jobs.enabledJobCount,
+      degradedJobCount: jobs.degradedJobCount,
+      nextJobRunAt: jobs.nextRunAt,
       awaitingApprovalWatchCount,
       backoffWatchCount,
       recentErrors,
@@ -871,6 +901,7 @@ export class ControlPlane {
   }
 
   async shutdown() {
+    await this.automationJobService.stop();
     await this.learningService.stop();
     await this.runtimeSupervisor.shutdown();
   }
@@ -901,6 +932,46 @@ export class ControlPlane {
 
   listProposals(limit = 50): ProposalRecord[] {
     return this.learningService.listProposals(limit);
+  }
+
+  listAutomationJobs(limit = 100): AutomationJobRecord[] {
+    return this.automationJobService.listJobs(limit);
+  }
+
+  getAutomationJob(jobId: string): AutomationJobRecord | null {
+    return this.automationJobService.getJob(jobId);
+  }
+
+  createAutomationJob(input: Record<string, unknown>): AutomationJobRecord {
+    return this.automationJobService.createJob({
+      template: String(input.template ?? "") as AutomationJobRecord["template"],
+      name: typeof input.name === "string" ? input.name : null,
+      workspaceName: typeof input.workspaceName === "string" ? input.workspaceName : null,
+      preferredSurface:
+        input.preferredSurface === "browser" || input.preferredSurface === "desktop" || input.preferredSurface === "auto"
+          ? input.preferredSurface
+          : null,
+      goal: typeof input.goal === "string" ? input.goal : null,
+      enabled: typeof input.enabled === "boolean" ? input.enabled : true,
+      hourOfDay: input.hourOfDay == null ? null : Number(input.hourOfDay),
+      intervalMinutes: input.intervalMinutes == null ? null : Number(input.intervalMinutes)
+    });
+  }
+
+  enableAutomationJob(jobId: string): AutomationJobRecord {
+    return this.automationJobService.enableJob(jobId);
+  }
+
+  disableAutomationJob(jobId: string): AutomationJobRecord {
+    return this.automationJobService.disableJob(jobId);
+  }
+
+  async runAutomationJob(jobId: string): Promise<AutomationJobRecord> {
+    return this.automationJobService.runJobNow(jobId);
+  }
+
+  deleteAutomationJob(jobId: string): boolean {
+    return this.automationJobService.deleteJob(jobId);
   }
 
   async acceptProposal(proposalId: string): Promise<{ proposal: ProposalRecord; taskId: string }> {

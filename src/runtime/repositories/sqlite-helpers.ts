@@ -10,6 +10,7 @@ import type {
   WorkspaceProfile,
   WorkspaceRecord
 } from "../../types/runtime-schema.js";
+import type { AutomationJobRecord } from "../../types/jobs.js";
 import type {
   DigestRecord,
   KnowledgeChunk,
@@ -274,6 +275,36 @@ export function hydrateLearningSource(row: SqliteRow | null): LearningSource | n
     config: parseJson(row.config as string | null | undefined, {}),
     state: parseJson(row.state as string | null | undefined, {}),
     lastObservedAt: asNullableString(row.last_observed_at),
+    lastError: asNullableString(row.last_error),
+    createdAt: asString(row.created_at),
+    updatedAt: asString(row.updated_at)
+  };
+}
+
+export function hydrateAutomationJob(row: SqliteRow | null): AutomationJobRecord | null {
+  if (!row) {
+    return null;
+  }
+
+  return {
+    id: asString(row.id),
+    name: asString(row.name),
+    kind: asEnum(row.job_kind, ["digest", "task"] as const, "task"),
+    template: asEnum(
+      row.template,
+      ["daily_digest", "morning_scan", "inbox_sweep", "proposal_sweep", "custom_task"] as const,
+      "custom_task"
+    ),
+    enabled: asBoolean(row.enabled),
+    status: asEnum(row.status, ["idle", "running", "healthy", "degraded"] as const, "idle"),
+    scheduleType: asEnum(row.schedule_type, ["daily", "interval"] as const, "daily"),
+    hourOfDay: row.hour_of_day == null ? null : asNumber(row.hour_of_day, 0),
+    intervalMinutes: row.interval_minutes == null ? null : asNumber(row.interval_minutes, 0),
+    taskSpec: parseJson(row.task_spec as string | null | undefined, null),
+    metadata: parseJson(row.metadata as string | null | undefined, {}),
+    lastRunAt: asNullableString(row.last_run_at),
+    lastTaskId: asNullableString(row.last_task_id),
+    nextRunAt: asNullableString(row.next_run_at),
     lastError: asNullableString(row.last_error),
     createdAt: asString(row.created_at),
     updatedAt: asString(row.updated_at)

@@ -39,6 +39,7 @@ export interface AgentOsConfig {
   livePacks: Record<string, LivePack> | null;
   model: AgentModelConfig;
   learning: LearningConfig;
+  jobs: JobsConfig;
 }
 
 export interface ConfigOverrides {
@@ -49,6 +50,7 @@ export interface ConfigOverrides {
   livePacks?: Record<string, LivePack> | null;
   model?: Partial<AgentModelConfig>;
   learning?: Partial<LearningConfig>;
+  jobs?: Partial<JobsConfig>;
 }
 
 export interface LearningConfig {
@@ -61,6 +63,11 @@ export interface LearningConfig {
   scanIntervalMs: number;
   maxFilesPerScan: number;
   maxDepth: number;
+}
+
+export interface JobsConfig {
+  enabled: boolean;
+  pollIntervalMs: number;
 }
 
 function firstExisting(paths: string[]): string | undefined {
@@ -137,6 +144,10 @@ export function resolveConfig(overrides: ConfigOverrides = {}): AgentOsConfig {
       scanIntervalMs: Number(overrides.learning?.scanIntervalMs ?? process.env.AGENTOS_LEARNING_SCAN_INTERVAL_MS ?? 300000),
       maxFilesPerScan: Number(overrides.learning?.maxFilesPerScan ?? process.env.AGENTOS_LEARNING_MAX_FILES_PER_SCAN ?? 2000),
       maxDepth: Number(overrides.learning?.maxDepth ?? process.env.AGENTOS_LEARNING_MAX_DEPTH ?? 8)
+    },
+    jobs: {
+      enabled: overrides.jobs?.enabled ?? process.env.AGENTOS_JOBS_ENABLED !== "false",
+      pollIntervalMs: Number(overrides.jobs?.pollIntervalMs ?? process.env.AGENTOS_JOB_POLL_INTERVAL_MS ?? 30000)
     }
   };
 }

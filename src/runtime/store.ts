@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
+import { AutomationJobRepository } from "./repositories/automation-job-repository.js";
 import { ArtifactRepository } from "./repositories/artifact-repository.js";
 import { DigestRepository } from "./repositories/digest-repository.js";
 import { DraftRepository } from "./repositories/draft-repository.js";
@@ -33,6 +34,7 @@ import type {
   WorkspaceProfile,
   WorkspaceRecord
 } from "../types/runtime-schema.js";
+import type { AutomationJobRecord } from "../types/jobs.js";
 import type {
   DigestRecord,
   KnowledgeChunk,
@@ -62,6 +64,7 @@ export class ControlPlaneStore {
   knowledge: KnowledgeRepository;
   digests: DigestRepository;
   proposals: ProposalRepository;
+  automationJobs: AutomationJobRepository;
 
   constructor(dbPath: string) {
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
@@ -83,6 +86,7 @@ export class ControlPlaneStore {
     this.knowledge = new KnowledgeRepository(this.db);
     this.digests = new DigestRepository(this.db);
     this.proposals = new ProposalRepository(this.db);
+    this.automationJobs = new AutomationJobRepository(this.db);
   }
 
   getSchemaVersion() {
@@ -354,6 +358,25 @@ export class ControlPlaneStore {
 
   countPendingProposals(): number {
     return this.proposals.countPending();
+  }
+
+  putAutomationJob(
+    job: Partial<AutomationJobRecord> &
+      Pick<AutomationJobRecord, "name" | "kind" | "template" | "scheduleType">
+  ): AutomationJobRecord {
+    return this.automationJobs.put(job);
+  }
+
+  getAutomationJob(id: string): AutomationJobRecord | null {
+    return this.automationJobs.get(id);
+  }
+
+  listAutomationJobs(limit = 100): AutomationJobRecord[] {
+    return this.automationJobs.list(limit);
+  }
+
+  deleteAutomationJob(id: string): boolean {
+    return this.automationJobs.delete(id);
   }
 
   close() {

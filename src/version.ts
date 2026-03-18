@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 
 export const RUNTIME_PROTOCOL_VERSION = 1;
 export const NATIVE_PROTOCOL_VERSION = 1;
-export const STORE_SCHEMA_VERSION = 2;
+export const STORE_SCHEMA_VERSION = 3;
 export const INSTALL_LAYOUT_VERSION = 1;
 
 export interface RuntimeVersionInfo {

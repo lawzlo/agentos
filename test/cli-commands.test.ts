@@ -102,17 +102,40 @@ interface CliWatch {
   health: Record<string, unknown> | null;
 }
 
+interface CliJob {
+  id: string;
+  name: string;
+  kind: string;
+  template: string;
+  enabled: boolean;
+  status: string;
+  scheduleType: string;
+  hourOfDay: number | null;
+  intervalMinutes: number | null;
+  taskSpec: Record<string, unknown> | null;
+  metadata: Record<string, unknown>;
+  lastRunAt: string | null;
+  lastTaskId: string | null;
+  nextRunAt: string | null;
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 interface CliApiState {
   error?: string;
   taskCounter: number;
   tasks: Record<string, CliTask>;
   watchCounter: number;
   watches: Record<string, CliWatch>;
+  jobCounter: number;
+  jobs: Record<string, CliJob>;
   taskPolls: Record<string, number>;
   lastTaskBody: Record<string, unknown> | null;
   lastControlBody: { action?: string } & Record<string, unknown> | null;
   lastTeachBody: { step?: CliTeachStep } & Record<string, unknown> | null;
   lastWatchBody: Record<string, unknown> | null;
+  lastJobBody: Record<string, unknown> | null;
   waitTaskId: string | null;
 }
 
@@ -122,11 +145,14 @@ async function startCliApiFixture() {
     watchCounter: 1,
     tasks: {},
     watches: {},
+    jobCounter: 1,
+    jobs: {},
     taskPolls: {},
     lastTaskBody: null,
     lastControlBody: null,
     lastTeachBody: null,
     lastWatchBody: null,
+    lastJobBody: null,
     waitTaskId: null
   };
 
@@ -178,6 +204,7 @@ const server = http.createServer(async (req, res) => {
           pid: 1234,
           port: 3017,
           connectorCount: 0,
+          jobCount: Object.keys(state.jobs).length,
           livePackCount: 4,
           readyLivePackCount: 2,
           blockedLivePackCount: 2,
@@ -362,6 +389,128 @@ const server = http.createServer(async (req, res) => {
 
     if (method === "GET" && url.pathname === "/learning/status") {
       writeJson({ learning: { observationCount: 0, chunkCount: 0 } });
+      return;
+    }
+
+    if (method === "GET" && url.pathname === "/jobs") {
+      const limit = Number(url.searchParams.get("limit") ?? 100);
+      writeJson({ jobs: Object.values(state.jobs).slice(0, limit) });
+      return;
+    }
+
+    if (method === "POST" && url.pathname === "/jobs") {
+      const body = (await readBody()) as Record<string, unknown>;
+      const id = `job-${state.jobCounter}`;
+      state.jobCounter += 1;
+      const scheduleType = typeof body.intervalMinutes === "number" ? "interval" : "daily";
+      const job: CliJob = {
+        id,
+        name: String(body.name ?? String(body.template ?? "Automation job")),
+        kind: String(body.template ?? "") === "daily_digest" ? "digest" : "task",
+        template: String(body.template ?? "custom_task"),
+        enabled: body.enabled !== false,
+        status: "idle",
+        scheduleType,
+        hourOfDay: scheduleType === "daily" ? Number(body.hourOfDay ?? 9) : null,
+        intervalMinutes: scheduleType === "interval" ? Number(body.intervalMinutes ?? 120) : null,
+        taskSpec:
+          String(body.template ?? "") === "daily_digest"
+            ? null
+            : {
+                goal: String(body.goal ?? "Automation task"),
+                preferredSurface: String(body.preferredSurface ?? "auto"),
+                workspaceName: asNullableString(body.workspaceName)
+              },
+        metadata: {},
+        lastRunAt: null,
+        lastTaskId: null,
+        nextRunAt: nowIso(),
+        lastError: null,
+        createdAt: nowIso(),
+        updatedAt: nowIso()
+      };
+      state.lastJobBody = body;
+      state.jobs[id] = job;
+      writeJson({ job }, 201);
+      return;
+    }
+
+    if (parts[0] === "jobs" && parts[1] && method === "GET" && parts[2] === undefined) {
+      const job = state.jobs[parts[1]];
+      if (!job) {
+        writeJson({ error: "Automation job not found" }, 404);
+        return;
+      }
+      writeJson({ job });
+      return;
+    }
+
+    if (parts[0] === "jobs" && parts[1] && method === "DELETE" && parts[2] === undefined) {
+      if (!state.jobs[parts[1]]) {
+        writeJson({ error: "Automation job not found" }, 404);
+        return;
+      }
+      delete state.jobs[parts[1]];
+      writeJson({ ok: true });
+      return;
+    }
+
+    if (parts[0] === "jobs" && parts[1] && method === "POST" && (parts[2] === "enable" || parts[2] === "disable")) {
+      const job = state.jobs[parts[1]];
+      if (!job) {
+        writeJson({ error: "Automation job not found" }, 404);
+        return;
+      }
+      job.enabled = parts[2] === "enable";
+      job.updatedAt = nowIso();
+      job.nextRunAt = job.enabled ? nowIso() : null;
+      writeJson({ job });
+      return;
+    }
+
+    if (parts[0] === "jobs" && parts[1] && method === "POST" && parts[2] === "run") {
+      const job = state.jobs[parts[1]];
+      if (!job) {
+        writeJson({ error: "Automation job not found" }, 404);
+        return;
+      }
+      job.status = "healthy";
+      job.lastRunAt = nowIso();
+      job.updatedAt = nowIso();
+      if (job.kind === "task") {
+        const id = `task-${state.taskCounter}`;
+        state.taskCounter += 1;
+        state.tasks[id] = {
+          id,
+          goal: String(job.taskSpec?.goal ?? "Automation task"),
+          status: "completed",
+          priority: "normal",
+          triggerSource: "job",
+          deadline: null,
+          preferredSurface: String(job.taskSpec?.preferredSurface ?? "auto"),
+          workspaceId: null,
+          traceId: `trace-${id}`,
+          taskSpec: job.taskSpec ?? {},
+          plan: [],
+          result: { ok: true },
+          error: null,
+          createdAt: nowIso(),
+          updatedAt: nowIso(),
+          runtimeControl: {
+            mode: "agent",
+            reason: null,
+            source: "job",
+            updatedAt: nowIso()
+          },
+          trace: {
+            id: `trace-${id}`,
+            status: "completed",
+            events: []
+          }
+        };
+        job.lastTaskId = id;
+      }
+      writeJson({ job });
       return;
     }
 
@@ -1337,6 +1486,91 @@ test("cli watch ls/inspect/disable/enable/rm operate as expected", async () => {
     const rmResult = await execFileAsync(
       process.execPath,
       ["dist/bin/agentos.js", "watch", "rm", created.id, "--json"],
+      { cwd: process.cwd(), env }
+    );
+    const rm = JSON.parse(rmResult.stdout);
+    assert.equal(rm.ok, true);
+  } finally {
+    await api.close();
+    await fs.rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("cli jobs add/ls/inspect/run/disable/enable/rm operate as expected", async () => {
+  const dataDir = await createTempDir("agentos-cli-");
+  const api = await startCliApiFixture();
+  const env = {
+    ...process.env,
+    AGENTOS_BASE_URL: api.baseUrl,
+    AGENTOS_DATA_DIR: dataDir
+  };
+
+  try {
+    const addResult = await execFileAsync(
+      process.execPath,
+      [
+        "dist/bin/agentos.js",
+        "jobs",
+        "add",
+        "morning_scan",
+        "--workspace",
+        "cli-jobs",
+        "--surface",
+        "browser",
+        "--hour",
+        "9",
+        "--json"
+      ],
+      { cwd: process.cwd(), env }
+    );
+    const created = JSON.parse(addResult.stdout);
+    assert.equal(created.template, "morning_scan");
+    assert.equal(api.state.lastJobBody?.workspaceName, "cli-jobs");
+
+    const lsResult = await execFileAsync(process.execPath, ["dist/bin/agentos.js", "jobs", "ls", "--json"], {
+      cwd: process.cwd(),
+      env
+    });
+    const list = JSON.parse(lsResult.stdout);
+    assert.equal(Array.isArray(list), true);
+    assert.equal(list.some((job) => job.id === created.id), true);
+
+    const inspectResult = await execFileAsync(
+      process.execPath,
+      ["dist/bin/agentos.js", "jobs", "inspect", created.id, "--json"],
+      { cwd: process.cwd(), env }
+    );
+    const inspect = JSON.parse(inspectResult.stdout);
+    assert.equal(inspect.id, created.id);
+
+    const runResult = await execFileAsync(
+      process.execPath,
+      ["dist/bin/agentos.js", "jobs", "run", created.id, "--json"],
+      { cwd: process.cwd(), env }
+    );
+    const run = JSON.parse(runResult.stdout);
+    assert.equal(run.status, "healthy");
+    assert.equal(typeof run.lastTaskId, "string");
+
+    const disableResult = await execFileAsync(
+      process.execPath,
+      ["dist/bin/agentos.js", "jobs", "disable", created.id, "--json"],
+      { cwd: process.cwd(), env }
+    );
+    const disabled = JSON.parse(disableResult.stdout);
+    assert.equal(disabled.enabled, false);
+
+    const enableResult = await execFileAsync(
+      process.execPath,
+      ["dist/bin/agentos.js", "jobs", "enable", created.id, "--json"],
+      { cwd: process.cwd(), env }
+    );
+    const enabled = JSON.parse(enableResult.stdout);
+    assert.equal(enabled.enabled, true);
+
+    const rmResult = await execFileAsync(
+      process.execPath,
+      ["dist/bin/agentos.js", "jobs", "rm", created.id, "--json"],
       { cwd: process.cwd(), env }
     );
     const rm = JSON.parse(rmResult.stdout);

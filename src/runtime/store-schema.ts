@@ -264,6 +264,25 @@ export function initializeStoreSchema(db: any): void {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS automation_jobs (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      job_kind TEXT NOT NULL,
+      template TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      status TEXT NOT NULL,
+      schedule_type TEXT NOT NULL,
+      hour_of_day INTEGER,
+      interval_minutes INTEGER,
+      task_spec TEXT,
+      metadata TEXT NOT NULL,
+      last_run_at TEXT,
+      last_task_id TEXT,
+      next_run_at TEXT,
+      last_error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
     CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
     CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);
     CREATE INDEX IF NOT EXISTS idx_trace_events_trace_id ON trace_events(trace_id);
@@ -280,6 +299,7 @@ export function initializeStoreSchema(db: any): void {
     CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_source_id ON knowledge_chunks(source_id);
     CREATE INDEX IF NOT EXISTS idx_digests_date ON digests(digest_date);
     CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status);
+    CREATE INDEX IF NOT EXISTS idx_automation_jobs_enabled_next_run ON automation_jobs(enabled, next_run_at);
     PRAGMA user_version = ${STORE_SCHEMA_VERSION};
   `);
 }

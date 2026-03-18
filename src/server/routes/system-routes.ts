@@ -62,6 +62,7 @@ export async function handleSystemRoutes({
     const watches = controlPlane.listWatchRules();
     const drafts = controlPlane.listDrafts(200);
     const proposals = controlPlane.listProposals(200);
+    const jobs = controlPlane.listAutomationJobs(200);
     const livePacks = await controlPlane.listLivePackInfo();
     const install = await getDaemonInstallStatus();
     json(res, 200, {
@@ -76,16 +77,34 @@ export async function handleSystemRoutes({
         degradedWatchCount: watches.filter((rule) => ["degraded", "backoff"].includes(rule.status)).length,
         pendingDraftCount: drafts.filter((draft) => draft.status === "pending").length,
         pendingProposalCount: proposals.filter((proposal) => proposal.status === "pending").length,
-        recentErrors: watches
-          .filter((rule) => typeof rule.lastError === "string" && rule.lastError.trim())
+        jobCount: jobs.length,
+        enabledJobCount: jobs.filter((job) => job.enabled).length,
+        degradedJobCount: jobs.filter((job) => job.status === "degraded").length,
+        nextJobRunAt:
+          jobs
+            .filter((job) => job.enabled && typeof job.nextRunAt === "string")
+            .map((job) => String(job.nextRunAt))
+            .sort()[0] ?? null,
+        recentErrors: [
+          ...watches
+            .filter((rule) => typeof rule.lastError === "string" && rule.lastError.trim())
+            .map((rule) => ({
+              id: rule.id,
+              status: rule.status,
+              message: String(rule.lastError ?? ""),
+              updatedAt: rule.updatedAt
+            })),
+          ...jobs
+            .filter((job) => typeof job.lastError === "string" && job.lastError.trim())
+            .map((job) => ({
+              id: job.id,
+              status: job.status,
+              message: String(job.lastError ?? ""),
+              updatedAt: job.updatedAt
+            }))
+        ]
           .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))
-          .slice(0, 5)
-          .map((rule) => ({
-            id: rule.id,
-            status: rule.status,
-            message: String(rule.lastError ?? ""),
-            updatedAt: rule.updatedAt
-          })),
+          .slice(0, 5),
         install
       }
     });

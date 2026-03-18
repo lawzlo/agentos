@@ -141,6 +141,24 @@ function buildSuggestedCommands({
     });
   }
 
+  if (commands.length < 3) {
+    commands.push({
+      id: "daily-digest-job",
+      label: "Daily digest job",
+      command: "agentos jobs add daily_digest --hour 18",
+      reason: "Good first always-on job: a daily summary without risky side effects."
+    });
+  }
+
+  if (commands.length < 3 && doctor.browserExecutable) {
+    commands.push({
+      id: "morning-scan-job",
+      label: "Morning scan job",
+      command: "agentos jobs add morning_scan --workspace personal-main --surface browser --hour 9",
+      reason: "Turns AgentOS into a recurring morning operator instead of one-off automation."
+    });
+  }
+
   return commands.slice(0, 3);
 }
 
