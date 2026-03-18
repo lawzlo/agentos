@@ -5,8 +5,12 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
+import type { TaskRecord } from "../src/types/runtime-schema.js";
 import { rotateDaemonLogs } from "../src/daemon-state.js";
+import { FileInboxConnector } from "../src/runtime/connectors/file-inbox.js";
+import { EventBus } from "../src/runtime/event-bus.js";
 import { ControlPlaneStore } from "../src/runtime/store.js";
+import { WatchScheduler } from "../src/runtime/watch-scheduler.js";
 import { createServer } from "../src/server.js";
 import { getRuntimeVersionInfo } from "../src/version.js";
 import { createTempDir, startAgentServer } from "./helpers.js";
@@ -158,5 +162,127 @@ test("cli version and doctor bundle commands use the daemon API", async () => {
     await fs.access(path.join(bundle.bundlePath, "doctor.json"));
   } finally {
     await server.close();
+  }
+});
+
+test("watch scheduler shutdown waits for in-flight scans to finish", async () => {
+  let releaseScan: (() => void) | null = null;
+  let stopResolved = false;
+  let markScanStarted: (() => void) | null = null;
+  const scanStarted = new Promise<void>((resolve) => {
+    markScanStarted = resolve;
+  });
+  const scheduler = new WatchScheduler({
+    store: {
+      listWatchRules() {
+        return [];
+      },
+      getWatchRule(id: string) {
+        return {
+          id,
+          enabled: true,
+          pollIntervalMs: 1000
+        };
+      }
+    },
+    executionService: {
+      async scan() {
+        markScanStarted?.();
+        await new Promise<void>((release) => {
+          releaseScan = release;
+        });
+      }
+    }
+  });
+
+  const scanPromise = scheduler.scan("watch-1");
+  await scanStarted;
+  const stopPromise = scheduler.stop().then(() => {
+    stopResolved = true;
+  });
+  await new Promise((wait) => setTimeout(wait, 30));
+  assert.equal(stopResolved, false);
+  releaseScan?.();
+  await Promise.all([scanPromise, stopPromise]);
+  assert.equal(stopResolved, true);
+});
+
+test("file inbox shutdown waits for in-flight file processing to finish", async () => {
+  const dataDir = await createTempDir();
+  const inboxDir = path.join(dataDir, "inbox");
+  let releaseCreateTask: (() => void) | null = null;
+  let stopResolved = false;
+  let started = false;
+  const now = new Date().toISOString();
+  const taskRecord: TaskRecord = {
+    id: "task-1",
+    goal: "Inbox task",
+    status: "queued",
+    priority: "normal",
+    triggerSource: "test",
+    deadline: null,
+    preferredSurface: "auto",
+    workspaceId: null,
+    traceId: null,
+    taskSpec: {
+      goal: "Inbox task"
+    },
+    plan: [],
+    result: null,
+    error: null,
+    createdAt: now,
+    updatedAt: now
+  };
+
+  const connector = new FileInboxConnector({
+    inboxDir,
+    pollMs: 20,
+    controlPlane: {
+      async ingestEvent() {
+        return {
+          event: {
+            id: "event-1",
+            type: "test",
+            source: "test",
+            taskId: taskRecord.id,
+            payload: {},
+            createdAt: now
+          },
+          task: taskRecord
+        };
+      },
+      async createTask() {
+        started = true;
+        await new Promise<void>((resolve) => {
+          releaseCreateTask = resolve;
+        });
+        return taskRecord;
+      },
+      eventBus: new EventBus()
+    }
+  });
+
+  await fs.mkdir(inboxDir, { recursive: true });
+  await fs.writeFile(path.join(inboxDir, "task.json"), JSON.stringify({ goal: "Inbox task" }), "utf8");
+
+  try {
+    await connector.start();
+    const startedAt = Date.now();
+    while (!started && Date.now() - startedAt < 2000) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(started, true);
+
+    const stopPromise = connector.stop().then(() => {
+      stopResolved = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(stopResolved, false);
+
+    releaseCreateTask?.();
+    await stopPromise;
+    assert.equal(stopResolved, true);
+  } finally {
+    releaseCreateTask?.();
   }
 });

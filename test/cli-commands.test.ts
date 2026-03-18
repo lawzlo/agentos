@@ -267,6 +267,94 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (method === "GET" && url.pathname === "/packs") {
+      writeJson({
+        packs: [
+          {
+            name: "slack-browser",
+            family: "chat",
+            category: "conversation",
+            surface: "browser",
+            supportsDrafts: true,
+            supportsAutoSend: true,
+            capabilities: ["watch_events", "thread_context", "draft_reply", "send_reply", "auto_send_replies"],
+            defaultReplyPolicy: "approve_once_then_auto",
+            description: "Slack browser workflow",
+            ready: false,
+            healthChecks: [
+              {
+                id: "browser-runtime",
+                label: "Browser runtime",
+                status: "blocked",
+                detail: "No browser executable configured. Set AGENTOS_BROWSER_EXECUTABLE."
+              }
+            ]
+          },
+          {
+            name: "boss-browser",
+            family: "chat",
+            category: "conversation",
+            surface: "browser",
+            supportsDrafts: true,
+            supportsAutoSend: false,
+            capabilities: ["watch_events", "thread_context", "draft_reply", "send_reply", "candidate_review"],
+            defaultReplyPolicy: "draft_first",
+            description: "BOSS browser workflow",
+            ready: false,
+            healthChecks: [
+              {
+                id: "browser-runtime",
+                label: "Browser runtime",
+                status: "blocked",
+                detail: "No browser executable configured. Set AGENTOS_BROWSER_EXECUTABLE."
+              }
+            ]
+          },
+          {
+            name: "wechat-desktop",
+            family: "chat",
+            category: "conversation",
+            surface: "desktop",
+            supportsDrafts: true,
+            supportsAutoSend: false,
+            capabilities: ["watch_events", "thread_context", "draft_reply", "send_reply"],
+            defaultReplyPolicy: "draft_first",
+            description: "WeChat desktop workflow",
+            ready: true,
+            healthChecks: [
+              {
+                id: "desktop-runtime",
+                label: "Desktop runtime",
+                status: "ready",
+                detail: "Native desktop bridge is available."
+              }
+            ]
+          },
+          {
+            name: "generic-mail-desktop",
+            family: "mail",
+            category: "conversation",
+            surface: "desktop",
+            supportsDrafts: true,
+            supportsAutoSend: false,
+            capabilities: ["watch_events", "thread_context", "draft_reply", "send_reply"],
+            defaultReplyPolicy: "draft_first",
+            description: "Desktop mail workflow",
+            ready: true,
+            healthChecks: [
+              {
+                id: "desktop-runtime",
+                label: "Desktop runtime",
+                status: "ready",
+                detail: "Native desktop bridge is available."
+              }
+            ]
+          }
+        ]
+      });
+      return;
+    }
+
     if (method === "GET" && url.pathname === "/learning/sources") {
       writeJson({ sources: [] });
       return;
@@ -674,10 +762,14 @@ test("cli setup summarizes readiness and recommended next steps", async () => {
     assert.match(result.stdout, /AgentOS setup/);
     assert.match(result.stdout, /Status: needs attention/);
     assert.match(result.stdout, /Install source: source checkout or npm link/);
-    assert.match(result.stdout, /Auto-start: not installed, launchd/);
+    assert.match(result.stdout, /Setup checks:/);
+    assert.match(result.stdout, /Browser app sessions/);
+    assert.match(result.stdout, /Pack availability:/);
+    assert.match(result.stdout, /slack-browser/);
     assert.match(result.stdout, /Recommended next steps:/);
     assert.match(result.stdout, /agentos setup --fix/);
     assert.match(result.stdout, /agentos packs ls/);
+    assert.match(result.stdout, /Suggested commands:/);
   } finally {
     await api.close();
     await fs.rm(dataDir, { recursive: true, force: true });
@@ -705,6 +797,11 @@ test("cli setup --json returns structured onboarding data", async () => {
     assert.equal(payload.installSource.source, "source");
     assert.equal(payload.doctor.modelConfigured, false);
     assert.equal(payload.doctor.blockedLivePackCount, 2);
+    assert.equal(Array.isArray(payload.statusChecks), true);
+    assert.equal(payload.statusChecks.some((entry: { id: string }) => entry.id === "browser-sessions"), true);
+    assert.equal(Array.isArray(payload.packSummaries), true);
+    assert.equal(payload.packSummaries.some((entry: { name: string }) => entry.name === "slack-browser"), true);
+    assert.equal(Array.isArray(payload.suggestedCommands), true);
     assert.equal(Array.isArray(payload.recommendedActions), true);
     assert.equal(payload.recommendedActions.some((entry: string) => entry.includes("agentos setup --fix")), true);
     assert.equal(Array.isArray(payload.blockingIssues), true);
@@ -735,6 +832,35 @@ test("cli setup --fix --dry-run reports planned low-risk fixes", async () => {
     assert.equal(payload.plannedFixes.some((entry: string) => entry.includes("auto-start")), true);
     assert.equal(Array.isArray(payload.appliedFixes), true);
     assert.equal(payload.appliedFixes.length, 0);
+    assert.equal(payload.statusChecks.some((entry: { id: string; status: string }) => entry.id === "data-dir" && entry.status === "warning"), true);
+  } finally {
+    await api.close();
+    await fs.rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("cli setup --fix applies local runtime directory fixes and reports them as fixed", async () => {
+  const dataDir = await createTempDir("agentos-cli-");
+  const api = await startCliApiFixture();
+  const env = {
+    ...process.env,
+    AGENTOS_BASE_URL: api.baseUrl,
+    AGENTOS_DATA_DIR: dataDir
+  };
+
+  try {
+    const result = await execFileAsync(process.execPath, ["dist/bin/agentos.js", "setup", "--fix", "--json"], {
+      cwd: process.cwd(),
+      env
+    });
+
+    const payload = JSON.parse(result.stdout);
+    assert.equal(Array.isArray(payload.appliedFixes), true);
+    assert.equal(payload.appliedFixes.some((entry: string) => entry.includes("runtime directory")), true);
+    assert.equal(
+      payload.statusChecks.some((entry: { id: string; status: string }) => entry.id === "data-dir" && entry.status === "fixed"),
+      true
+    );
   } finally {
     await api.close();
     await fs.rm(dataDir, { recursive: true, force: true });

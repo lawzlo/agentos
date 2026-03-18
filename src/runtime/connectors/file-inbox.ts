@@ -78,6 +78,13 @@ export class FileInboxConnector {
       clearInterval(this.timer);
       this.timer = null;
     }
+    const started = Date.now();
+    while (this.inFlight.size > 0) {
+      if (Date.now() - started >= Math.max(this.pollMs * 4, 5000)) {
+        throw new Error("Timed out waiting for file inbox processing to finish during shutdown");
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
   }
 
   status() {

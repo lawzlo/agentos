@@ -45,7 +45,13 @@ export class WatchScheduler {
       clearInterval(timer);
     }
     this.timers.clear();
-    this.inFlight.clear();
+    const started = Date.now();
+    while (this.inFlight.size > 0) {
+      if (Date.now() - started >= 5000) {
+        throw new Error("Timed out waiting for watch scans to finish during shutdown");
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
   }
 
   async removeAndWait(ruleId: string, timeoutMs = 5000): Promise<void> {

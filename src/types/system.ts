@@ -1,6 +1,7 @@
 import type {
   ConnectorStatus,
   DraftRecord,
+  LivePackInfo,
   TaskSnapshot,
   WatchRule
 } from "./runtime-schema.js";
@@ -131,12 +132,40 @@ export interface DiagnosticBundleSource {
   connectors?: ConnectorStatus[];
 }
 
+export interface SetupStatusCheck {
+  id: string;
+  label: string;
+  status: "ready" | "warning" | "blocking" | "fixed" | "info";
+  detail: string;
+  nextStep?: string | null;
+}
+
+export interface SetupPackSummary {
+  name: string;
+  surface: LivePackInfo["surface"];
+  category?: LivePackInfo["category"];
+  status: "ready" | "warning" | "blocking";
+  detail: string;
+  sessionState: "not_checked" | "not_required";
+  nextStep?: string | null;
+}
+
+export interface SetupCommandTemplate {
+  id: string;
+  label: string;
+  command: string;
+  reason: string;
+}
+
 export interface SetupReport {
   ok: boolean;
   startedDaemon: boolean;
   daemon: DaemonStatus;
   doctor: DoctorReport;
   installSource: InstallSourceInfo;
+  statusChecks: SetupStatusCheck[];
+  packSummaries: SetupPackSummary[];
+  suggestedCommands: SetupCommandTemplate[];
   blockingIssues: string[];
   plannedFixes: string[];
   appliedFixes: string[];
