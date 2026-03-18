@@ -33,6 +33,33 @@ export interface DaemonInstallStatus {
   command?: string | null;
 }
 
+export interface DaemonPreviousExit {
+  kind: "fresh_start" | "clean_shutdown" | "crash" | "stale_runtime";
+  clean: boolean;
+  marker: string | null;
+  timestamp: string | null;
+  reason: string | null;
+}
+
+export interface DaemonStartupRecovery {
+  recoveredAt: string;
+  requeuedTaskCount: number;
+  interruptedTaskCount: number;
+  resumedWatchCount: number;
+  reconciledRunningJobCount: number;
+  dueJobCountAtStartup: number;
+}
+
+export interface DaemonLifecycle {
+  lastStartReason:
+    | "fresh_start"
+    | "restart_after_clean_shutdown"
+    | "restart_after_crash"
+    | "restart_after_stale_runtime";
+  previousExit: DaemonPreviousExit;
+  startupRecovery: DaemonStartupRecovery;
+}
+
 export interface DaemonStatus {
   running: boolean;
   pid?: number;
@@ -53,6 +80,8 @@ export interface DaemonStatus {
   pendingDraftCount?: number;
   pendingProposalCount?: number;
   installSource?: InstallSourceInfo;
+  lifecycle?: DaemonLifecycle | null;
+  startupRecovery?: DaemonStartupRecovery | null;
   recentErrors?: Array<{
     id: string;
     status: string;
@@ -92,6 +121,8 @@ export interface DoctorReport {
   learning: LearningStatus;
   version: RuntimeVersionInfo;
   install: DaemonInstallStatus;
+  lifecycle?: DaemonLifecycle | null;
+  startupRecovery?: DaemonStartupRecovery | null;
   recentErrors: Array<{
     id: string;
     status: string;

@@ -52,6 +52,8 @@ test("doctor bundle and version endpoints expose hardening metadata", async () =
     assert.equal(typeof doctorPayload.doctor.backoffWatchCount, "number");
     assert.equal(typeof doctorPayload.doctor.install.mode, "string");
     assert.equal(Array.isArray(doctorPayload.doctor.recentErrors), true);
+    assert.equal(typeof doctorPayload.doctor.lifecycle.lastStartReason, "string");
+    assert.equal(typeof doctorPayload.doctor.startupRecovery.requeuedTaskCount, "number");
 
     const daemonPayload = await (await fetch(`${server.baseUrl}/daemon/status`)).json();
     assert.equal(typeof daemonPayload.daemon.livePackCount, "number");
@@ -62,6 +64,8 @@ test("doctor bundle and version endpoints expose hardening metadata", async () =
     assert.equal(typeof daemonPayload.daemon.pendingProposalCount, "number");
     assert.equal(typeof daemonPayload.daemon.install.mode, "string");
     assert.equal(Array.isArray(daemonPayload.daemon.recentErrors), true);
+    assert.equal(typeof daemonPayload.daemon.lifecycle.lastStartReason, "string");
+    assert.equal(typeof daemonPayload.daemon.startupRecovery.interruptedTaskCount, "number");
 
     const bundlePayload = await (
       await fetch(`${server.baseUrl}/doctor/bundle`, { method: "POST" })
@@ -73,6 +77,22 @@ test("doctor bundle and version endpoints expose hardening metadata", async () =
     assert.equal(doctorBundle.doctor.version.appVersion, getRuntimeVersionInfo().appVersion);
   } finally {
     await server.close();
+  }
+});
+
+test("daemon status reports a clean-shutdown restart reason on the next startup", async () => {
+  const dataDir = await createTempDir();
+  const first = await startAgentServer({ dataDir });
+  await first.close();
+
+  const second = await startAgentServer({ dataDir });
+
+  try {
+    const daemonPayload = await (await fetch(`${second.baseUrl}/daemon/status`)).json();
+    assert.equal(daemonPayload.daemon.lifecycle.previousExit.kind, "clean_shutdown");
+    assert.equal(daemonPayload.daemon.lifecycle.lastStartReason, "restart_after_clean_shutdown");
+  } finally {
+    await second.close();
   }
 });
 

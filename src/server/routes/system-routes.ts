@@ -1,8 +1,51 @@
 import { json } from "../http-utils.js";
 import { getDaemonInstallStatus } from "../../daemon-autostart.js";
+import { readDaemonState } from "../../daemon-state.js";
 import { detectInstallSource } from "../../install-source.js";
 import type { ApiRouteContext } from "../types.js";
-import type { DaemonStatus } from "../../types/system.js";
+import type { DaemonLifecycle, DaemonStatus, DoctorReport } from "../../types/system.js";
+
+function hasStartupRecoveryWork(lifecycle: DaemonLifecycle | null | undefined): boolean {
+  if (!lifecycle) {
+    return false;
+  }
+
+  return (
+    lifecycle.startupRecovery.requeuedTaskCount > 0 ||
+    lifecycle.startupRecovery.interruptedTaskCount > 0 ||
+    lifecycle.startupRecovery.reconciledRunningJobCount > 0
+  );
+}
+
+function daemonLifecycleWarnings(lifecycle: DaemonLifecycle | null | undefined): string[] {
+  if (!lifecycle) {
+    return [];
+  }
+
+  if (lifecycle.previousExit.kind === "crash" || lifecycle.previousExit.kind === "stale_runtime") {
+    return [
+      lifecycle.previousExit.reason
+        ? `The previous daemon session exited unexpectedly: ${lifecycle.previousExit.reason}`
+        : "The previous daemon session exited unexpectedly."
+    ];
+  }
+
+  return [];
+}
+
+function mergeDoctorLifecycle(
+  doctor: DoctorReport,
+  lifecycle: DaemonLifecycle | null
+): DoctorReport {
+  const warnings = Array.from(new Set([...doctor.warnings, ...daemonLifecycleWarnings(lifecycle)]));
+  return {
+    ...doctor,
+    ok: doctor.ok && warnings.length === 0,
+    warnings,
+    lifecycle,
+    startupRecovery: lifecycle?.startupRecovery ?? null
+  };
+}
 
 export async function handleSystemRoutes({
   req,
@@ -14,13 +57,17 @@ export async function handleSystemRoutes({
   startedAt
 }: ApiRouteContext): Promise<boolean> {
   const installSource = await detectInstallSource();
+  const daemonState = await readDaemonState(config.daemonDir);
+  const lifecycle = daemonState?.lifecycle ?? null;
   const daemon: DaemonStatus = {
     running: true,
     pid: process.pid,
     port: activePort,
     startedAt,
     dataDir: config.dataDir,
-    installSource
+    installSource,
+    lifecycle,
+    startupRecovery: lifecycle?.startupRecovery ?? null
   };
 
   if (req.method === "GET" && url.pathname === "/health") {
@@ -34,9 +81,10 @@ export async function handleSystemRoutes({
   }
 
   if (req.method === "GET" && url.pathname === "/doctor") {
+    const doctor = mergeDoctorLifecycle(await controlPlane.doctor(), lifecycle);
     json(res, 200, {
       doctor: {
-        ...(await controlPlane.doctor()),
+        ...doctor,
         daemon
       }
     });
@@ -105,7 +153,13 @@ export async function handleSystemRoutes({
         ]
           .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))
           .slice(0, 5),
-        install
+        install,
+        lifecycle,
+        startupRecovery: lifecycle?.startupRecovery ?? null,
+        recoveryAttentionRequired:
+          hasStartupRecoveryWork(lifecycle) ||
+          lifecycle?.previousExit.kind === "crash" ||
+          lifecycle?.previousExit.kind === "stale_runtime"
       }
     });
     return true;

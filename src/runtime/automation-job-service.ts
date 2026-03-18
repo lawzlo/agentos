@@ -38,6 +38,11 @@ interface TaskTemplateDefaults {
   workspaceName?: string | null;
 }
 
+interface AutomationJobStartupRecovery {
+  reconciledRunningJobCount: number;
+  dueJobCountAtStartup: number;
+}
+
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -197,6 +202,7 @@ export class AutomationJobService {
   running: boolean;
   timer: NodeJS.Timeout | null;
   tickInProgress: Promise<void> | null;
+  startupRecovery: AutomationJobStartupRecovery | null;
 
   constructor({ store, eventBus, config, createTask, runDigest }: AutomationJobServiceOptions) {
     this.store = store;
@@ -207,17 +213,34 @@ export class AutomationJobService {
     this.running = false;
     this.timer = null;
     this.tickInProgress = null;
+    this.startupRecovery = null;
   }
 
-  async start(): Promise<void> {
-    if (!this.config.jobs.enabled || this.running) {
-      return;
+  async start(): Promise<AutomationJobStartupRecovery> {
+    if (!this.config.jobs.enabled) {
+      const summary = {
+        reconciledRunningJobCount: 0,
+        dueJobCountAtStartup: 0
+      };
+      this.startupRecovery = summary;
+      return summary;
+    }
+
+    if (this.running) {
+      return (
+        this.startupRecovery ?? {
+          reconciledRunningJobCount: 0,
+          dueJobCountAtStartup: 0
+        }
+      );
     }
     this.running = true;
+    this.startupRecovery = this.reconcileStartupState();
     await this.runDueJobs();
     this.timer = setInterval(() => {
       void this.runDueJobs();
     }, this.config.jobs.pollIntervalMs);
+    return this.startupRecovery;
   }
 
   async stop(): Promise<void> {
@@ -252,6 +275,10 @@ export class AutomationJobService {
 
   getJob(jobId: string): AutomationJobRecord | null {
     return this.store.getAutomationJob(jobId);
+  }
+
+  getStartupRecovery(): AutomationJobStartupRecovery | null {
+    return this.startupRecovery;
   }
 
   createJob(input: CreateAutomationJobInput): AutomationJobRecord {
@@ -345,6 +372,34 @@ export class AutomationJobService {
       throw new Error(`Automation job not found: ${jobId}`);
     }
     return job;
+  }
+
+  reconcileStartupState(): AutomationJobStartupRecovery {
+    const recoveredAt = nowIso();
+    const jobs = this.store.listAutomationJobs();
+    const runningJobs = jobs.filter((job) => job.status === "running");
+    const dueJobCountAtStartup = jobs.filter(
+      (job) => job.enabled && job.nextRunAt && Date.parse(job.nextRunAt) <= Date.now()
+    ).length;
+
+    for (const job of runningJobs) {
+      const recovered = this.store.putAutomationJob({
+        ...job,
+        status: "degraded",
+        lastError: "Daemon restarted before automation job completion.",
+        metadata: {
+          ...job.metadata,
+          recoveredAfterRestartAt: recoveredAt,
+          recoveryReason: "daemon_restart"
+        }
+      });
+      this.eventBus.broadcast("job.updated", recovered);
+    }
+
+    return {
+      reconciledRunningJobCount: runningJobs.length,
+      dueJobCountAtStartup
+    };
   }
 
   async #executeJob(job: AutomationJobRecord, { manual = false }: { manual?: boolean } = {}): Promise<AutomationJobRecord> {

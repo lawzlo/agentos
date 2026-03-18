@@ -196,6 +196,13 @@ function buildStatusChecks({
   const fixedAutostart = appliedFixes.includes("Install daemon auto-start for the current user.");
   const blockedPackCount = packSummaries.filter((pack) => pack.status === "blocking").length;
   const warningPackCount = packSummaries.filter((pack) => pack.status === "warning").length;
+  const startupRecovery = doctor.startupRecovery ?? doctor.lifecycle?.startupRecovery ?? null;
+  const previousExit = doctor.lifecycle?.previousExit ?? null;
+  const hasRecoveryAttention =
+    (startupRecovery?.requeuedTaskCount ?? 0) > 0 ||
+    (startupRecovery?.interruptedTaskCount ?? 0) > 0 ||
+    (startupRecovery?.reconciledRunningJobCount ?? 0) > 0;
+  const unexpectedPreviousExit = previousExit?.kind === "crash" || previousExit?.kind === "stale_runtime";
 
   return [
     {
@@ -206,6 +213,21 @@ function buildStatusChecks({
       detail: startedDaemon
         ? "A local daemon was started automatically for this setup run."
         : "The AgentOS daemon is already reachable."
+    },
+    {
+      id: "runtime-recovery",
+      label: "Runtime recovery",
+      status: unexpectedPreviousExit || hasRecoveryAttention ? "warning" : "ready",
+      actionKind: unexpectedPreviousExit || hasRecoveryAttention ? "manual" : "none",
+      detail: unexpectedPreviousExit
+        ? `The previous daemon session exited unexpectedly${previousExit?.reason ? `: ${previousExit.reason}` : "."}`
+        : hasRecoveryAttention
+          ? `This daemon session reconciled ${startupRecovery?.requeuedTaskCount ?? 0} queued task(s), ${startupRecovery?.interruptedTaskCount ?? 0} unfinished task(s), and ${startupRecovery?.reconciledRunningJobCount ?? 0} automation job(s) during startup.`
+          : "Startup reconciliation did not find unfinished tasks or automation jobs to recover.",
+      nextStep:
+        unexpectedPreviousExit || hasRecoveryAttention
+          ? "Run `agentos daemon status` to inspect startup recovery, then review `agentos ps`, `agentos jobs ls`, and `agentos watch ls`."
+          : null
     },
     {
       id: "data-dir",
@@ -478,7 +500,8 @@ function buildOnboardingGuides(report: SetupReport): SetupGuide[] {
         report.doctor.pendingDraftCount > 0 ||
         report.doctor.awaitingApprovalWatchCount > 0 ||
         report.doctor.backoffWatchCount > 0 ||
-        report.doctor.degradedWatchCount > 0
+        report.doctor.degradedWatchCount > 0 ||
+        (report.doctor.degradedJobCount ?? 0) > 0
           ? "warning"
           : "ready",
       actionKind:
@@ -486,21 +509,23 @@ function buildOnboardingGuides(report: SetupReport): SetupGuide[] {
         (report.doctor.pendingDraftCount > 0 ||
           report.doctor.awaitingApprovalWatchCount > 0 ||
           report.doctor.backoffWatchCount > 0 ||
-          report.doctor.degradedWatchCount > 0)
+          report.doctor.degradedWatchCount > 0 ||
+          (report.doctor.degradedJobCount ?? 0) > 0)
           ? "mixed"
           : autostart?.status === "warning"
             ? "auto_fix"
             : report.doctor.pendingDraftCount > 0 ||
                 report.doctor.awaitingApprovalWatchCount > 0 ||
                 report.doctor.backoffWatchCount > 0 ||
-                report.doctor.degradedWatchCount > 0
+                report.doctor.degradedWatchCount > 0 ||
+                (report.doctor.degradedJobCount ?? 0) > 0
               ? "manual"
               : "none",
       summary:
         autostart?.status === "warning"
           ? "The daemon is running now, but it is not yet configured to come back automatically when you log in."
-          : report.doctor.pendingDraftCount > 0 || report.doctor.awaitingApprovalWatchCount > 0 || report.doctor.backoffWatchCount > 0 || report.doctor.degradedWatchCount > 0
-            ? "AgentOS can stay on, but there are drafts or watch states that should be reviewed before trusting unattended workflows."
+          : report.doctor.pendingDraftCount > 0 || report.doctor.awaitingApprovalWatchCount > 0 || report.doctor.backoffWatchCount > 0 || report.doctor.degradedWatchCount > 0 || (report.doctor.degradedJobCount ?? 0) > 0
+            ? "AgentOS can stay on, but there are drafts, watches, or recurring jobs that should be reviewed before trusting unattended workflows."
             : "The daemon and watch runtime look healthy enough for low-risk always-on workflows.",
       whyItMatters: "Always-on behavior depends on daemon auto-start, healthy watch rules, and a clean draft/reply queue so automation does not silently drift.",
       actions: uniqueActions([
@@ -509,7 +534,8 @@ function buildOnboardingGuides(report: SetupReport): SetupGuide[] {
         report.doctor.awaitingApprovalWatchCount > 0 || report.doctor.backoffWatchCount > 0 || report.doctor.degradedWatchCount > 0
           ? "Run `agentos watch ls` to review watches that are waiting, degraded, or in backoff."
           : "",
-        report.doctor.pendingDraftCount === 0 && report.doctor.awaitingApprovalWatchCount === 0 && report.doctor.backoffWatchCount === 0 && report.doctor.degradedWatchCount === 0
+        (report.doctor.degradedJobCount ?? 0) > 0 ? "Run `agentos jobs ls` to review recurring jobs that were degraded or recovered after restart." : "",
+        report.doctor.pendingDraftCount === 0 && report.doctor.awaitingApprovalWatchCount === 0 && report.doctor.backoffWatchCount === 0 && report.doctor.degradedWatchCount === 0 && (report.doctor.degradedJobCount ?? 0) === 0
           ? "Add one low-risk recurring workflow first, for example `agentos jobs add daily_digest --hour 18`."
           : ""
       ])

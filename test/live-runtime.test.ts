@@ -102,6 +102,18 @@ async function waitForWatchDeletion(baseUrl, watchRuleId, timeoutMs = 10000) {
   throw new Error(`Timed out waiting for watch rule ${watchRuleId} to be deleted`);
 }
 
+async function waitForAutomationJob(baseUrl, jobId, matcher, timeoutMs = 10000) {
+  return waitForValue(
+    async () => {
+      const response = await fetch(`${baseUrl}/jobs/${jobId}`);
+      const payload = await response.json();
+      return payload.job;
+    },
+    matcher,
+    timeoutMs
+  );
+}
+
 test("watch rules trigger deduped tasks and can be enabled or disabled", async () => {
   const dataDir = await createTempDir();
   const fakeLivePack = {
@@ -183,6 +195,52 @@ test("watch rules trigger deduped tasks and can be enabled or disabled", async (
     ).json();
     assert.equal(enabledPayload.watch.enabled, true);
     assert.equal(enabledPayload.watch.status, "watching");
+  } finally {
+    await server.close();
+  }
+});
+
+test("daemon startup reconciles running automation jobs left behind by a previous session", async () => {
+  const dataDir = await createTempDir();
+  const store = new ControlPlaneStore(`${dataDir}/agentos.sqlite`);
+  const nextRunAt = new Date(Date.now() + 60_000).toISOString();
+  const runningJob = store.putAutomationJob({
+    name: "Morning scan",
+    kind: "task",
+    template: "morning_scan",
+    enabled: true,
+    status: "running",
+    scheduleType: "daily",
+    hourOfDay: 9,
+    intervalMinutes: null,
+    taskSpec: {
+      goal: "Review my inbox and draft a morning brief.",
+      preferredSurface: "browser",
+      workspaceName: "personal-main"
+    },
+    metadata: {},
+    lastRunAt: null,
+    lastTaskId: null,
+    nextRunAt,
+    lastError: null
+  });
+  store.close();
+
+  const server = await startAgentServer({ dataDir });
+
+  try {
+    const recoveredJob = await waitForAutomationJob(
+      server.baseUrl,
+      runningJob.id,
+      (job) => job && job.status === "degraded"
+    );
+    assert.equal(recoveredJob.status, "degraded");
+    assert.match(recoveredJob.lastError, /daemon restarted before automation job completion/i);
+    assert.equal(typeof recoveredJob.metadata.recoveredAfterRestartAt, "string");
+
+    const daemonPayload = await (await fetch(`${server.baseUrl}/daemon/status`)).json();
+    assert.equal(daemonPayload.daemon.startupRecovery.reconciledRunningJobCount, 1);
+    assert.equal(daemonPayload.daemon.startupRecovery.dueJobCountAtStartup, 0);
   } finally {
     await server.close();
   }

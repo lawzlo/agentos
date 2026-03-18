@@ -6,13 +6,17 @@ const config = resolveConfig();
 const app = await createServer();
 const port = await app.listen();
 
-async function shutdown() {
-  await app.close();
+async function shutdown(signal: string) {
+  await app.close(`signal:${signal}`);
   process.exit(0);
 }
 
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
+process.on("SIGINT", () => {
+  void shutdown("SIGINT");
+});
+process.on("SIGTERM", () => {
+  void shutdown("SIGTERM");
+});
 process.on("uncaughtException", (error) => {
   void appendDaemonMarker(config.daemonDir, "daemon.crash", {
     type: "uncaughtException",

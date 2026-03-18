@@ -6,7 +6,14 @@ import { WebSocketServer } from "ws";
 
 import { resolveConfig } from "./config.js";
 import { createControlPlane } from "./runtime/control-plane.js";
-import { appendDaemonMarker, clearDaemonState, readDaemonRuntime, writeDaemonState } from "./daemon-state.js";
+import {
+  appendDaemonMarker,
+  buildDaemonLifecycle,
+  clearDaemonState,
+  inferDaemonPreviousExit,
+  readDaemonRuntime,
+  writeDaemonState
+} from "./daemon-state.js";
 import { dispatchApiRoute } from "./server/route-dispatcher.js";
 import { serveStatic } from "./server/http-utils.js";
 
@@ -77,6 +84,10 @@ export async function createServer(overrides = {}) {
         throw new Error(`AgentOS daemon is already running with pid ${runtime.state?.pid}${runningPort}.`);
       }
 
+      const previousExit = await inferDaemonPreviousExit(config.daemonDir, {
+        staleState: runtime.staleState ?? null
+      });
+
       return new Promise<number>((resolve, reject) => {
         const onError = (error: Error) => {
           server.off("error", onError);
@@ -89,10 +100,14 @@ export async function createServer(overrides = {}) {
           const address = server.address();
           void controlPlane
             .start()
-            .then(async () => {
+            .then(async (startupRecovery) => {
               activePort = typeof address === "object" && address ? address.port : config.port;
               startedAt = new Date().toISOString();
               const version = controlPlane.getVersionInfo();
+              const lifecycle = buildDaemonLifecycle({
+                previousExit,
+                startupRecovery
+              });
               await writeDaemonState(config.daemonDir, {
                 pid: process.pid,
                 port: activePort,
@@ -104,12 +119,17 @@ export async function createServer(overrides = {}) {
                 runtimeProtocolVersion: version.runtimeProtocolVersion,
                 nativeProtocolVersion: version.nativeProtocolVersion,
                 storeSchemaVersion: version.storeSchemaVersion,
-                installLayoutVersion: version.installLayoutVersion
+                installLayoutVersion: version.installLayoutVersion,
+                lifecycle,
+                startupRecovery
               });
               await appendDaemonMarker(config.daemonDir, "daemon.started", {
                 pid: process.pid,
                 port: activePort,
-                appVersion: version.appVersion
+                appVersion: version.appVersion,
+                startReason: lifecycle.lastStartReason,
+                previousExitKind: lifecycle.previousExit.kind,
+                startupRecovery
               });
               resolve(activePort);
             })
@@ -117,7 +137,7 @@ export async function createServer(overrides = {}) {
         });
       });
     },
-    async close() {
+    async close(reason = "shutdown_request") {
       controlPlane.eventBus.off("broadcast", broadcast);
       for (const client of wss.clients) {
         client.terminate();
@@ -132,7 +152,8 @@ export async function createServer(overrides = {}) {
       server.closeAllConnections?.();
       await Promise.all([serverClose, wssClose]);
       await appendDaemonMarker(config.daemonDir, "daemon.stopped", {
-        pid: process.pid
+        pid: process.pid,
+        reason
       }).catch(() => {});
       await clearDaemonState(config.daemonDir);
       await controlPlane.shutdown();

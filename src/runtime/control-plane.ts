@@ -60,6 +60,7 @@ import type {
 } from "../types/learning.js";
 import type { AutomationJobRecord } from "../types/jobs.js";
 import type {
+  DaemonStartupRecovery,
   DaemonStatus,
   DoctorBundle,
   DoctorReport,
@@ -120,6 +121,7 @@ export class ControlPlane {
   runtimeSupervisor: RuntimeSupervisor;
   learningService: LearningService;
   automationJobService: AutomationJobService;
+  startupRecovery: DaemonStartupRecovery | null;
 
   constructor(config: AgentOsConfig) {
     this.config = config;
@@ -242,16 +244,26 @@ export class ControlPlane {
       createTask: async (taskSpec: TaskSpec) => this.createTask(taskSpec),
       runDigest: async () => this.runDigest()
     });
+    this.startupRecovery = null;
   }
 
-  async start() {
+  async start(): Promise<DaemonStartupRecovery> {
     await this.learningService.start();
     for (const connector of this.connectors) {
       await connector.start();
     }
-    await this.runtimeSupervisor.restoreRuntimeState();
-    await this.watchScheduler.start();
-    await this.automationJobService.start();
+    const taskRecovery = await this.runtimeSupervisor.restoreRuntimeState();
+    const watchRecovery = await this.watchScheduler.start();
+    const jobRecovery = await this.automationJobService.start();
+    this.startupRecovery = {
+      recoveredAt: new Date().toISOString(),
+      requeuedTaskCount: taskRecovery.requeuedTaskCount,
+      interruptedTaskCount: taskRecovery.interruptedTaskCount,
+      resumedWatchCount: watchRecovery.resumedWatchCount,
+      reconciledRunningJobCount: jobRecovery.reconciledRunningJobCount,
+      dueJobCountAtStartup: jobRecovery.dueJobCountAtStartup
+    };
+    return this.startupRecovery;
   }
 
   decorateTask(task: TaskRecord | null): TaskSnapshot | null {
@@ -904,6 +916,10 @@ export class ControlPlane {
     await this.automationJobService.stop();
     await this.learningService.stop();
     await this.runtimeSupervisor.shutdown();
+  }
+
+  getStartupRecovery(): DaemonStartupRecovery | null {
+    return this.startupRecovery;
   }
 
   getLearningStatus(): LearningStatus {

@@ -32,11 +32,18 @@ export class WatchScheduler {
     this.inFlight = new Set();
   }
 
-  async start(): Promise<void> {
+  async start(): Promise<{ resumedWatchCount: number }> {
     this.running = true;
+    let resumedWatchCount = 0;
     for (const rule of this.store.listWatchRules()) {
+      if (rule.enabled) {
+        resumedWatchCount += 1;
+      }
       this.sync(rule);
     }
+    return {
+      resumedWatchCount
+    };
   }
 
   async stop(): Promise<void> {

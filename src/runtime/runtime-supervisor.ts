@@ -168,7 +168,10 @@ export class RuntimeSupervisor {
     });
   }
 
-  async restoreRuntimeState() {
+  async restoreRuntimeState(): Promise<{
+    requeuedTaskCount: number;
+    interruptedTaskCount: number;
+  }> {
     const queued = this.store.listTasksByStatuses(["queued"]);
     for (const task of queued) {
       this.enqueue(task.id);
@@ -190,6 +193,11 @@ export class RuntimeSupervisor {
       }
       this.eventBus.broadcast("task.updated", this.controlPlane.getTask(task.id));
     }
+
+    return {
+      requeuedTaskCount: queued.length,
+      interruptedTaskCount: interrupted.length
+    };
   }
 
   async waitForExecutionAccess({
