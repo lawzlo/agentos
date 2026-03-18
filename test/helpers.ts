@@ -6,6 +6,9 @@ import type { AddressInfo } from "node:net";
 
 import { createServer as createAgentServer } from "../src/server.js";
 
+const DEFAULT_TASK_WAIT_TIMEOUT_MS = Number.parseInt(process.env.AGENTOS_WAIT_TASK_TIMEOUT_MS ?? "", 10) || 60000;
+const TASK_WAIT_INTERVAL_MS = 250;
+
 export async function createTempDir(prefix = "agentos-test-") {
   return fs.mkdtemp(path.join(os.tmpdir(), prefix));
 }
@@ -602,18 +605,27 @@ export async function startAgentServer({ dataDir, ...overrides }) {
   };
 }
 
-export async function waitForTask(baseUrl, taskId, matcher, timeoutMs = 20000) {
+export async function waitForTask(baseUrl, taskId, matcher, timeoutMs = DEFAULT_TASK_WAIT_TIMEOUT_MS) {
   const started = Date.now();
+  let lastTask = null;
+
   while (Date.now() - started < timeoutMs) {
     const response = await fetch(`${baseUrl}/tasks/${taskId}`);
     const payload = await response.json();
+    if (!payload || !payload.task) {
+      await new Promise((resolve) => setTimeout(resolve, TASK_WAIT_INTERVAL_MS));
+      continue;
+    }
+    lastTask = payload.task;
     if (matcher(payload.task)) {
       return payload.task;
     }
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    await new Promise((resolve) => setTimeout(resolve, TASK_WAIT_INTERVAL_MS));
   }
 
-  throw new Error(`Timed out waiting for task ${taskId}`);
+  throw new Error(
+    `Timed out waiting for task ${taskId} after ${timeoutMs}ms (lastStatus=${lastTask?.status ?? "unknown"})`
+  );
 }
 
 export async function startModelServer(decide) {

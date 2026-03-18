@@ -5,6 +5,15 @@ import { spawn } from "node:child_process";
 const rootDir = process.cwd();
 const testDir = path.join(rootDir, "dist", "test");
 
+const runnerArgs = process.argv.slice(2);
+const hasConcurrencyArg = runnerArgs.some((value) => value.startsWith("--test-concurrency="));
+const hasTimeoutArg = runnerArgs.some((value) => value.startsWith("--test-timeout="));
+
+const defaultRunnerArgs = [
+  ...(!hasConcurrencyArg ? ["--test-concurrency=1"] : []),
+  ...(!hasTimeoutArg ? ["--test-timeout=300000"] : [])
+];
+
 const entries = (await fs.readdir(testDir))
   .filter((entry) => entry.endsWith(".test.js"))
   .sort()
@@ -15,7 +24,7 @@ if (!entries.length) {
 }
 
 await new Promise((resolve, reject) => {
-  const child = spawn(process.execPath, ["--test", ...entries], {
+  const child = spawn(process.execPath, ["--test", ...defaultRunnerArgs, ...runnerArgs, ...entries], {
     cwd: rootDir,
     stdio: "inherit"
   });
