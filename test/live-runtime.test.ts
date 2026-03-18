@@ -35,6 +35,14 @@ async function waitForWatchTask(baseUrl, watchRuleId, timeoutMs = 10000) {
   throw new Error(`Timed out waiting for watch task from ${watchRuleId}`);
 }
 
+async function waitForWatchTasks(baseUrl, watchRuleId, count, timeoutMs = 10000) {
+  return waitForValue(async () => {
+    const response = await fetch(`${baseUrl}/tasks`);
+    const payload = await response.json();
+    return payload.tasks.filter((task) => task.triggerSource === `watch:${watchRuleId}`);
+  }, (tasks) => tasks.length >= count, timeoutMs);
+}
+
 async function waitForWatchRule(baseUrl, watchRuleId, matcher, timeoutMs = 10000) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
@@ -626,6 +634,389 @@ test("draft-only watch rules create pending drafts that can be approved into tas
 
     const completed = await waitForTask(server.baseUrl, approvedPayload.draft.taskId, (task) => task.status === "completed");
     assert.equal(completed.status, "completed");
+  } finally {
+    await server.close();
+  }
+});
+
+test("conversation threads escalate after failed auto-send and approval resets the same thread", async () => {
+  const dataDir = await createTempDir();
+  const queuedDetections = [
+    {
+      fingerprint: "thread-a-msg-1",
+      summary: "Thread A first follow-up",
+      replyText: "Thanks, I saw this.",
+      inputs: {
+        typeTarget: "Message",
+        sendTarget: "Send"
+      },
+      metadata: {
+        threadKey: "thread-a",
+        replyThreadKey: "thread-a",
+        messageId: "thread-a-msg-1",
+        sender: "Candidate",
+        direction: "inbound",
+        receivedAt: new Date().toISOString(),
+        requiresAttention: true
+      },
+      taskSpec: {
+        goal: "Send the first reply for thread A",
+        preferredSurface: "desktop",
+        steps: [
+          {
+            label: "Write first reply receipt",
+            surface: "desktop",
+            action: "writeFileText",
+            params: {
+              path: "thread-a/first.txt",
+              text: "first"
+            },
+            checkpoint: false
+          }
+        ]
+      }
+    },
+    {
+      fingerprint: "thread-a-msg-2",
+      summary: "Thread A second follow-up",
+      replyText: "Thanks, I saw this.",
+      inputs: {
+        typeTarget: "Message",
+        sendTarget: "Send"
+      },
+      metadata: {
+        threadKey: "thread-a",
+        replyThreadKey: "thread-a",
+        messageId: "thread-a-msg-2",
+        sender: "Candidate",
+        direction: "inbound",
+        receivedAt: new Date().toISOString(),
+        requiresAttention: true
+      },
+      taskSpec: {
+        goal: "Send the second reply for thread A",
+        preferredSurface: "desktop",
+        steps: [
+          {
+            label: "Read a missing file to fail",
+            surface: "desktop",
+            action: "readFileText",
+            params: {
+              path: "thread-a/missing.txt"
+            },
+            checkpoint: false
+          }
+        ]
+      }
+    },
+    {
+      fingerprint: "thread-a-msg-3",
+      summary: "Thread A third follow-up",
+      replyText: "Thanks, I saw this.",
+      inputs: {
+        typeTarget: "Message",
+        sendTarget: "Send"
+      },
+      metadata: {
+        threadKey: "thread-a",
+        replyThreadKey: "thread-a",
+        messageId: "thread-a-msg-3",
+        sender: "Candidate",
+        direction: "inbound",
+        receivedAt: new Date().toISOString(),
+        requiresAttention: true
+      },
+      taskSpec: {
+        goal: "Prepare the approved reply for thread A",
+        preferredSurface: "desktop",
+        steps: [
+          {
+            label: "Write approved reply receipt",
+            surface: "desktop",
+            action: "writeFileText",
+            params: {
+              path: "thread-a/approved.txt",
+              text: "approved"
+            },
+            checkpoint: false
+          }
+        ]
+      }
+    },
+    {
+      fingerprint: "thread-a-msg-4",
+      summary: "Thread A fourth follow-up",
+      replyText: "Thanks, I saw this.",
+      inputs: {
+        typeTarget: "Message",
+        sendTarget: "Send"
+      },
+      metadata: {
+        threadKey: "thread-a",
+        replyThreadKey: "thread-a",
+        messageId: "thread-a-msg-4",
+        sender: "Candidate",
+        direction: "inbound",
+        receivedAt: new Date().toISOString(),
+        requiresAttention: true
+      },
+      taskSpec: {
+        goal: "Send the recovery reply for thread A",
+        preferredSurface: "desktop",
+        steps: [
+          {
+            label: "Write recovery reply receipt",
+            surface: "desktop",
+            action: "writeFileText",
+            params: {
+              path: "thread-a/recovered.txt",
+              text: "recovered"
+            },
+            checkpoint: false
+          }
+        ]
+      }
+    }
+  ];
+  const fakeLivePack = {
+    async detectNewItems() {
+      return queuedDetections.shift() ?? null;
+    }
+  };
+  const server = await startAgentServer({
+    dataDir,
+    livePacks: {
+      "threaded-live": fakeLivePack
+    }
+  });
+
+  try {
+    const createResponse = await fetch(`${server.baseUrl}/watches`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        goal: "Always watch the threaded inbox and reply automatically",
+        livePack: "threaded-live",
+        preferredSurface: "desktop",
+        pollIntervalMs: 50,
+        governance: {
+          replyPolicy: "auto_send"
+        }
+      })
+    });
+    const { watch } = await createResponse.json();
+
+    const firstTasks = await waitForWatchTasks(server.baseUrl, watch.id, 1);
+    const firstTask = firstTasks[0];
+    const firstCompleted = await waitForTask(server.baseUrl, firstTask.id, (task) => task.status === "completed");
+    assert.equal(firstCompleted.status, "completed");
+
+    const secondTasks = await waitForWatchTasks(server.baseUrl, watch.id, 2);
+    const secondTask = secondTasks.find((task) => task.id !== firstTask.id);
+    if (!secondTask) {
+      throw new Error("Expected a second watch task after the first auto-send.");
+    }
+    const failedTask = await waitForTask(server.baseUrl, secondTask.id, (task) => task.status === "failed");
+    assert.equal(failedTask.status, "failed");
+
+    const escalatedWatch = await waitForWatchRule(
+      server.baseUrl,
+      watch.id,
+      (current) => current.status === "backoff" && current.health.threadFailureCount === 1 && Boolean(current.health.threadEscalatedAt)
+    );
+    assert.equal(escalatedWatch.health.threadKey, "thread-a");
+    assert.match(String(escalatedWatch.lastError ?? ""), /ENOENT|no such file/i);
+
+    const pendingDraft = await waitForDraft(
+      server.baseUrl,
+      (draft) => draft.watchRuleId === watch.id && draft.fingerprint === "thread-a-msg-3" && draft.status === "pending",
+      15000
+    );
+    assert.equal(pendingDraft.riskDecision.action, "draft");
+    assert.ok(
+      pendingDraft.riskDecision.reasons.some((reason) => String(reason).includes("re-approval after a failed auto-send"))
+    );
+
+    const awaitingApproval = await waitForWatchRule(
+      server.baseUrl,
+      watch.id,
+      (current) => current.status === "awaiting_approval" && current.health.threadFailureCount === 1
+    );
+    assert.equal(awaitingApproval.health.threadKey, "thread-a");
+    assert.equal(awaitingApproval.health.activeDraftId, pendingDraft.id);
+
+    const approvedResponse = await fetch(`${server.baseUrl}/drafts/${pendingDraft.id}/approve`, {
+      method: "POST"
+    });
+    const approvedPayload = await approvedResponse.json();
+    const approvedTask = await waitForTask(server.baseUrl, approvedPayload.draft.taskId, (task) => task.status === "completed");
+    assert.equal(approvedTask.status, "completed");
+
+    const resetWatch = await waitForWatchRule(
+      server.baseUrl,
+      watch.id,
+      (current) => current.health.threadFailureCount === 0 && current.health.threadEscalatedAt == null
+    );
+    assert.equal(resetWatch.health.threadKey, "thread-a");
+
+    const fourthTasks = await waitForWatchTasks(server.baseUrl, watch.id, 4, 15000);
+    const recoveryTask = fourthTasks.find(
+      (task) => ![firstTask.id, secondTask.id, approvedPayload.draft.taskId].includes(task.id)
+    );
+    if (!recoveryTask) {
+      throw new Error("Expected a recovery auto-send task after approval reset the thread.");
+    }
+    const recovered = await waitForTask(server.baseUrl, recoveryTask.id, (task) => task.status === "completed");
+    assert.equal(recovered.status, "completed");
+
+    const finalWatch = await waitForWatchRule(
+      server.baseUrl,
+      watch.id,
+      (current) => current.health.threadFailureCount === 0 && current.health.threadEscalatedAt == null
+    );
+    assert.equal(finalWatch.health.threadKey, "thread-a");
+    assert.equal(finalWatch.health.lastInboundMessageId, "thread-a-msg-4");
+    assert.ok(finalWatch.health.lastAgentActionAt);
+  } finally {
+    await server.close();
+  }
+});
+
+test("approve-once reply leases stay scoped to a single conversation thread", async () => {
+  const dataDir = await createTempDir();
+  const queuedDetections = [
+    {
+      fingerprint: "thread-a-msg-1",
+      summary: "Thread A initial reply",
+      replyText: "Thanks, I saw this.",
+      inputs: {
+        typeTarget: "Message",
+        sendTarget: "Send"
+      },
+      metadata: {
+        threadKey: "thread-a",
+        replyThreadKey: "thread-a",
+        messageId: "thread-a-msg-1",
+        sender: "Candidate A",
+        direction: "inbound",
+        receivedAt: new Date().toISOString(),
+        requiresAttention: true
+      },
+      taskSpec: {
+        goal: "Handle thread A reply after approval",
+        preferredSurface: "desktop",
+        steps: [
+          {
+            label: "Write thread A receipt",
+            surface: "desktop",
+            action: "writeFileText",
+            params: {
+              path: "thread-a/reply.txt",
+              text: "thread-a"
+            },
+            checkpoint: false
+          }
+        ]
+      }
+    },
+    {
+      fingerprint: "thread-b-msg-1",
+      summary: "Thread B needs approval too",
+      replyText: "Thanks, I saw this.",
+      inputs: {
+        typeTarget: "Message",
+        sendTarget: "Send"
+      },
+      metadata: {
+        threadKey: "thread-b",
+        replyThreadKey: "thread-b",
+        messageId: "thread-b-msg-1",
+        sender: "Candidate B",
+        direction: "inbound",
+        receivedAt: new Date().toISOString(),
+        requiresAttention: true
+      },
+      taskSpec: {
+        goal: "Handle thread B reply only after approval",
+        preferredSurface: "desktop",
+        steps: [
+          {
+            label: "Write thread B receipt",
+            surface: "desktop",
+            action: "writeFileText",
+            params: {
+              path: "thread-b/reply.txt",
+              text: "thread-b"
+            },
+            checkpoint: false
+          }
+        ]
+      }
+    }
+  ];
+  const fakeLivePack = {
+    async detectNewItems() {
+      return queuedDetections.shift() ?? null;
+    }
+  };
+  const server = await startAgentServer({
+    dataDir,
+    livePacks: {
+      "threaded-lease-live": fakeLivePack
+    }
+  });
+
+  try {
+    const createResponse = await fetch(`${server.baseUrl}/watches`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        goal: "Always watch the threaded inbox and use approve once",
+        livePack: "threaded-lease-live",
+        preferredSurface: "desktop",
+        pollIntervalMs: 50,
+        governance: {
+          replyPolicy: "approve_once_then_auto",
+          replyApprovalWindowMs: 600000
+        }
+      })
+    });
+    const { watch } = await createResponse.json();
+
+    const firstDraft = await waitForDraft(
+      server.baseUrl,
+      (draft) => draft.watchRuleId === watch.id && draft.fingerprint === "thread-a-msg-1" && draft.status === "pending"
+    );
+    assert.equal(firstDraft.metadata.replyThreadKey, "thread-a");
+
+    const approvedResponse = await fetch(`${server.baseUrl}/drafts/${firstDraft.id}/approve`, {
+      method: "POST"
+    });
+    const approvedPayload = await approvedResponse.json();
+    const approvedWatchPayload = await (await fetch(`${server.baseUrl}/watches/${watch.id}`)).json();
+    assert.equal(approvedWatchPayload.watch.health.threadKey, "thread-a");
+    assert.ok(approvedWatchPayload.watch.health.replyLeaseExpiresAt);
+    const completed = await waitForTask(server.baseUrl, approvedPayload.draft.taskId, (task) => task.status === "completed");
+    assert.equal(completed.status, "completed");
+
+    const secondDraft = await waitForDraft(
+      server.baseUrl,
+      (draft) => draft.watchRuleId === watch.id && draft.fingerprint === "thread-b-msg-1" && draft.status === "pending",
+      15000
+    );
+    assert.equal(secondDraft.metadata.replyThreadKey, "thread-b");
+    assert.equal(secondDraft.riskDecision.action, "draft");
+
+    const tasksPayload = await (await fetch(`${server.baseUrl}/tasks`)).json();
+    assert.equal(tasksPayload.tasks.filter((task) => task.triggerSource === `watch:${watch.id}`).length, 1);
+
+    const pendingWatch = await waitForWatchRule(
+      server.baseUrl,
+      watch.id,
+      (current) => current.status === "awaiting_approval" && current.health.threadKey === "thread-b"
+    );
+    assert.equal(pendingWatch.health.activeDraftId, secondDraft.id);
+    assert.equal(pendingWatch.health.replyLeaseExpiresAt, null);
   } finally {
     await server.close();
   }

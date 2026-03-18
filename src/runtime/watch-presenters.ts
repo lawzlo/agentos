@@ -1,4 +1,5 @@
 import type { DraftRecord, TaskSnapshot, WatchHealth, WatchRule } from "../types/runtime-schema.js";
+import { currentConversationThreadState } from "./conversation-thread-state.js";
 
 export interface DecoratedDraftRecord extends DraftRecord {
   watch: WatchRule | null;
@@ -14,6 +15,7 @@ export function buildWatchHealth(rule: WatchRule | null): WatchHealth | null {
   const activeTaskId = String(rule.dedupeState?.activeTaskId ?? "").trim() || null;
   const activeDraftId = String(rule.dedupeState?.activeDraftId ?? "").trim() || null;
   const failureCount = Number(rule.dedupeState?.failureCount ?? 0);
+  const threadState = currentConversationThreadState(rule.dedupeState ?? {});
   const state = !rule.enabled || rule.status === "disabled"
     ? "disabled"
     : rule.status === "degraded"
@@ -30,6 +32,14 @@ export function buildWatchHealth(rule: WatchRule | null): WatchHealth | null {
     activeTaskId,
     activeDraftId,
     lastHandledFingerprint: String(rule.dedupeState?.lastFingerprint ?? "").trim() || null,
+    threadKey: threadState?.threadKey ?? null,
+    threadFailureCount: threadState?.failureCount ?? 0,
+    threadCooldownUntil: threadState?.cooldownUntil ? new Date(threadState.cooldownUntil).toISOString() : null,
+    replyLeaseExpiresAt: threadState?.replyLeaseExpiresAt ? new Date(threadState.replyLeaseExpiresAt).toISOString() : null,
+    threadEscalatedAt: threadState?.escalatedAt ?? null,
+    lastInboundMessageId: threadState?.lastInboundMessageId ?? null,
+    lastInboundReceivedAt: threadState?.lastInboundReceivedAt ?? null,
+    lastAgentActionAt: threadState?.lastAgentActionAt ?? null,
     summary:
       rule.lastError ??
       (String(rule.dedupeState?.lastSummary ?? "").trim() || null) ??

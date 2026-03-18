@@ -1,5 +1,6 @@
 import { decorateDraft } from "./watch-presenters.js";
-import { recordReplyApprovalGrant, replyApprovalWindowMs, resolveReplyPolicy } from "./reply-policy.js";
+import { recordConversationApproval } from "./conversation-thread-state.js";
+import { replyApprovalWindowMs, resolveReplyPolicy } from "./reply-policy.js";
 import type { EventBus } from "./event-bus.js";
 import type { ControlPlaneStore } from "./store.js";
 import type { DecoratedDraftRecord } from "./watch-presenters.js";
@@ -108,10 +109,11 @@ export class DraftService {
     }
 
     const task = await this.createTask(draft.taskSpec);
+    const approvedAt = new Date().toISOString();
     const approved = this.store.updateDraft(draftId, {
       status: "approved",
       taskId: task.id,
-      approvedAt: new Date().toISOString()
+      approvedAt
     });
 
     if (draft.watchRuleId) {
@@ -122,27 +124,25 @@ export class DraftService {
           taskSpec: draft.taskSpec,
           livePack: draft.livePack ?? watchRule.livePack
         });
-        const replyThreadKey = String(draft.metadata?.replyThreadKey ?? "").trim();
-        const dedupeState =
-          replyPolicy === "approve_once_then_auto" && replyThreadKey
-            ? recordReplyApprovalGrant(
-                {
-                  ...(watchRule.dedupeState ?? {}),
-                  activeTaskId: task.id,
-                  activeDraftId: null,
-                  lastFingerprint: draft.fingerprint ?? watchRule.dedupeState?.lastFingerprint ?? null,
-                  lastSummary: draft.summary ?? watchRule.dedupeState?.lastSummary ?? null
-                },
-                replyThreadKey,
-                Date.now() + replyApprovalWindowMs(watchRule.watchProfile?.governance)
-              )
-            : {
-                ...(watchRule.dedupeState ?? {}),
-                activeTaskId: task.id,
-                activeDraftId: null,
-                lastFingerprint: draft.fingerprint ?? watchRule.dedupeState?.lastFingerprint ?? null,
-                lastSummary: draft.summary ?? watchRule.dedupeState?.lastSummary ?? null
-              };
+        const replyThreadKey = String(draft.metadata?.replyThreadKey ?? draft.metadata?.threadKey ?? "").trim();
+        const baseDedupeState = {
+          ...(watchRule.dedupeState ?? {}),
+          activeTaskId: task.id,
+          activeDraftId: null,
+          lastFingerprint: draft.fingerprint ?? watchRule.dedupeState?.lastFingerprint ?? null,
+          lastSummary: draft.summary ?? watchRule.dedupeState?.lastSummary ?? null
+        };
+        const dedupeState = replyThreadKey
+          ? recordConversationApproval(baseDedupeState, {
+              threadKey: replyThreadKey,
+              expiresAt:
+                replyPolicy === "approve_once_then_auto"
+                  ? Date.now() + replyApprovalWindowMs(watchRule.watchProfile?.governance)
+                  : null,
+              approvedAt,
+              taskId: task.id
+            })
+          : baseDedupeState;
         const updated = this.store.putWatchRule({
           ...watchRule,
           status: "watching",

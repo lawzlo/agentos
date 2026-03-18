@@ -1,6 +1,7 @@
 import { normalizeWatchRule } from "./watch-rule-parser.js";
 import { deriveWatchProfileFromExecution } from "./watch-profile.js";
 import { buildWatchHealth, decorateWatchRule } from "./watch-presenters.js";
+import { clearConversationState } from "./conversation-thread-state.js";
 import type { AgentOsConfig } from "../config.js";
 import type { EventBus } from "./event-bus.js";
 import type { LivePackRegistry } from "./live-pack-registry.js";
@@ -256,7 +257,7 @@ export class WatchService {
       ...watchRule,
       status: watchRule.enabled ? "watching" : "disabled",
       lastError: null,
-      dedupeState: {
+      dedupeState: clearConversationState({
         ...(watchRule.dedupeState ?? {}),
         failureCount: 0,
         retryAfter: null,
@@ -266,7 +267,7 @@ export class WatchService {
         lastFingerprint: null,
         lastSummary: null,
         lastContext: []
-      }
+      })
     });
     this.watchScheduler.sync(updated);
     const decorated = this.decorate(updated);

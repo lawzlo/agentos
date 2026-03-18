@@ -1,6 +1,17 @@
 import { nowIso } from "./id.js";
 import { materializeWatchActionTemplate } from "./watch-profile.js";
 import { clearExpiredReplyApprovalGrant, deriveReplyThreadKey, hasActiveReplyApprovalGrant } from "./reply-policy.js";
+import {
+  deriveConversationThreadKey,
+  findConversationThreadByTaskId,
+  isConversationThreadCooldownActive,
+  isConversationThreadEscalated,
+  normalizeConversationThreadKey,
+  recordConversationFailure,
+  recordConversationObservation,
+  recordConversationTaskCompletion,
+  recordConversationTaskDispatch
+} from "./conversation-thread-state.js";
 import type { ControlPlane } from "./control-plane.js";
 import type { EventBus } from "./event-bus.js";
 import type { LivePack, LivePackDraftResponse, LivePackRegistry } from "./live-pack-registry.js";
@@ -20,6 +31,8 @@ import type {
 interface TaskLike {
   id?: string;
   status: string;
+  error?: string | null;
+  updatedAt?: string;
 }
 
 function isActiveTask(task?: TaskLike | null): boolean {
@@ -37,6 +50,22 @@ function clearWatchFailureState(dedupeState: Record<string, unknown> = {}) {
     retryAfter: null,
     backoffMs: 0
   };
+}
+
+function hasExplicitConversationThread(detection: WatchDetection | null | undefined): boolean {
+  const metadata = (detection?.metadata ?? {}) as Record<string, unknown>;
+  const inputs = (detection?.inputs ?? {}) as Record<string, unknown>;
+  return [metadata.threadKey, metadata.replyThreadKey, inputs.threadKey, inputs.replyThreadKey].some(
+    (value) => typeof value === "string" && value.trim().length > 0
+  );
+}
+
+function managedConversationThreadKey(detection: WatchDetection | null | undefined): string | null {
+  if (!hasExplicitConversationThread(detection)) {
+    return null;
+  }
+
+  return deriveConversationThreadKey(detection);
 }
 
 function localDayKey(date = new Date()): string {
@@ -269,16 +298,15 @@ export class WatchExecutionService {
     }
 
     const cleanedDedupeState = clearExpiredReplyApprovalGrant(rule.dedupeState ?? {});
-    const grantStateChanged =
-      cleanedDedupeState.replyApprovalThreadKey !== (rule.dedupeState ?? {}).replyApprovalThreadKey ||
-      cleanedDedupeState.replyApprovalExpiresAt !== (rule.dedupeState ?? {}).replyApprovalExpiresAt;
+    const grantStateChanged = JSON.stringify(cleanedDedupeState) !== JSON.stringify(rule.dedupeState ?? {});
     const hydratedRule = grantStateChanged
       ? this.store.putWatchRule({
           ...rule,
           dedupeState: cleanedDedupeState
         })
       : rule;
-    const activeRule = hydratedRule ?? rule;
+    let activeRule = hydratedRule ?? rule;
+    let scanConversationThreadKey: string | null = null;
 
     const retryAfter = Number(activeRule.dedupeState?.retryAfter ?? 0);
     if (retryAfter && retryAfter > Date.now()) {
@@ -332,14 +360,14 @@ export class WatchExecutionService {
       }
 
       if (activeDraftId && activeDraft && ["approved", "rejected", "expired"].includes(activeDraft.status)) {
-        const cleared = this.store.putWatchRule({
+        activeRule = this.store.putWatchRule({
           ...activeRule,
           dedupeState: {
             ...(activeRule.dedupeState ?? {}),
             activeDraftId: null
           }
         });
-        this.eventBus.broadcast("watch.updated", this.controlPlane.watchService.decorate(cleared));
+        this.eventBus.broadcast("watch.updated", this.controlPlane.watchService.decorate(activeRule));
       }
 
       if (activeTaskId && activeTask?.status === "completed" && activeRule.dedupeState?.lastHandledTaskId !== activeTaskId) {
@@ -349,15 +377,73 @@ export class WatchExecutionService {
           controlPlane: this.controlPlane
         });
 
-        const acknowledged = this.store.putWatchRule({
+        let dedupeState: Record<string, unknown> = {
+          ...(activeRule.dedupeState ?? {}),
+          lastHandledTaskId: activeTaskId,
+          activeTaskId: null
+        };
+        const completionThread = findConversationThreadByTaskId(activeRule.dedupeState ?? {}, activeTaskId);
+        if (completionThread?.threadKey) {
+          dedupeState = recordConversationTaskCompletion(dedupeState, {
+            threadKey: completionThread.threadKey,
+            completedAt: activeTask.updatedAt ?? nowIso()
+          });
+        }
+
+        activeRule = this.store.putWatchRule({
           ...activeRule,
-          dedupeState: {
-            ...(activeRule.dedupeState ?? {}),
-            lastHandledTaskId: activeTaskId,
-            activeTaskId: null
-          }
+          dedupeState
         });
-        this.eventBus.broadcast("watch.updated", this.controlPlane.watchService.decorate(acknowledged));
+        this.eventBus.broadcast("watch.updated", this.controlPlane.watchService.decorate(activeRule));
+      }
+
+      if (activeTaskId && activeTask && ["failed", "blocked", "interrupted"].includes(activeTask.status)) {
+        const failureCount = Number(activeRule.dedupeState?.failureCount ?? 0) + 1;
+        const maxConsecutiveFailures = Math.max(
+          1,
+          Number((activeRule.watchProfile?.governance as WatchGovernance | undefined)?.maxConsecutiveFailures ?? 3)
+        );
+        const backoffMs = Math.min(
+          Math.max(activeRule.pollIntervalMs * 2 ** Math.max(failureCount - 1, 0), activeRule.pollIntervalMs),
+          300000
+        );
+        const retryAt = Date.now() + backoffMs;
+        const failedAt = activeTask.updatedAt ?? nowIso();
+        const failureThreadKey =
+          findConversationThreadByTaskId(activeRule.dedupeState ?? {}, activeTaskId)?.threadKey ??
+          normalizeConversationThreadKey(activeRule.dedupeState?.activeConversationThreadKey);
+        let dedupeState: Record<string, unknown> = {
+          ...(activeRule.dedupeState ?? {}),
+          activeTaskId: null,
+          failureCount,
+          backoffMs,
+          retryAfter: retryAt
+        };
+        if (failureThreadKey) {
+          dedupeState = recordConversationFailure(dedupeState, {
+            threadKey: failureThreadKey,
+            failedAt,
+            cooldownUntil: retryAt
+          });
+        }
+        const failureMessage = activeTask.error ?? `watch task ${activeTask.status}`;
+        activeRule = this.store.putWatchRule({
+          ...activeRule,
+          lastObservedAt: nowIso(),
+          lastError: failureMessage,
+          status: failureCount >= maxConsecutiveFailures ? "degraded" : "backoff",
+          dedupeState
+        });
+        this.eventBus.broadcast("watch.updated", this.controlPlane.watchService.decorate(activeRule));
+        this.eventBus.broadcast("watch.backoff", {
+          rule: activeRule,
+          backoffMs
+        });
+        this.eventBus.broadcast("watch.error", {
+          rule: activeRule,
+          error: failureMessage
+        });
+        return;
       }
 
       const workspaceName = activeRule.workspaceName ?? `${activeRule.livePack}-live`;
@@ -439,6 +525,13 @@ export class WatchExecutionService {
         return;
       }
 
+      const observedAt = nowIso();
+      scanConversationThreadKey = managedConversationThreadKey(detection);
+      const observedDedupeState = scanConversationThreadKey
+        ? recordConversationObservation(activeRule.dedupeState ?? {}, detection, {
+            updatedAt: observedAt
+          })
+        : (activeRule.dedupeState ?? {});
       const replyDraft = shouldDraftReply(activeRule, detection)
         ? await this.draftReply({
             watchRule: activeRule,
@@ -450,7 +543,15 @@ export class WatchExecutionService {
         replyText: replyDraft?.replyText ?? null,
         autoSend: true
       });
-      const replyApprovalActive = hasActiveReplyApprovalGrant(activeRule, detection);
+      const replyApprovalActive = hasActiveReplyApprovalGrant(
+        observedDedupeState === (activeRule.dedupeState ?? {})
+          ? activeRule
+          : {
+              ...activeRule,
+              dedupeState: observedDedupeState
+            },
+        detection
+      );
       const automation = this.controlPlane.policyEngine.evaluateAutomation({
         taskSpec,
         watchRule: activeRule,
@@ -463,9 +564,10 @@ export class WatchExecutionService {
       if (automation.action !== "block" && withinCooldown(activeRule, governance)) {
         const updated = this.store.putWatchRule({
           ...activeRule,
-          lastObservedAt: nowIso(),
+          lastObservedAt: observedAt,
           lastError: null,
-          status: "watching"
+          status: "watching",
+          dedupeState: observedDedupeState
         });
         this.eventBus.broadcast("watch.skipped", {
           rule: updated,
@@ -478,27 +580,37 @@ export class WatchExecutionService {
 
       const autoActionsToday = autoActionCount(activeRule);
       const maxAutoActionsPerDay = Math.max(0, Number(governance.maxAutoActionsPerDay ?? 0));
-      const governedAutomation =
-        automation.action === "send" && maxAutoActionsPerDay > 0 && autoActionsToday >= maxAutoActionsPerDay
-          ? downgradeToDraft(automation, "watch governance max auto actions per day reached")
-          : automation.action === "send" && replyDraft && isWithinQuietHours(governance)
-            ? downgradeToDraft(automation, "watch governance quiet hours active")
-            : automation;
+      const threadEscalated = scanConversationThreadKey
+        ? isConversationThreadEscalated(observedDedupeState, scanConversationThreadKey)
+        : false;
+      const threadCooldownActive = scanConversationThreadKey
+        ? isConversationThreadCooldownActive(observedDedupeState, scanConversationThreadKey)
+        : false;
+      let governedAutomation = automation;
+      if (automation.action === "send" && maxAutoActionsPerDay > 0 && autoActionsToday >= maxAutoActionsPerDay) {
+        governedAutomation = downgradeToDraft(automation, "watch governance max auto actions per day reached");
+      } else if (automation.action === "send" && threadCooldownActive) {
+        governedAutomation = downgradeToDraft(automation, "conversation thread cooldown active");
+      } else if (automation.action === "send" && threadEscalated) {
+        governedAutomation = downgradeToDraft(automation, "conversation thread requires re-approval after a failed auto-send");
+      } else if (automation.action === "send" && replyDraft && isWithinQuietHours(governance)) {
+        governedAutomation = downgradeToDraft(automation, "watch governance quiet hours active");
+      }
 
       if (governedAutomation.action === "block") {
         const updated = this.store.putWatchRule({
           ...activeRule,
-          lastObservedAt: nowIso(),
+          lastObservedAt: observedAt,
           lastError: governedAutomation.reasons.join("; ") || "automation blocked",
           status: "degraded",
-          dedupeState: {
-            ...(activeRule.dedupeState ?? {}),
+          dedupeState: clearWatchFailureState({
+            ...observedDedupeState,
             lastFingerprint: detection.fingerprint ?? detection.summary ?? null,
             lastSummary: detection.summary ?? null,
             lastContext: detection.context ?? [],
             activeTaskId: null,
             activeDraftId: null
-          }
+          })
         });
         this.eventBus.broadcast("watch.updated", this.controlPlane.watchService.decorate(updated));
         this.eventBus.broadcast("watch.blocked", {
@@ -532,21 +644,28 @@ export class WatchExecutionService {
             context: detection.context ?? []
           }
         });
+        let dedupeState: Record<string, unknown> = clearWatchFailureState({
+          ...observedDedupeState,
+          lastFingerprint: detection.fingerprint ?? detection.summary ?? draft.id,
+          lastSummary: detection.summary ?? null,
+          lastContext: detection.context ?? [],
+          activeTaskId: null,
+          activeDraftId: draft.id,
+          failureCount: 0
+        });
+        if (scanConversationThreadKey) {
+          dedupeState = recordConversationObservation(dedupeState, detection, {
+            activate: true,
+            updatedAt: observedAt
+          });
+        }
         const updated = this.store.putWatchRule({
           ...activeRule,
-          lastObservedAt: nowIso(),
-          lastTriggeredAt: nowIso(),
+          lastObservedAt: observedAt,
+          lastTriggeredAt: observedAt,
           lastError: null,
           status: "awaiting_approval",
-          dedupeState: clearWatchFailureState({
-            ...(activeRule.dedupeState ?? {}),
-            lastFingerprint: detection.fingerprint ?? detection.summary ?? draft.id,
-            lastSummary: detection.summary ?? null,
-            lastContext: detection.context ?? [],
-            activeTaskId: null,
-            activeDraftId: draft.id,
-            failureCount: 0
-          })
+          dedupeState
         });
         this.eventBus.broadcast("watch.drafted", {
           rule: updated,
@@ -558,20 +677,27 @@ export class WatchExecutionService {
       }
 
       const task = await this.controlPlane.createTask(taskSpec);
+      let dedupeState: Record<string, unknown> = clearWatchFailureState({
+        ...recordAutoAction(observedDedupeState),
+        lastFingerprint: detection.fingerprint ?? detection.summary ?? task.id,
+        lastSummary: detection.summary ?? null,
+        lastContext: detection.context ?? [],
+        activeTaskId: task.id,
+        failureCount: 0
+      });
+      if (scanConversationThreadKey) {
+        dedupeState = recordConversationTaskDispatch(dedupeState, detection, {
+          taskId: task.id,
+          dispatchedAt: observedAt
+        });
+      }
       const updated = this.store.putWatchRule({
         ...activeRule,
-        lastObservedAt: nowIso(),
-        lastTriggeredAt: nowIso(),
+        lastObservedAt: observedAt,
+        lastTriggeredAt: observedAt,
         lastError: null,
         status: "watching",
-        dedupeState: clearWatchFailureState({
-          ...recordAutoAction(activeRule.dedupeState ?? {}),
-          lastFingerprint: detection.fingerprint ?? detection.summary ?? task.id,
-          lastSummary: detection.summary ?? null,
-          lastContext: detection.context ?? [],
-          activeTaskId: task.id,
-          failureCount: 0
-        })
+        dedupeState
       });
       this.eventBus.broadcast("watch.triggered", {
         rule: updated,
@@ -590,17 +716,26 @@ export class WatchExecutionService {
         Math.max((current ?? rule).pollIntervalMs * 2 ** Math.max(failureCount - 1, 0), (current ?? rule).pollIntervalMs),
         300000
       );
+      const retryAt = Date.now() + backoffMs;
+      let dedupeState: Record<string, unknown> = {
+        ...((current ?? rule).dedupeState ?? {}),
+        failureCount,
+        backoffMs,
+        retryAfter: retryAt
+      };
+      if (scanConversationThreadKey) {
+        dedupeState = recordConversationFailure(dedupeState, {
+          threadKey: scanConversationThreadKey,
+          failedAt: nowIso(),
+          cooldownUntil: retryAt
+        });
+      }
       const updated = this.store.putWatchRule({
         ...(current ?? rule),
         lastObservedAt: nowIso(),
         lastError: error instanceof Error ? error.message : String(error),
         status: failureCount >= maxConsecutiveFailures ? "degraded" : "backoff",
-        dedupeState: {
-          ...((current ?? rule).dedupeState ?? {}),
-          failureCount,
-          backoffMs,
-          retryAfter: Date.now() + backoffMs
-        }
+        dedupeState
       });
       this.eventBus.broadcast("watch.updated", this.controlPlane.watchService.decorate(updated));
       this.eventBus.broadcast("watch.backoff", {

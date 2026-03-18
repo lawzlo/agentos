@@ -230,6 +230,30 @@ export interface WatchHealth {
   activeDraftId: string | null;
   lastHandledFingerprint: string | null;
   summary: string | null;
+  threadKey?: string | null;
+  threadFailureCount?: number;
+  threadCooldownUntil?: string | null;
+  replyLeaseExpiresAt?: string | null;
+  threadEscalatedAt?: string | null;
+  lastInboundMessageId?: string | null;
+  lastInboundReceivedAt?: string | null;
+  lastAgentActionAt?: string | null;
+}
+
+export interface ConversationThreadState {
+  threadKey: string;
+  lastMessageId: string | null;
+  lastInboundMessageId: string | null;
+  lastInboundReceivedAt: string | null;
+  lastSender: string | null;
+  lastDirection: "inbound" | "outbound" | "unknown";
+  lastAgentActionAt: string | null;
+  lastAgentTaskId: string | null;
+  replyLeaseExpiresAt: number | null;
+  failureCount: number;
+  cooldownUntil: number | null;
+  escalatedAt: string | null;
+  updatedAt: string | null;
 }
 
 export interface WatchQuietHours {

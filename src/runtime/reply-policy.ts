@@ -1,4 +1,11 @@
 import type { ReplyPolicyMode, TaskSpec, WatchDetection, WatchGovernance, WatchRule } from "../types/runtime-schema.js";
+import {
+  clearExpiredConversationState,
+  deriveConversationThreadKey,
+  hasActiveConversationLease,
+  normalizeConversationThreadKey,
+  recordConversationApproval
+} from "./conversation-thread-state.js";
 
 export const DEFAULT_REPLY_APPROVAL_WINDOW_MS = 12 * 60 * 60 * 1000;
 const MAX_REPLY_APPROVAL_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
@@ -14,11 +21,6 @@ function normalizePolicyValue(value: unknown): Exclude<ReplyPolicyMode, "pack_de
   }
 
   return null;
-}
-
-function normalizeThreadKey(value: unknown): string | null {
-  const normalized = String(value ?? "").trim();
-  return normalized ? normalized.toLowerCase() : null;
 }
 
 export function packDefaultReplyPolicy(livePack: string): Exclude<ReplyPolicyMode, "pack_default"> {
@@ -62,22 +64,7 @@ export function replyApprovalWindowMs(governance: WatchGovernance | null | undef
 }
 
 export function deriveReplyThreadKey(detection: WatchDetection | Record<string, unknown> | null | undefined): string | null {
-  if (!detection || typeof detection !== "object") {
-    return null;
-  }
-
-  const typedDetection = detection as WatchDetection;
-  const inputs = (typedDetection.inputs ?? {}) as Record<string, unknown>;
-  const metadata = (typedDetection.metadata ?? {}) as Record<string, unknown>;
-  return (
-    normalizeThreadKey(metadata.replyThreadKey) ??
-    normalizeThreadKey(metadata.threadKey) ??
-    normalizeThreadKey(inputs.replyThreadKey) ??
-    normalizeThreadKey(inputs.threadKey) ??
-    normalizeThreadKey(inputs.openTarget) ??
-    normalizeThreadKey(typedDetection.summary) ??
-    normalizeThreadKey(typedDetection.text)
-  );
+  return deriveConversationThreadKey(detection);
 }
 
 export function hasActiveReplyApprovalGrant(
@@ -85,12 +72,16 @@ export function hasActiveReplyApprovalGrant(
   detection: WatchDetection | null | undefined,
   now = Date.now()
 ): boolean {
+  if (hasActiveConversationLease(watchRule?.dedupeState ?? {}, detection, now)) {
+    return true;
+  }
+
   const threadKey = deriveReplyThreadKey(detection);
   if (!threadKey) {
     return false;
   }
 
-  const storedThreadKey = normalizeThreadKey(watchRule?.dedupeState?.replyApprovalThreadKey);
+  const storedThreadKey = normalizeConversationThreadKey(watchRule?.dedupeState?.replyApprovalThreadKey);
   const expiresAt = Number(watchRule?.dedupeState?.replyApprovalExpiresAt ?? 0);
   return Boolean(storedThreadKey && storedThreadKey === threadKey && Number.isFinite(expiresAt) && expiresAt > now);
 }
@@ -100,30 +91,30 @@ export function recordReplyApprovalGrant(
   threadKey: string,
   expiresAt: number
 ): Record<string, unknown> {
-  return {
-    ...dedupeState,
-    replyApprovalThreadKey: normalizeThreadKey(threadKey),
-    replyApprovalExpiresAt: Math.max(0, Math.round(expiresAt))
-  };
+  return recordConversationApproval(dedupeState, {
+    threadKey,
+    expiresAt: Math.max(0, Math.round(expiresAt))
+  });
 }
 
 export function clearExpiredReplyApprovalGrant(
   dedupeState: Record<string, unknown> = {},
   now = Date.now()
 ): Record<string, unknown> {
-  const hasGrantFields = dedupeState.replyApprovalThreadKey != null || dedupeState.replyApprovalExpiresAt != null;
+  const cleanedState = clearExpiredConversationState(dedupeState, now);
+  const hasGrantFields = cleanedState.replyApprovalThreadKey != null || cleanedState.replyApprovalExpiresAt != null;
   if (!hasGrantFields) {
-    return dedupeState;
+    return cleanedState;
   }
 
-  const expiresAt = Number(dedupeState.replyApprovalExpiresAt ?? 0);
+  const expiresAt = Number(cleanedState.replyApprovalExpiresAt ?? 0);
   if (!Number.isFinite(expiresAt) || expiresAt <= now) {
     return {
-      ...dedupeState,
+      ...cleanedState,
       replyApprovalThreadKey: null,
       replyApprovalExpiresAt: null
     };
   }
 
-  return dedupeState;
+  return cleanedState;
 }
