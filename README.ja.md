@@ -45,6 +45,11 @@ AgentOS は、ブラウザ、デスクトップアプリ、ローカルファイ
 - 午後: ファイルのアップロード、document 更新、スクリーンショット取得を行い、結果を workspace に保存する
 - 夜: digest を生成し、何が変わったかを記録し、次の proposal を並べる
 
+## Roadmap
+
+- English roadmap: [ROADMAP.md](./ROADMAP.md)
+- 简体中文路线图: [ROADMAP.zh-CN.md](./ROADMAP.zh-CN.md)
+
 ## 現在の実装範囲
 
 - ローカル HTTP + WebSocket control plane
