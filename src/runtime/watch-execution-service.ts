@@ -48,7 +48,10 @@ function clearWatchFailureState(dedupeState: Record<string, unknown> = {}) {
     ...clearExpiredReplyApprovalGrant(dedupeState),
     failureCount: 0,
     retryAfter: null,
-    backoffMs: 0
+    backoffMs: 0,
+    attentionKind: null,
+    attentionDetail: null,
+    attentionAction: null
   };
 }
 
@@ -529,6 +532,42 @@ export class WatchExecutionService {
           })
         });
         this.eventBus.broadcast("watch.updated", this.controlPlane.watchService.decorate(updated));
+        return;
+      }
+
+      const manualInterventionKind = detection.metadata?.manualInterventionKind ?? null;
+      const manualInterventionDetail = String(detection.metadata?.manualInterventionDetail ?? "").trim();
+      const manualInterventionAction = String(detection.metadata?.manualInterventionAction ?? "").trim();
+      if (detection.metadata?.requiresManualIntervention) {
+        const updated = this.store.putWatchRule({
+          ...activeRule,
+          lastObservedAt: nowIso(),
+          lastError: manualInterventionDetail || detection.summary || "manual intervention required",
+          status: "degraded",
+          dedupeState: {
+            ...clearWatchFailureState({
+              ...(activeRule.dedupeState ?? {}),
+              lastFingerprint: detection.fingerprint ?? detection.summary ?? null,
+              lastSummary: detection.summary ?? null,
+              lastContext: detection.context ?? [],
+              activeTaskId: null,
+              activeDraftId: null
+            }),
+            attentionKind: manualInterventionKind,
+            attentionDetail: manualInterventionDetail || null,
+            attentionAction: manualInterventionAction || null
+          }
+        });
+        this.eventBus.broadcast("watch.updated", this.controlPlane.watchService.decorate(updated));
+        this.eventBus.broadcast("watch.blocked", {
+          rule: updated,
+          automation: {
+            action: "block",
+            policy: "blocked",
+            reasons: [manualInterventionDetail || detection.summary || "manual intervention required"]
+          },
+          detection
+        });
         return;
       }
 

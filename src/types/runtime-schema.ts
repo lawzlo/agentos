@@ -230,6 +230,9 @@ export interface WatchHealth {
   activeDraftId: string | null;
   lastHandledFingerprint: string | null;
   summary: string | null;
+  attentionKind?: "login" | "verification" | "access_denied" | "session_expired" | null;
+  attentionDetail?: string | null;
+  attentionAction?: string | null;
   threadKey?: string | null;
   threadFailureCount?: number;
   threadCooldownUntil?: string | null;
@@ -331,6 +334,10 @@ export interface WatchDetectionMetadata extends Record<string, unknown> {
   openCandidate?: InteractionCandidate | Record<string, unknown> | null;
   surface?: "browser" | "desktop";
   skillName?: string | null;
+  requiresManualIntervention?: boolean;
+  manualInterventionKind?: "login" | "verification" | "access_denied" | "session_expired" | null;
+  manualInterventionDetail?: string | null;
+  manualInterventionAction?: string | null;
 }
 
 export interface TeachTemplateInput {

@@ -1265,6 +1265,65 @@ test("slack browser watch rules draft high-risk replies instead of auto-sending"
   }
 });
 
+test("watch rules degrade with a manual step when a live pack requires sign-in", async () => {
+  const dataDir = await createTempDir();
+  const fakeLivePack = {
+    async detectNewItems() {
+      return {
+        fingerprint: "manual-sign-in-1",
+        summary: "Slack needs sign-in",
+        metadata: {
+          surface: "browser",
+          requiresAttention: true,
+          requiresManualIntervention: true,
+          manualInterventionKind: "login",
+          manualInterventionDetail: "Slack is asking for sign-in before AgentOS can continue watching it.",
+          manualInterventionAction: "Open Slack in the AgentOS browser workspace and sign in once, then retry the watch."
+        }
+      };
+    }
+  };
+  const server = await startAgentServer({
+    dataDir,
+    livePacks: {
+      "manual-sign-in-live": fakeLivePack
+    }
+  });
+
+  try {
+    const createResponse = await fetch(`${server.baseUrl}/watches`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        goal: "Always watch this app and handle new items",
+        livePack: "manual-sign-in-live",
+        preferredSurface: "browser",
+        workspaceName: "manual-sign-in-main",
+        pollIntervalMs: 50
+      })
+    });
+    const { watch } = await createResponse.json();
+    assert.equal(watch.livePack, "manual-sign-in-live");
+
+    const degraded = await waitForWatchRule(
+      server.baseUrl,
+      watch.id,
+      (current) => current.status === "degraded" && current.health.attentionKind === "login"
+    );
+    assert.match(String(degraded.lastError ?? ""), /sign-in|sign in|登录/i);
+    assert.match(String(degraded.health.attentionDetail ?? ""), /Slack/i);
+    assert.match(String(degraded.health.attentionAction ?? ""), /sign in/i);
+
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const tasksPayload = await (await fetch(`${server.baseUrl}/tasks`)).json();
+    const draftsPayload = await (await fetch(`${server.baseUrl}/drafts`)).json();
+    assert.equal(tasksPayload.tasks.filter((task) => task.triggerSource === `watch:${watch.id}`).length, 0);
+    assert.equal(draftsPayload.drafts.filter((draft) => draft.watchRuleId === watch.id).length, 0);
+  } finally {
+    await server.close();
+  }
+});
+
 test("slack desktop pack can detect unread threads and build reply steps from a desktop world state", async () => {
   let opened = false;
   const initialWorldState = {
