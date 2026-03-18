@@ -322,6 +322,118 @@ export async function startMailFixtureServer({
   };
 }
 
+export async function startBossFixtureServer({
+  candidateName = "李雷",
+  candidateRole = "产品经理",
+  candidateLocation = "上海",
+  candidateExperience = "5年经验",
+  previewMessage = "候选人消息: 方便聊下这个岗位吗？"
+}: {
+  candidateName?: string;
+  candidateRole?: string;
+  candidateLocation?: string;
+  candidateExperience?: string;
+  previewMessage?: string;
+} = {}) {
+  const state = {
+    candidateId: "candidate-li-lei",
+    candidateName,
+    candidateRole,
+    candidateLocation,
+    candidateExperience,
+    previewMessage,
+    viewedCandidateId: "",
+    viewCount: 0
+  };
+
+  const renderListPage = () => `<!doctype html>
+    <html>
+      <body>
+        <main>
+          <h1>BOSS直聘</h1>
+          <section>
+            <h2>新候选人</h2>
+            <ul id="boss-candidate-list">
+              <li>
+                <a
+                  id="boss-candidate-link"
+                  href="/boss/candidate?id=${encodeURIComponent(state.candidateId)}"
+                  aria-label="新候选人: ${state.candidateName} ${state.candidateRole}"
+                >新候选人: ${state.candidateName} · ${state.candidateRole}</a>
+                <p class="candidate-meta">${state.candidateExperience} · ${state.candidateLocation}</p>
+                <p class="candidate-preview">${state.previewMessage}</p>
+              </li>
+            </ul>
+          </section>
+        </main>
+      </body>
+    </html>`;
+
+  const renderCandidatePage = () => `<!doctype html>
+    <html>
+      <body>
+        <main>
+          <h1>BOSS直聘</h1>
+          <section id="candidate-detail">
+            <h2>${state.candidateName}</h2>
+            <p>${state.candidateRole}</p>
+            <p>${state.candidateExperience}</p>
+            <p>${state.candidateLocation}</p>
+            <p>${state.previewMessage}</p>
+            <button id="boss-chat" type="button">在线沟通</button>
+            <button id="boss-resume" type="button">查看简历</button>
+          </section>
+        </main>
+      </body>
+    </html>`;
+
+  const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+
+    if (req.method === "GET" && url.pathname === "/boss") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(renderListPage());
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/boss/candidate") {
+      if (url.searchParams.get("id") !== state.candidateId) {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+
+      state.viewedCandidateId = state.candidateId;
+      state.viewCount += 1;
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(renderCandidatePage());
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/state") {
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify(state));
+      return;
+    }
+
+    res.writeHead(404);
+    res.end();
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, () => resolve()));
+  const address = server.address() as AddressInfo;
+  return {
+    url: `http://127.0.0.1:${address.port}`,
+    async getState() {
+      const response = await fetch(`http://127.0.0.1:${address.port}/api/state`);
+      return response.json();
+    },
+    async close() {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  };
+}
+
 export async function startDocsFilesFixtureServer() {
   const state = {
     uploadedFileName: "",

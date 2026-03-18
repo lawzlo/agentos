@@ -11,6 +11,7 @@ import type { WatchRule, WorkspaceProfile } from "../src/types/runtime-schema.js
 import {
   createTempDir,
   startAgentServer,
+  startBossFixtureServer,
   startDocsFilesFixtureServer,
   startMailFixtureServer,
   startSlackFixtureServer,
@@ -700,6 +701,7 @@ test("doctor and packs endpoints expose live runtime diagnostics", async () => {
     assert.ok(packsPayload.packs.some((pack) => pack.name === "slack-browser"));
     assert.ok(packsPayload.packs.some((pack) => pack.name === "wechat-desktop"));
     assert.ok(packsPayload.packs.some((pack) => pack.name === "generic-mail-desktop"));
+    assert.ok(packsPayload.packs.some((pack) => pack.name === "boss-browser"));
     assert.ok(packsPayload.packs.some((pack) => pack.name === "google-drive-browser"));
     assert.ok(packsPayload.packs.some((pack) => pack.name === "google-docs-browser"));
     assert.ok(packsPayload.packs.some((pack) => pack.name === "feishu-docs-browser"));
@@ -1128,6 +1130,43 @@ test("mail browser watch rules infer the browser pack, draft replies, and can be
   } finally {
     await server.close();
     await mail.close();
+  }
+});
+
+test("boss browser watch rules infer the browser pack and trigger candidate review workflows", async () => {
+  const dataDir = await createTempDir();
+  const boss = await startBossFixtureServer();
+  const server = await startAgentServer({ dataDir });
+
+  try {
+    const createResponse = await fetch(`${server.baseUrl}/watches`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        goal: "Always watch BOSS直聘 for new candidates and review them.",
+        preferredSurface: "browser",
+        workspaceName: "boss-browser-main",
+        pollIntervalMs: 50,
+        inputs: {
+          startUrl: `${boss.url}/boss`
+        }
+      })
+    });
+    const { watch } = await createResponse.json();
+    assert.equal(watch.livePack, "boss-browser");
+
+    const triggeredTask = await waitForWatchTask(server.baseUrl, watch.id);
+    const completed = await waitForTask(server.baseUrl, triggeredTask.id, (task) => task.status === "completed");
+    assert.equal(completed.status, "completed");
+    assert.equal(completed.taskSpec.skillName, "boss-open-candidate");
+    assert.match(String(completed.taskSpec.inputs.openTarget ?? ""), /李雷/u);
+
+    const state = await boss.getState();
+    assert.equal(state.viewedCandidateId, state.candidateId);
+    assert.ok(state.viewCount >= 1);
+  } finally {
+    await server.close();
+    await boss.close();
   }
 });
 

@@ -22,12 +22,49 @@ export const BUILTIN_SKILLS = [
   {
     name: "boss-open-candidate",
     surfaceScope: "browser",
-    triggerTerms: ["boss open candidate", "boss candidate detail", "boss直聘 候选人"],
+    triggerTerms: ["boss open candidate", "boss candidate detail", "boss直聘 候选人", "打开 boss 候选人详情"],
     anchors: [{ text: "BOSS直聘", role: "workspace" }],
-    actionTemplate: [],
+    actionTemplate: [
+      {
+        label: "Open BOSS candidate list",
+        surface: "browser",
+        action: "goto",
+        params: {
+          url: "{{startUrl}}"
+        },
+        checkpoint: false
+      },
+      {
+        label: "Open BOSS candidate detail",
+        surface: "browser",
+        action: "clickTarget",
+        params: {
+          targetQuery: "{{openTarget}}"
+        },
+        checkpoint: false
+      },
+      {
+        label: "Wait for candidate detail",
+        surface: "browser",
+        action: "waitForTarget",
+        params: {
+          targetQuery: "{{detailReadyTarget}}",
+          timeoutMs: 5000
+        },
+        checkpoint: false
+      }
+    ],
     successCriteria: [{ type: "textVisible", value: "在线沟通" }],
     recoveryHints: ["search filters changed", "candidate card moved"],
-    metadata: { pack: "boss", builtin: true }
+    metadata: {
+      pack: "boss",
+      builtin: true,
+      skillInputs: [
+        { key: "startUrl", defaultValue: "https://www.zhipin.com/web/geek/jobs" },
+        { key: "openTarget", defaultValue: "新候选人: 李雷 · 产品经理" },
+        { key: "detailReadyTarget", defaultValue: "在线沟通" }
+      ]
+    }
   },
   {
     name: "browser-download-file",

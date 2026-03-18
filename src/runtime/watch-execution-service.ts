@@ -121,12 +121,12 @@ function shouldDraftReply(rule: WatchRule, detection: WatchDetection = {}) {
   }
 
   const inputs = detection.inputs ?? {};
-  if (inputs.sendTarget || inputs.typeTarget || inputs.openTarget) {
+  if (inputs.sendTarget || inputs.typeTarget) {
     return true;
   }
 
   const liveHints = (rule.watchProfile?.liveHints ?? {}) as Record<string, unknown>;
-  if (liveHints.sendTargetQuery || liveHints.composeTargetQuery || liveHints.openTargetQuery) {
+  if (liveHints.sendTargetQuery || liveHints.composeTargetQuery) {
     return true;
   }
 

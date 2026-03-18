@@ -37,6 +37,17 @@ test("normalizeWatchRule infers drive trigger hints for download and upload", as
   assert.equal(watch.watchProfile.triggerTexts.includes("pending download"), true);
 });
 
+test("normalizeWatchRule infers boss browser pack from recruiting goals", async () => {
+  const watch = normalizeWatchRule({
+    goal: "Always watch BOSS直聘 for new candidates and review them.",
+    preferredSurface: "browser"
+  });
+
+  assert.equal(watch.livePack, "boss-browser");
+  assert.equal(watch.preferredSurface, "browser");
+  assert.equal(watch.watchProfile.triggerTexts.includes("新候选人"), true);
+});
+
 test("normalizeWatchRule validates required goal", async () => {
   assert.throws(() => {
     normalizeWatchRule({});

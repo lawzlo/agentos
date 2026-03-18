@@ -55,6 +55,8 @@ const WECHAT_UI_CHROME_PATTERN =
   /^(wechat|微信|搜索|search|send|发送|reply|回复|聊天信息|聊天记录|通讯录|contacts|发现|moments|我|me|文件传输助手|表情|图片|文件|语音消息)$/iu;
 const MAIL_UI_CHROME_PATTERN =
   /^(mail|email|gmail|outlook|邮件|inbox|收件箱|已发送|sent|drafts|草稿|spam|archive|归档|trash|垃圾箱|delete|删除|search|搜索|compose|撰写|reply|回复|send|发送)$/iu;
+const BOSS_UI_CHROME_PATTERN =
+  /^(boss直聘|boss zhipin|boss|搜索|search|筛选|filter|推荐|推荐牛人|消息|message|messages|职位|jobs|候选人列表|沟通|在线沟通|立即沟通|发消息|发送|send|查看简历)$/iu;
 const GOOGLE_DRIVE_UI_CHROME_PATTERN =
   /^(google drive|my drive|priority|recent|shared with me|shared drives|starred|trash|upload to drive|drive uploaded|search)$/iu;
 const GOOGLE_DOCS_UI_CHROME_PATTERN =
@@ -644,6 +646,15 @@ function normalizeMailSummary(value: string): string {
     .trim();
 }
 
+function normalizeBossSummary(value: string): string {
+  return String(value ?? "")
+    .replace(/^[●•]\s*/u, "")
+    .replace(/^(new candidate|candidate update|candidate|新候选人|候选人|待沟通|待跟进)\s*[:：-]?\s*/iu, "")
+    .replace(/^\(\d+\)\s*/u, "")
+    .replace(/\s+\(\d+\)$/u, "")
+    .trim();
+}
+
 function normalizeDocsSummary(value: string, prefixes: string[] = []): string {
   let summary = String(value ?? "")
     .replace(/^[●•]\s*/u, "")
@@ -661,6 +672,10 @@ function normalizeDocsSummary(value: string, prefixes: string[] = []): string {
 
 function isMailUiChrome(text: string): boolean {
   return MAIL_UI_CHROME_PATTERN.test(String(text ?? "").trim());
+}
+
+function isBossUiChrome(text: string): boolean {
+  return BOSS_UI_CHROME_PATTERN.test(String(text ?? "").trim());
 }
 
 function isDriveUiChrome(text: string): boolean {
@@ -731,6 +746,60 @@ function findMailUnreadCandidate(worldState: WorldState | null): InteractionCand
   return ranked[0]?.candidate ?? null;
 }
 
+function scoreBossCandidate({
+  candidate,
+  worldState
+}: {
+  candidate: InteractionCandidate;
+  worldState: WorldState | null;
+}): number | null {
+  const hintText = candidateHintText(candidate);
+  const summary = normalizeBossSummary(candidate.text || hintText);
+  if (!summary || isBossUiChrome(summary) || SEND_PATTERN.test(summary)) {
+    return null;
+  }
+
+  let score = candidate.isInteractive ? 12 : 4;
+  if (candidate.role === "button" || candidate.role === "link") {
+    score += 4;
+  }
+  if (/(candidate|候选人|resume|简历|new candidate|新候选人|待沟通|待跟进|沟通中|message|消息|chat|在线沟通)/iu.test(hintText)) {
+    score += 24;
+  }
+
+  const lines = visibleLines(worldState);
+  for (const [index, line] of lines.entries()) {
+    if (!/(candidate|候选人|新候选人|待沟通|待跟进|消息|沟通)/iu.test(line)) {
+      continue;
+    }
+    const nearby = lines
+      .slice(Math.max(0, index - 1), index + 6)
+      .some((entry) => entry.includes(summary) || summary.includes(normalizeBossSummary(entry)));
+    if (nearby) {
+      score += 16;
+      break;
+    }
+  }
+
+  if (summary.length >= 2 && summary.length <= 80) {
+    score += 3;
+  }
+  if (/[\u4e00-\u9fff]/u.test(summary)) {
+    score += 2;
+  }
+
+  return score;
+}
+
+function findBossCandidate(worldState: WorldState | null): InteractionCandidate | null {
+  const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
+  const ranked = candidates
+    .map((candidate) => ({ candidate, score: scoreBossCandidate({ candidate, worldState }) }))
+    .filter((entry): entry is { candidate: InteractionCandidate; score: number } => Number.isFinite(entry.score))
+    .sort((left, right) => right.score - left.score);
+  return ranked[0]?.candidate ?? null;
+}
+
 function pickMailComposeQuery(worldState: WorldState | null, surface: LivePackSurface): string {
   const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
   const composeCandidate =
@@ -796,6 +865,19 @@ function extractMailThreadContext(worldState: WorldState | null, summary: string
         !SEND_PATTERN.test(line) &&
         !/(reply|message|compose|write|回复|撰写|输入)/iu.test(line)
       );
+    })
+  ).slice(0, 5);
+}
+
+function extractBossContext(worldState: WorldState | null, summary: string): string[] {
+  const lines = visibleLines(worldState).filter((line) => !isBossUiChrome(line));
+  const normalizedSummary = normalizeBossSummary(summary);
+  const summaryIndex = lines.findIndex((line) => normalizeBossSummary(line) === normalizedSummary);
+  const pool = summaryIndex === -1 ? lines : lines.slice(Math.max(0, summaryIndex - 1), summaryIndex + 5);
+  return uniqueStrings(
+    pool.filter((line) => {
+      const normalized = normalizeBossSummary(line);
+      return normalized && normalized !== normalizedSummary && !SEND_PATTERN.test(line) && !isBossUiChrome(line);
     })
   ).slice(0, 5);
 }
@@ -1619,6 +1701,98 @@ function createMailPack({
   };
 }
 
+function createBossPack(): LivePack {
+  return {
+    name: "boss-browser",
+    info: {
+      name: "boss-browser",
+      family: "generic",
+      surface: "browser",
+      supportsDrafts: false,
+      supportsAutoSend: false,
+      description: "BOSS browser watcher that detects new candidates and opens candidate detail workflows for review."
+    },
+    async activate({ rule, workspace, surfaceRegistry }) {
+      const adapter = surfaceRegistry.get("browser");
+      if (!adapter) {
+        return;
+      }
+
+      const startUrl = String(rule.taskInputs?.startUrl ?? rule.taskInputs?.url ?? rule.appTarget ?? "").trim();
+      if (/^https?:\/\//u.test(startUrl)) {
+        await adapter.act({
+          task: createWatchTask(rule),
+          step: {
+            id: `watch-goto-${rule.id}`,
+            action: "goto",
+            surface: "browser",
+            params: { url: startUrl, waitUntil: "domcontentloaded", timeoutMs: 15000 }
+          },
+          workspace: profileAsWorkspace(rule, workspace),
+          traceId: null,
+          outputs: {}
+        });
+        return;
+      }
+
+      await adapter.focus({
+        task: createWatchTask(rule),
+        workspace: profileAsWorkspace(rule, workspace),
+        traceId: null
+      }).catch(() => null);
+    },
+    async observeInbox(args) {
+      return observeWatchSurface({ ...args, surface: "browser" });
+    },
+    async detectNewItems({ rule, worldState, dedupeState = {} }) {
+      const candidate = findBossCandidate(worldState);
+      if (!candidate) {
+        return null;
+      }
+
+      const summary = normalizeBossSummary(candidate.text || candidateHintText(candidate));
+      if (!summary) {
+        return null;
+      }
+
+      const context = extractBossContext(worldState, candidate.text || summary);
+      const itemFingerprint = fingerprint(
+        `boss-browser:${rule.workspaceName ?? "default"}:${summary}:${context.join("|")}`
+      );
+      if (dedupeState.lastFingerprint === itemFingerprint) {
+        return null;
+      }
+
+      const startUrl = String(rule.taskInputs?.startUrl ?? rule.taskInputs?.url ?? inferBrowserPageUrl(worldState) ?? "").trim();
+      return {
+        fingerprint: itemFingerprint,
+        summary,
+        goal: `${rule.goal}\n\nDetected candidate: ${summary}`,
+        text: summary,
+        context,
+        inputs: {
+          watchItemText: summary,
+          watchSummary: summary,
+          watchContext: context.join("\n"),
+          startUrl,
+          openTarget: String(candidate.text ?? summary).trim() || summary,
+          detailReadyTarget: String(rule.taskInputs?.detailReadyTarget ?? "在线沟通")
+        },
+        taskSpec: {
+          preferredSurface: "browser",
+          skillName: "boss-open-candidate",
+          executionMode: "planned"
+        },
+        metadata: {
+          openCandidate: candidate,
+          surface: "browser",
+          skillName: "boss-open-candidate"
+        }
+      };
+    }
+  };
+}
+
 function createVisualDesktopPack({
   name,
   family = "generic",
@@ -1793,6 +1967,7 @@ export class LivePackRegistry {
         surface: "browser",
         description: "Generic browser mail watcher that detects unread threads, extracts context, and drafts approval-first replies."
       }),
+      createBossPack(),
       createDocumentPack({
         name: "google-drive-browser",
         family: "files",

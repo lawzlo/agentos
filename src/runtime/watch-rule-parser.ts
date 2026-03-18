@@ -208,6 +208,18 @@ function inferPack(
     };
   }
 
+  if (
+    /(boss\s*直聘|boss zhipin|boss直聘)/iu.test(text) ||
+    (/\bboss\b/iu.test(text) && /(candidate|resume|job|hiring|招聘|候选人|简历|沟通)/iu.test(text))
+  ) {
+    return {
+      livePack: "boss-browser",
+      preferredSurface: "browser",
+      appTarget: input.appTarget ?? null,
+      triggerTexts: ["new candidate", "candidate update", "候选人", "新候选人", "待沟通", "待跟进"]
+    };
+  }
+
   return {
     livePack: "generic-desktop",
     preferredSurface: input.preferredSurface ?? "desktop",
