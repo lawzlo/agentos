@@ -16,7 +16,7 @@ function normalizePolicyValue(value: unknown): Exclude<ReplyPolicyMode, "pack_de
     return null;
   }
 
-  if (["auto_send", "draft_first", "approve_once_then_auto", "blocked"].includes(normalized)) {
+  if (["auto_send", "draft_first", "prefill_first", "approve_once_then_auto", "blocked"].includes(normalized)) {
     return normalized as Exclude<ReplyPolicyMode, "pack_default">;
   }
 

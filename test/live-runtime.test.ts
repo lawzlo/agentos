@@ -1265,6 +1265,49 @@ test("slack browser watch rules draft high-risk replies instead of auto-sending"
   }
 });
 
+test("slack browser watch rules can prefill replies without sending them", async () => {
+  const dataDir = await createTempDir();
+  const slack = await startSlackFixtureServer();
+  const server = await startAgentServer({ dataDir });
+
+  try {
+    const createResponse = await fetch(`${server.baseUrl}/watches`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        goal: "Always watch Slack and prefill replies to unread threads",
+        preferredSurface: "browser",
+        workspaceName: "slack-browser-prefill-main",
+        pollIntervalMs: 50,
+        governance: {
+          replyPolicy: "prefill_first"
+        },
+        inputs: {
+          startUrl: `${slack.url}/slack`
+        }
+      })
+    });
+    const { watch } = await createResponse.json();
+    assert.equal(watch.livePack, "slack-browser");
+
+    const triggeredTask = await waitForWatchTask(server.baseUrl, watch.id);
+    const completed = await waitForTask(server.baseUrl, triggeredTask.id, (task) => task.status === "completed");
+    assert.equal(completed.status, "completed");
+    assert.equal(completed.taskSpec.inputs.autoSend, false);
+    assert.equal(completed.plan.some((step) => /send/i.test(String(step.label ?? ""))), false);
+
+    const state = await waitForValue(() => slack.getState(), (current) => String(current.draftText ?? "").trim().length > 0);
+    assert.equal(state.sentReplies.length, 0);
+    assert.equal(state.draftText, "Got it. I will follow up shortly.");
+
+    const draftsPayload = await (await fetch(`${server.baseUrl}/drafts`)).json();
+    assert.equal(draftsPayload.drafts.filter((draft) => draft.watchRuleId === watch.id).length, 0);
+  } finally {
+    await server.close();
+    await slack.close();
+  }
+});
+
 test("watch rules degrade with a manual step when a live pack requires sign-in", async () => {
   const dataDir = await createTempDir();
   const fakeLivePack = {

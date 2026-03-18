@@ -99,7 +99,7 @@ function normalizeGovernance(value: WatchGovernance | null | undefined): WatchGo
   const approvalMode = ["auto", "draft_only", "confirm_required", "blocked"].includes(String(value.approvalMode))
     ? (String(value.approvalMode) as WatchGovernance["approvalMode"])
     : undefined;
-  const replyPolicy = ["pack_default", "auto_send", "draft_first", "approve_once_then_auto", "blocked"].includes(
+  const replyPolicy = ["pack_default", "auto_send", "draft_first", "prefill_first", "approve_once_then_auto", "blocked"].includes(
     String(value.replyPolicy)
   )
     ? (String(value.replyPolicy) as WatchGovernance["replyPolicy"])

@@ -171,6 +171,15 @@ export class PolicyEngine {
       };
     }
 
+    if (replyPolicy === "prefill_first") {
+      return {
+        policy: "allow",
+        riskLevel,
+        reasons: reasons.length ? reasons : [`replyPolicy=${replyPolicy}`],
+        action: "prefill"
+      };
+    }
+
     if (riskLevel === "high") {
       return {
         policy: "confirm_required",

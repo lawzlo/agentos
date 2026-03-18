@@ -264,7 +264,13 @@ export interface WatchQuietHours {
   endHour: number;
 }
 
-export type ReplyPolicyMode = "pack_default" | "auto_send" | "draft_first" | "approve_once_then_auto" | "blocked";
+export type ReplyPolicyMode =
+  | "pack_default"
+  | "auto_send"
+  | "draft_first"
+  | "prefill_first"
+  | "approve_once_then_auto"
+  | "blocked";
 export type LivePackCategory = "conversation" | "documents" | "files" | "generic";
 export type LivePackCapability =
   | "watch_events"
@@ -367,7 +373,7 @@ export interface RiskGateDecision {
   policy: "allow" | "draft_only" | "confirm_required" | "blocked";
   riskLevel: "normal" | "high";
   reasons: string[];
-  action: "send" | "draft" | "block";
+  action: "send" | "draft" | "prefill" | "block";
 }
 
 export interface DraftRecord {

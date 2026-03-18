@@ -20,6 +20,7 @@ import type { ControlPlaneStore } from "./store.js";
 import type {
   DraftRecord,
   RiskGateDecision,
+  RuntimeStep,
   TaskRecord,
   TaskSpec,
   TeachTemplateInput,
@@ -178,6 +179,39 @@ function shouldDraftReply(rule: WatchRule, detection: WatchDetection = {}) {
   });
 }
 
+const SEND_STEP_PATTERN = /(send|submit|发送|提交)/iu;
+
+function isSendLikeStep(step: RuntimeStep | null | undefined): boolean {
+  if (!step || !["clickTarget", "click", "press"].includes(String(step.action ?? ""))) {
+    return false;
+  }
+
+  const target = (step.params?.target ?? null) as { text?: string } | null;
+  const signal = [
+    String(step.label ?? "").trim(),
+    String(step.params?.targetQuery ?? "").trim(),
+    String(target?.text ?? "").trim(),
+    String(step.params?.text ?? "").trim(),
+    String(step.params?.key ?? "").trim()
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  return SEND_STEP_PATTERN.test(signal);
+}
+
+function stripSendLikeSteps(steps: RuntimeStep[] | null | undefined, autoSend: unknown): RuntimeStep[] | undefined {
+  if (!Array.isArray(steps)) {
+    return undefined;
+  }
+
+  if (autoSend === true) {
+    return steps;
+  }
+
+  return steps.filter((step) => !isSendLikeStep(step));
+}
+
 export class WatchExecutionService {
   controlPlane: WatchExecutionServiceOptions["controlPlane"];
   store: WatchExecutionServiceOptions["store"];
@@ -219,6 +253,7 @@ export class WatchExecutionService {
             ((watchRule.watchProfile?.metadata as { templateInputs?: TeachTemplateInput[] } | undefined)?.templateInputs ?? [])
           )
         : null;
+    const filteredActionTemplate = stripSendLikeSteps(actionTemplate, runtimeInputs.autoSend);
     const baseTaskSpec = {
       goal: detected.goal ?? `${watchRule.goal}${detected.summary ? `\n\nTrigger context: ${detected.summary}` : ""}`,
       preferredSurface: watchRule.preferredSurface ?? "desktop",
@@ -226,9 +261,9 @@ export class WatchExecutionService {
       skillName: watchRule.skillName ?? null,
       triggerSource: `watch:${watchRule.id}`,
       inputs: runtimeInputs,
-      ...(actionTemplate?.length ? { steps: actionTemplate } : {}),
+      ...(filteredActionTemplate?.length ? { steps: filteredActionTemplate } : {}),
       executionMode:
-        actionTemplate?.length
+        filteredActionTemplate?.length
           ? "planned"
           : (watchRule.watchProfile?.executionMode as TaskSpec["executionMode"] | undefined) ??
             (watchRule.skillName ? "planned" : this.controlPlane.modelClient.isConfigured() ? "autonomous" : "planned")
@@ -243,6 +278,7 @@ export class WatchExecutionService {
     const explicitSteps = Array.isArray(explicitTaskSpec.steps)
       ? materializeWatchActionTemplate(explicitTaskSpec.steps, runtimeInputs, templateInputs)
       : baseTaskSpec.steps;
+    const filteredExplicitSteps = stripSendLikeSteps(explicitSteps, runtimeInputs.autoSend);
 
     return {
       ...baseTaskSpec,
@@ -251,7 +287,7 @@ export class WatchExecutionService {
         ...runtimeInputs,
         ...(explicitTaskSpec.inputs ?? {})
       },
-      steps: explicitSteps
+      steps: filteredExplicitSteps
     };
   }
 
@@ -585,7 +621,7 @@ export class WatchExecutionService {
             pack
           })
         : null;
-      const taskSpec = this.buildTaskSpecFromWatchRule(activeRule, detection, {
+      const sendTaskSpec = this.buildTaskSpecFromWatchRule(activeRule, detection, {
         replyText: replyDraft?.replyText ?? null,
         autoSend: true
       });
@@ -599,7 +635,7 @@ export class WatchExecutionService {
         detection
       );
       const automation = this.controlPlane.policyEngine.evaluateAutomation({
-        taskSpec,
+        taskSpec: sendTaskSpec,
         watchRule: activeRule,
         detection,
         replyText: replyDraft?.replyText ?? "",
@@ -670,7 +706,7 @@ export class WatchExecutionService {
       if (governedAutomation.action === "draft") {
         const draft = this.controlPlane.draftService.create({
           watchRule: activeRule,
-          taskSpec,
+          taskSpec: sendTaskSpec,
           detection: detection as Record<string, unknown>,
           riskDecision: governedAutomation,
           replyText: replyDraft?.replyText ?? null,
@@ -722,6 +758,13 @@ export class WatchExecutionService {
         return;
       }
 
+      const taskSpec =
+        governedAutomation.action === "prefill"
+          ? this.buildTaskSpecFromWatchRule(activeRule, detection, {
+              replyText: replyDraft?.replyText ?? null,
+              autoSend: false
+            })
+          : sendTaskSpec;
       const task = await this.controlPlane.createTask(taskSpec);
       let dedupeState: Record<string, unknown> = clearWatchFailureState({
         ...recordAutoAction(observedDedupeState),

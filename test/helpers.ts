@@ -91,7 +91,8 @@ export async function startSlackFixtureServer({
     threadTitle,
     unread: true,
     messages: [...messages],
-    sentReplies: [] as Array<{ message: string; createdAt: string }>
+    sentReplies: [] as Array<{ message: string; createdAt: string }>,
+    draftText: ""
   };
 
   const renderPage = (selectedThread = false) => {
@@ -114,12 +115,24 @@ export async function startSlackFixtureServer({
           </div>
           <form method="POST" action="/slack/send?thread=${encodeURIComponent(state.threadId)}">
             <label for="reply-box">Message</label>
-            <textarea id="reply-box" name="message" placeholder="Message ${state.threadTitle}"></textarea>
+            <textarea id="reply-box" name="message" placeholder="Message ${state.threadTitle}">${state.draftText}</textarea>
             <button id="send-reply" type="submit" aria-label="Send reply">Send</button>
           </form>
           <p id="send-status">${
             state.sentReplies.at(-1)?.message ? `Last sent: ${state.sentReplies.at(-1)?.message}` : "No reply sent yet."
           }</p>
+          <script>
+            const replyBox = document.getElementById("reply-box");
+            if (replyBox) {
+              replyBox.addEventListener("input", () => {
+                fetch("/api/slack/draft?thread=${encodeURIComponent(state.threadId)}", {
+                  method: "POST",
+                  headers: { "content-type": "application/json" },
+                  body: JSON.stringify({ message: replyBox.value })
+                }).catch(() => {});
+              });
+            }
+          </script>
         </section>
       `
       : '<section id="thread-panel"><p>Select a thread to view messages.</p></section>';
@@ -164,9 +177,22 @@ export async function startSlackFixtureServer({
         state.messages.push(`AgentOS: ${message}`);
         state.unread = false;
       }
+      state.draftText = "";
       res.writeHead(303, {
         location: `/slack?thread=${encodeURIComponent(state.threadId)}`
       });
+      res.end();
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/slack/draft") {
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      }
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      state.draftText = String(body.message ?? "");
+      res.writeHead(204);
       res.end();
       return;
     }
@@ -179,7 +205,8 @@ export async function startSlackFixtureServer({
           threadTitle: state.threadTitle,
           unread: state.unread,
           messages: state.messages,
-          sentReplies: state.sentReplies
+          sentReplies: state.sentReplies,
+          draftText: state.draftText
         })
       );
       return;
