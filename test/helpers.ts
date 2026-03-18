@@ -327,7 +327,7 @@ export async function startBossFixtureServer({
   candidateRole = "产品经理",
   candidateLocation = "上海",
   candidateExperience = "5年经验",
-  previewMessage = "候选人消息: 方便聊下这个岗位吗？"
+  previewMessage = "候选人: 方便聊下这个岗位吗？"
 }: {
   candidateName?: string;
   candidateRole?: string;
@@ -343,7 +343,9 @@ export async function startBossFixtureServer({
     candidateExperience,
     previewMessage,
     viewedCandidateId: "",
-    viewCount: 0
+    viewCount: 0,
+    messages: [previewMessage],
+    sentReplies: [] as Array<{ message: string; createdAt: string }>
   };
 
   const renderListPage = () => `<!doctype html>
@@ -361,7 +363,7 @@ export async function startBossFixtureServer({
                   aria-label="新候选人: ${state.candidateName} ${state.candidateRole}"
                 >新候选人: ${state.candidateName} · ${state.candidateRole}</a>
                 <p class="candidate-meta">${state.candidateExperience} · ${state.candidateLocation}</p>
-                <p class="candidate-preview">${state.previewMessage}</p>
+                <p class="candidate-preview">${state.messages[0]}</p>
               </li>
             </ul>
           </section>
@@ -379,7 +381,21 @@ export async function startBossFixtureServer({
             <p>${state.candidateRole}</p>
             <p>${state.candidateExperience}</p>
             <p>${state.candidateLocation}</p>
-            <p>${state.previewMessage}</p>
+            <div id="boss-thread-messages">
+              ${state.messages.map((message) => `<p class="message-line">${message}</p>`).join("")}
+            </div>
+            <form method="POST" action="/boss/send?id=${encodeURIComponent(state.candidateId)}">
+              <label for="boss-reply-box">发送消息给${state.candidateName}</label>
+              <textarea
+                id="boss-reply-box"
+                name="message"
+                placeholder="发送消息给${state.candidateName}"
+              ></textarea>
+              <button id="boss-send" type="submit" aria-label="发送消息">发送</button>
+            </form>
+            <p id="boss-send-status">${
+              state.sentReplies.at(-1)?.message ? `最近发送: ${state.sentReplies.at(-1)?.message}` : "暂无已发送消息"
+            }</p>
             <button id="boss-chat" type="button">在线沟通</button>
             <button id="boss-resume" type="button">查看简历</button>
           </section>
@@ -407,6 +423,30 @@ export async function startBossFixtureServer({
       state.viewCount += 1;
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       res.end(renderCandidatePage());
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/boss/send") {
+      if (url.searchParams.get("id") !== state.candidateId) {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      }
+      const body = new URLSearchParams(Buffer.concat(chunks).toString("utf8"));
+      const message = String(body.get("message") ?? "").trim();
+      if (message) {
+        state.sentReplies.push({ message, createdAt: new Date().toISOString() });
+        state.messages.push(`招聘方: ${message}`);
+      }
+      res.writeHead(303, {
+        location: `/boss/candidate?id=${encodeURIComponent(state.candidateId)}`
+      });
+      res.end();
       return;
     }
 

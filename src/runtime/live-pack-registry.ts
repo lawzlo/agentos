@@ -882,6 +882,77 @@ function extractBossContext(worldState: WorldState | null, summary: string): str
   ).slice(0, 5);
 }
 
+function wantsBossReplyWorkflow(goal: string): boolean {
+  return /(reply|respond|contact|message|chat|follow up|outreach|沟通|回复|联系|跟进|发消息)/iu.test(String(goal ?? ""));
+}
+
+function pickBossComposeQuery(worldState: WorldState | null): string {
+  const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
+  const composeCandidate =
+    candidates.find((candidate) => {
+      const hintText = candidateHintText(candidate);
+      const tag = String(((candidate.sourceHints ?? {}) as Record<string, unknown>).tag ?? "").toLowerCase();
+      if (candidate.role === "textbox" || ["input", "textarea"].includes(tag)) {
+        return true;
+      }
+      if (candidate.role === "button") {
+        return false;
+      }
+      return (
+        /(message|reply|chat|contact|消息|回复|输入|联系)/iu.test(hintText) ||
+        /(message|reply|chat|contact|消息|回复|输入|联系)/iu.test(candidate.text)
+      );
+    }) ?? null;
+
+  if (!composeCandidate) {
+    return /[\u4e00-\u9fff]/u.test(String(worldState?.visibleText ?? "")) ? "发送消息" : "Message";
+  }
+
+  const hints = (composeCandidate.sourceHints ?? {}) as Record<string, unknown>;
+  return (
+    String(hints.placeholder ?? hints.ariaLabel ?? composeCandidate.text ?? "").trim() ||
+    (/[\u4e00-\u9fff]/u.test(String(worldState?.visibleText ?? "")) ? "发送消息" : "Message")
+  );
+}
+
+function pickBossSendQuery(worldState: WorldState | null): string {
+  const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
+  const sendCandidate =
+    candidates.find((candidate) => {
+      const hintText = candidateHintText(candidate);
+      return candidate.role === "button" && (SEND_PATTERN.test(hintText) || SEND_PATTERN.test(candidate.text));
+    }) ?? null;
+
+  if (!sendCandidate) {
+    return /[\u4e00-\u9fff]/u.test(String(worldState?.visibleText ?? "")) ? "发送" : "Send";
+  }
+
+  return (
+    String(sendCandidate.text ?? "").trim() ||
+    String(((sendCandidate.sourceHints ?? {}) as Record<string, unknown>).ariaLabel ?? "").trim() ||
+    (/[\u4e00-\u9fff]/u.test(String(worldState?.visibleText ?? "")) ? "发送" : "Send")
+  );
+}
+
+function extractBossThreadContext(worldState: WorldState | null, summary: string): string[] {
+  const lines = visibleLines(worldState).filter((line) => !isBossUiChrome(line));
+  const normalizedSummary = normalizeBossSummary(summary);
+  const summaryIndex = lines.findIndex((line) => normalizeBossSummary(line) === normalizedSummary);
+  const pool = summaryIndex === -1 ? lines : lines.slice(Math.max(0, summaryIndex - 1), summaryIndex + 8);
+  return uniqueStrings(
+    pool.filter((line) => {
+      const normalized = normalizeBossSummary(line);
+      return (
+        normalized &&
+        normalized !== normalizedSummary &&
+        !SEND_PATTERN.test(line) &&
+        !isBossUiChrome(line) &&
+        !/^(发送消息|message|reply|chat|contact|沟通|回复|输入|联系)/iu.test(line.trim())
+      );
+    })
+  ).slice(0, 6);
+}
+
 function buildMailReplySteps(surface: LivePackSurface): RuntimeStep[] {
   return [
     {
@@ -941,6 +1012,39 @@ function buildSlackReplySteps(surface: LivePackSurface): RuntimeStep[] {
     {
       label: "Send Slack reply",
       surface,
+      action: "clickTarget",
+      params: { targetQuery: "{{sendTarget}}" },
+      checkpoint: false
+    }
+  ];
+}
+
+function buildBossReplySteps(): RuntimeStep[] {
+  return [
+    {
+      label: "Open BOSS candidate detail",
+      surface: "browser",
+      action: "clickTarget",
+      params: { targetQuery: "{{openTarget}}" },
+      checkpoint: false
+    },
+    {
+      label: "Wait for BOSS candidate thread",
+      surface: "browser",
+      action: "waitForTarget",
+      params: { targetQuery: "{{typeTarget}}", timeoutMs: 5000 },
+      checkpoint: false
+    },
+    {
+      label: "Type BOSS reply",
+      surface: "browser",
+      action: "typeIntoTarget",
+      params: { targetQuery: "{{typeTarget}}", text: "{{typeText}}", clear: false },
+      checkpoint: false
+    },
+    {
+      label: "Send BOSS reply",
+      surface: "browser",
       action: "clickTarget",
       params: { targetQuery: "{{sendTarget}}" },
       checkpoint: false
@@ -1542,6 +1646,83 @@ async function openMailThreadForContext({
   });
 }
 
+async function openBossCandidateForContext({
+  rule,
+  workspace,
+  surfaceRegistry,
+  detection
+}: LivePackExtractContextArgs): Promise<WorldState | null> {
+  const adapter = surfaceRegistry.get("browser");
+  if (!adapter) {
+    return null;
+  }
+
+  const openTarget = String(detection.inputs?.openTarget ?? detection.summary ?? "").trim();
+  if (!openTarget) {
+    return null;
+  }
+
+  const openCandidate = (detection.metadata?.openCandidate ?? null) as Record<string, unknown> | null;
+  await adapter.act({
+    task: createWatchTask(rule),
+    step: {
+      id: `boss-open-${rule.id}`,
+      label: "Open BOSS candidate detail",
+      surface: "browser",
+      action: "clickTarget",
+      params: {
+        targetQuery: openTarget,
+        ...(openCandidate ? { target: openCandidate } : {})
+      }
+    },
+    workspace: profileAsWorkspace(rule, workspace),
+    traceId: null,
+    outputs: {}
+  });
+
+  const detailReadyTarget = String(detection.inputs?.detailReadyTarget ?? rule.taskInputs?.detailReadyTarget ?? "").trim();
+  if (detailReadyTarget) {
+    await adapter.act({
+      task: createWatchTask(rule),
+      step: {
+        id: `boss-open-wait-${rule.id}`,
+        label: "Wait for BOSS candidate detail",
+        surface: "browser",
+        action: "waitFor",
+        params: {
+          text: detailReadyTarget,
+          timeoutMs: 5000
+        }
+      },
+      workspace: profileAsWorkspace(rule, workspace),
+      traceId: null,
+      outputs: {}
+    });
+  } else {
+    await adapter.act({
+      task: createWatchTask(rule),
+      step: {
+        id: `boss-open-delay-${rule.id}`,
+        label: "Wait for BOSS candidate detail",
+        surface: "browser",
+        action: "wait",
+        params: { ms: 100 }
+      },
+      workspace: profileAsWorkspace(rule, workspace),
+      traceId: null,
+      outputs: {}
+    });
+  }
+
+  return observeWatchSurface({
+    rule,
+    workspace,
+    surfaceRegistry,
+    controlPlane: {} as LivePackControlPlane,
+    surface: "browser"
+  });
+}
+
 function createMailPack({
   name,
   surface,
@@ -1708,9 +1889,9 @@ function createBossPack(): LivePack {
       name: "boss-browser",
       family: "generic",
       surface: "browser",
-      supportsDrafts: false,
+      supportsDrafts: true,
       supportsAutoSend: false,
-      description: "BOSS browser watcher that detects new candidates and opens candidate detail workflows for review."
+      description: "BOSS browser watcher that detects new candidates, opens conversation context, and drafts approval-first follow-ups."
     },
     async activate({ rule, workspace, surfaceRegistry }) {
       const adapter = surfaceRegistry.get("browser");
@@ -1787,6 +1968,70 @@ function createBossPack(): LivePack {
           openCandidate: candidate,
           surface: "browser",
           skillName: "boss-open-candidate"
+        }
+      };
+    },
+    async extractContext(args) {
+      const threadState = await openBossCandidateForContext(args);
+      const summary = String(args.detection.summary ?? "").trim();
+      const context = extractBossThreadContext(threadState, summary);
+      const replyWorkflow = wantsBossReplyWorkflow(args.rule.goal);
+
+      return {
+        summary,
+        context,
+        inputs: {
+          ...(args.detection.inputs ?? {}),
+          watchContext: context.join("\n"),
+          openTarget: String(args.detection.inputs?.openTarget ?? summary).trim() || summary,
+          detailReadyTarget: String(args.detection.inputs?.detailReadyTarget ?? "在线沟通"),
+          ...(replyWorkflow
+            ? {
+                typeTarget: pickBossComposeQuery(threadState),
+                sendTarget: pickBossSendQuery(threadState)
+              }
+            : {})
+        },
+        ...(replyWorkflow
+          ? {
+              taskSpec: {
+                preferredSurface: "browser",
+                skillName: null,
+                steps: buildBossReplySteps()
+              }
+            }
+          : {})
+      };
+    },
+    async draftReply({ rule, detection, controlPlane }) {
+      const summary = String(detection?.summary ?? "").trim();
+      const context = Array.isArray(detection?.context) ? detection.context : [];
+      if (controlPlane.modelClient.isConfigured()) {
+        const drafted = await controlPlane.modelClient.draftReply({
+          goal: rule.goal,
+          livePack: "boss-browser",
+          summary,
+          context
+        });
+        return {
+          replyText: String(drafted.replyText ?? "").trim(),
+          metadata: {
+            confidence: drafted.confidence ?? null,
+            rationale: drafted.rationale ?? null,
+            source: "model"
+          }
+        };
+      }
+
+      const chinese = /[\u4e00-\u9fff]/u.test(`${rule.goal} ${summary} ${context.join(" ")}`);
+      return {
+        replyText: chinese
+          ? "你好，我已看到你的信息，会尽快查看并和你沟通后续。"
+          : "Thanks for reaching out. I reviewed your profile and will follow up shortly.",
+        metadata: {
+          confidence: null,
+          rationale: "heuristic recruiting follow-up",
+          source: "heuristic"
         }
       };
     }

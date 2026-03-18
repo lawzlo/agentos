@@ -1084,6 +1084,149 @@ test("wechat desktop pack can detect unread conversations and build reply steps 
   assert.equal(context?.taskSpec?.steps?.[2]?.params?.text, "{{typeText}}");
 });
 
+test("boss browser pack can extract candidate thread context and build approval-first reply steps", async () => {
+  let opened = false;
+  const initialWorldState = {
+    version: 1,
+    surface: "browser",
+    workspaceId: "workspace-boss",
+    appContext: {
+      title: "BOSS直聘",
+      url: "http://boss.local/boss"
+    },
+    capture: null,
+    ocrBlocks: [],
+    interactionCandidates: [
+      {
+        id: "boss-candidate",
+        surface: "browser",
+        kind: "link",
+        text: "新候选人: 李雷 · 产品经理",
+        role: "link",
+        bounds: { x: 10, y: 10, width: 220, height: 28, centerX: 120, centerY: 24 },
+        confidence: 0.88,
+        sourceHints: { source: "browser", ariaLabel: "新候选人: 李雷 产品经理", href: "/boss/candidate?id=li-lei" },
+        isInteractive: true
+      }
+    ],
+    visibleText: "BOSS直聘\n新候选人\n新候选人: 李雷 · 产品经理\n5年经验 · 上海\n候选人: 方便聊下这个岗位吗？",
+    recentActions: [],
+    summary: "BOSS candidate list",
+    timestamp: new Date().toISOString()
+  };
+  const threadWorldState = {
+    ...initialWorldState,
+    appContext: {
+      title: "李雷 - BOSS直聘",
+      url: "http://boss.local/boss/candidate?id=li-lei"
+    },
+    interactionCandidates: [
+      {
+        id: "reply-box",
+        surface: "browser",
+        kind: "textarea",
+        text: "",
+        role: "textbox",
+        bounds: { x: 10, y: 260, width: 260, height: 72, centerX: 140, centerY: 296 },
+        confidence: 0.86,
+        sourceHints: { source: "browser", placeholder: "发送消息给李雷", tag: "textarea" },
+        isInteractive: true
+      },
+      {
+        id: "send",
+        surface: "browser",
+        kind: "button",
+        text: "发送",
+        role: "button",
+        bounds: { x: 280, y: 260, width: 64, height: 32, centerX: 312, centerY: 276 },
+        confidence: 0.86,
+        sourceHints: { source: "browser", ariaLabel: "发送消息", tag: "button" },
+        isInteractive: true
+      }
+    ],
+    visibleText: "BOSS直聘\n李雷\n产品经理\n5年经验\n上海\n候选人: 方便聊下这个岗位吗？\n发送消息给李雷\n发送\n在线沟通"
+  };
+  const fakeSurface = {
+    async observe() {
+      return opened ? threadWorldState : initialWorldState;
+    },
+    async act({ step }) {
+      if (step.action === "clickTarget") {
+        opened = true;
+      }
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      browser: fakeSurface as never
+    })
+  });
+  const pack = registry.get("boss-browser");
+  const rule: WatchRule = {
+    id: "watch-boss-browser",
+    goal: "Always watch BOSS直聘 and reply to candidate messages",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "browser",
+    workspaceName: "boss-browser-main",
+    skillName: null,
+    appTarget: null,
+    livePack: "boss-browser",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {
+      startUrl: "http://boss.local/boss"
+    },
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-boss",
+    name: "boss-browser-main",
+    rootPath: "/tmp/boss-browser-main",
+    profilePath: "/tmp/boss-browser-main/profile",
+    downloadsPath: "/tmp/boss-browser-main/downloads",
+    artifactsPath: "/tmp/boss-browser-main/artifacts",
+    scratchPath: "/tmp/boss-browser-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: initialWorldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {} as never
+  });
+  assert.equal(detection?.summary, "李雷 · 产品经理");
+
+  const context = await pack?.extractContext?.({
+    rule,
+    worldState: initialWorldState as never,
+    detection: detection as never,
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: { isConfigured: () => false }
+    } as never
+  });
+  assert.equal(context?.inputs?.typeTarget, "发送消息给李雷");
+  assert.equal(context?.inputs?.sendTarget, "发送");
+  assert.equal(context?.taskSpec?.skillName, null);
+  assert.equal(Array.isArray(context?.taskSpec?.steps), true);
+  assert.equal(context?.taskSpec?.steps?.[0]?.action, "clickTarget");
+  assert.equal(context?.taskSpec?.steps?.[2]?.params?.text, "{{typeText}}");
+  assert.equal(context?.context?.some((line) => line.includes("候选人: 方便聊下这个岗位吗？")), true);
+});
+
 test("mail browser watch rules infer the browser pack, draft replies, and can be approved into tasks", async () => {
   const dataDir = await createTempDir();
   const mail = await startMailFixtureServer();
@@ -1162,8 +1305,59 @@ test("boss browser watch rules infer the browser pack and trigger candidate revi
     assert.match(String(completed.taskSpec.inputs.openTarget ?? ""), /李雷/u);
 
     const state = await boss.getState();
+    assert.equal(state.sentReplies.length, 0);
     assert.equal(state.viewedCandidateId, state.candidateId);
     assert.ok(state.viewCount >= 1);
+  } finally {
+    await server.close();
+    await boss.close();
+  }
+});
+
+test("boss browser watch rules draft candidate replies and approved drafts send messages", async () => {
+  const dataDir = await createTempDir();
+  const boss = await startBossFixtureServer();
+  const server = await startAgentServer({ dataDir });
+
+  try {
+    const createResponse = await fetch(`${server.baseUrl}/watches`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        goal: "Always watch BOSS直聘 and reply to candidate messages",
+        preferredSurface: "browser",
+        workspaceName: "boss-browser-reply-main",
+        pollIntervalMs: 50,
+        inputs: {
+          startUrl: `${boss.url}/boss`
+        }
+      })
+    });
+    const { watch } = await createResponse.json();
+    assert.equal(watch.livePack, "boss-browser");
+
+    const pendingDraft = await waitForDraft(
+      server.baseUrl,
+      (draft) => draft.watchRuleId === watch.id && draft.livePack === "boss-browser" && draft.status === "pending"
+    );
+    assert.equal(pendingDraft.riskDecision.action, "draft");
+
+    let state = await boss.getState();
+    assert.equal(state.sentReplies.length, 0);
+
+    const approvedResponse = await fetch(`${server.baseUrl}/drafts/${pendingDraft.id}/approve`, {
+      method: "POST"
+    });
+    const approvedPayload = await approvedResponse.json();
+    assert.equal(approvedPayload.draft.status, "approved");
+
+    const completed = await waitForTask(server.baseUrl, approvedPayload.draft.taskId, (task) => task.status === "completed");
+    assert.equal(completed.status, "completed");
+    assert.equal(completed.taskSpec.skillName, null);
+
+    state = await boss.getState();
+    assert.equal(state.sentReplies.length, 1);
+    assert.equal(state.sentReplies[0].message, "你好，我已看到你的信息，会尽快查看并和你沟通后续。");
   } finally {
     await server.close();
     await boss.close();
