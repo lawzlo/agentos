@@ -4,6 +4,16 @@
 
 AgentOS 是一个本地优先的个人 Agent runtime，用来代表用户操作浏览器和桌面应用。它不是裸机操作系统，而是运行在 macOS 或 Windows 之上的常驻 agent 层，把任务、工作区、trace、学习、watch rule 和本地执行统一在一个 runtime 里。
 
+## 推荐部署方式
+
+AgentOS 的能力足够强，可以操作浏览器、桌面应用、本地文件和长期运行的 watch rule。应该把它当成一个真正的执行者，而不是一个小脚本。
+
+- 推荐第一阶段部署在独立设备、迷你主机、虚拟机，或者单独的系统账号里
+- 不要一上来就接入你日常主力浏览器 profile
+- 先从低风险应用和 `draft-first` 策略开始，再逐步放开自治边界
+- 支付、删除、签署、提交这类高风险动作始终建议保留人工审批
+- 在开启长期值守前先跑一遍 `doctor`
+
 ## AgentOS 现在能做什么
 
 - 启动本地 daemon 和 CLI，长期值守
@@ -36,7 +46,9 @@ AgentOS 是一个本地优先的个人 Agent runtime，用来代表用户操作�
 
 ## 快速开始
 
-先安装依赖、构建 TypeScript runtime，然后启动 daemon：
+大多数用户应该先用自然语言 CLI 命令开始。上手阶段不需要写 JSON。
+
+1. 先安装依赖、构建 runtime，然后启动 daemon：
 
 ```bash
 npm install
@@ -44,15 +56,114 @@ npm run build:ts
 node dist/bin/agentos.js daemon start
 ```
 
-检查当前 runtime 是否正常：
+2. 检查当前 runtime 是否正常：
 
 ```bash
-node dist/bin/agentos.js daemon status --json
-node dist/bin/agentos.js doctor --json
-node dist/bin/agentos.js version --json
+node dist/bin/agentos.js daemon status
+node dist/bin/agentos.js doctor
+```
+
+3. 先执行一个一次性任务：
+
+```bash
+node dist/bin/agentos.js run \
+  "打开 example.com，点击 More information，然后截图" \
+  --surface browser \
+  --wait
+```
+
+4. 再加一个长期 watch rule：
+
+```bash
+node dist/bin/agentos.js watch add \
+  "一直盯 Slack，把低风险未读消息按我的风格自动回复" \
+  --surface browser \
+  --workspace personal-main
 ```
 
 默认监听 `http://127.0.0.1:3017`。Web console 仍可用于 trace/debug，但主入口是 CLI。
+
+## 常见个人 Agent 场景
+
+下面这些都是 AgentOS 设计时优先考虑的真实使用场景，正常情况下不需要用户手写 JSON。
+
+### 1. 浏览器调研与信息整理
+
+```bash
+node dist/bin/agentos.js run \
+  "打开目标网站，整理关键要点，并把简短总结保存到 workspace" \
+  --surface browser \
+  --wait
+```
+
+### 2. 邮件分拣与草稿回复
+
+```bash
+node dist/bin/agentos.js watch add \
+  "一直盯我的邮箱，给新的客户邮件先起草回复，高风险内容保留审批" \
+  --surface browser \
+  --workspace personal-main
+```
+
+### 3. Slack 低风险自动回复
+
+```bash
+node dist/bin/agentos.js watch add \
+  "一直盯 Slack，把低风险未读消息按我的风格自动回复" \
+  --surface browser \
+  --workspace personal-main
+```
+
+### 4. 微信桌面消息辅助
+
+```bash
+node dist/bin/agentos.js watch add \
+  "一直盯微信桌面版，给未读客户消息先起草回复" \
+  --surface desktop \
+  --workspace personal-main
+```
+
+### 5. BOSS 直聘候选人跟进
+
+```bash
+node dist/bin/agentos.js watch add \
+  "一直盯 BOSS直聘，查看新候选人，并起草礼貌的后续沟通" \
+  --surface browser \
+  --workspace recruiting-main
+```
+
+### 6. Google Drive 和文档工作流
+
+```bash
+node dist/bin/agentos.js run \
+  "打开 Google Drive，把 Downloads 里最新的文件上传，并确认上传完成" \
+  --surface browser \
+  --wait
+
+node dist/bin/agentos.js run \
+  "打开 Google Docs，更新周报并保存" \
+  --surface browser \
+  --wait
+```
+
+### 7. 每日学习、摘要和后续建议
+
+```bash
+node dist/bin/agentos.js learn status
+node dist/bin/agentos.js memory search "报价"
+node dist/bin/agentos.js digest run
+node dist/bin/agentos.js proposals ls
+```
+
+### 8. 先做一次，再教成长期流程
+
+```bash
+node dist/bin/agentos.js watch teach \
+  <task-id> \
+  "一直盯这个收件箱，遇到类似消息就照刚才的流程处理" \
+  --pack generic-mail-desktop \
+  --workspace personal-main
+```
 
 ## 构建要求
 

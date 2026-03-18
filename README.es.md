@@ -4,6 +4,16 @@ Idiomas: [English](./README.md) | [简体中文](./README.zh-CN.md) | [日本語
 
 AgentOS es un runtime local-first para agentes personales que operan navegadores y aplicaciones de escritorio en nombre del usuario. No es un sistema operativo bare-metal. Es una capa de agente que corre sobre macOS o Windows y mantiene tareas, workspaces, traces, aprendizaje y watch rules dentro de un solo runtime local.
 
+## Despliegue recomendado
+
+AgentOS es lo bastante potente como para operar navegadores, aplicaciones de escritorio, archivos locales y watch rules permanentes. Debe tratarse como un operador real, no como un script pequeño.
+
+- Primer despliegue recomendado: una máquina dedicada, mini PC, VM o una cuenta separada del sistema operativo
+- Evita conectarlo el primer día a tu perfil principal de navegador
+- Empieza con apps de bajo riesgo y políticas de respuesta `draft-first` antes de ampliar la autonomía
+- Mantén pagos, borrados, firmas y envíos de alto riesgo detrás de aprobación humana
+- Ejecuta `doctor` antes de confiar en flujos always-on
+
 ## Qué hace AgentOS
 
 - Ejecuta un daemon local y una CLI para tareas, watch rules, takeover y diagnóstico
@@ -36,7 +46,9 @@ AgentOS es un runtime local-first para agentes personales que operan navegadores
 
 ## Inicio rápido
 
-Instala dependencias, construye el runtime TypeScript y arranca el daemon:
+La mayoría de los usuarios deberían empezar con comandos CLI en lenguaje natural. No necesitas escribir JSON para empezar a usar AgentOS.
+
+1. Instala dependencias, construye el runtime y arranca el daemon:
 
 ```bash
 npm install
@@ -44,15 +56,114 @@ npm run build:ts
 node dist/bin/agentos.js daemon start
 ```
 
-Verifica el estado:
+2. Verifica el estado:
 
 ```bash
-node dist/bin/agentos.js daemon status --json
-node dist/bin/agentos.js doctor --json
-node dist/bin/agentos.js version --json
+node dist/bin/agentos.js daemon status
+node dist/bin/agentos.js doctor
+```
+
+3. Ejecuta una primera tarea puntual:
+
+```bash
+node dist/bin/agentos.js run \
+  "Abrir example.com, hacer clic en More information y capturar una pantalla" \
+  --surface browser \
+  --wait
+```
+
+4. Añade una primera watch rule permanente:
+
+```bash
+node dist/bin/agentos.js watch add \
+  "Vigila Slack y responde hilos no leídos de bajo riesgo con mi estilo" \
+  --surface browser \
+  --workspace personal-main
 ```
 
 Por defecto escucha en `http://127.0.0.1:3017`. La consola web sigue disponible para trace y debug, pero la entrada principal es la CLI.
+
+## Escenarios comunes para un agente personal
+
+Estos son flujos reales para los que AgentOS está pensado. En condiciones normales el usuario no debería tener que escribir JSON a mano.
+
+### 1. Investigación en navegador y resumen
+
+```bash
+node dist/bin/agentos.js run \
+  "Abrir el sitio objetivo, recopilar los puntos clave y guardar un resumen corto en el workspace" \
+  --surface browser \
+  --wait
+```
+
+### 2. Triaje de correo con drafts primero
+
+```bash
+node dist/bin/agentos.js watch add \
+  "Vigila mi correo, redacta respuestas para mensajes nuevos de clientes y deja las respuestas riesgosas para aprobación" \
+  --surface browser \
+  --workspace personal-main
+```
+
+### 3. Automatización de respuestas de bajo riesgo en Slack
+
+```bash
+node dist/bin/agentos.js watch add \
+  "Vigila Slack y responde hilos no leídos de bajo riesgo con mi estilo" \
+  --surface browser \
+  --workspace personal-main
+```
+
+### 4. Asistencia sobre WeChat desktop
+
+```bash
+node dist/bin/agentos.js watch add \
+  "Vigila WeChat desktop y redacta respuestas para mensajes no leídos de clientes" \
+  --surface desktop \
+  --workspace personal-main
+```
+
+### 5. Seguimiento de candidatos en BOSS
+
+```bash
+node dist/bin/agentos.js watch add \
+  "Vigila BOSS直聘, revisa candidatos nuevos y redacta seguimientos educados" \
+  --surface browser \
+  --workspace recruiting-main
+```
+
+### 6. Flujos con Google Drive y documentos
+
+```bash
+node dist/bin/agentos.js run \
+  "Abrir Google Drive, subir el archivo más reciente de Downloads y confirmar que la subida terminó" \
+  --surface browser \
+  --wait
+
+node dist/bin/agentos.js run \
+  "Abrir Google Docs, actualizar el informe semanal y guardarlo" \
+  --surface browser \
+  --wait
+```
+
+### 7. Memoria diaria, digest y propuestas de seguimiento
+
+```bash
+node dist/bin/agentos.js learn status
+node dist/bin/agentos.js memory search "pricing"
+node dist/bin/agentos.js digest run
+node dist/bin/agentos.js proposals ls
+```
+
+### 8. Enseñar un flujo repetido después de hacerlo una vez
+
+```bash
+node dist/bin/agentos.js watch teach \
+  <task-id> \
+  "Sigue vigilando este buzón y procesa mensajes similares de la misma manera" \
+  --pack generic-mail-desktop \
+  --workspace personal-main
+```
 
 ## Requisitos de build
 

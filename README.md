@@ -4,6 +4,16 @@ Languages: [English](./README.md) | [简体中文](./README.zh-CN.md) | [日本�
 
 AgentOS is a local-first runtime for personal agents that operate browsers and desktop apps on behalf of a user. It is not a bare-metal operating system. It is an always-on agent layer that runs on top of macOS or Windows and keeps tasks, workspaces, traces, learning, and watch rules in one local runtime.
 
+## Recommended deployment
+
+AgentOS is powerful enough to operate browsers, desktop apps, local files, and long-running watch rules. Treat it like a real operator, not a small helper script.
+
+- Recommended first deployment: a dedicated machine, mini PC, VM, or a separate OS user account
+- Avoid attaching it to your primary daily browser profile on day one
+- Start with low-risk apps and draft-first reply policies before expanding autonomy
+- Keep sensitive accounts, payments, deletions, signing flows, and high-risk submissions behind human approval
+- Run `doctor` before trusting always-on workflows
+
 ## What AgentOS does
 
 - Runs a local daemon and CLI for task execution, watch rules, takeover, and diagnostics
@@ -37,7 +47,9 @@ AgentOS is a local-first runtime for personal agents that operate browsers and d
 
 ## Quick start
 
-Install dependencies, build the TypeScript runtime, and start the daemon:
+Most users should start with natural-language CLI commands. You do not need to write JSON to get value from AgentOS.
+
+1. Install dependencies, build the runtime, and start the daemon:
 
 ```bash
 npm install
@@ -45,15 +57,114 @@ npm run build:ts
 node dist/bin/agentos.js daemon start
 ```
 
-Check that the daemon is healthy:
+2. Check that the daemon is healthy:
 
 ```bash
-node dist/bin/agentos.js daemon status --json
-node dist/bin/agentos.js doctor --json
-node dist/bin/agentos.js version --json
+node dist/bin/agentos.js daemon status
+node dist/bin/agentos.js doctor
+```
+
+3. Run a first one-off task:
+
+```bash
+node dist/bin/agentos.js run \
+  "Open example.com, click More information, then capture a screenshot" \
+  --surface browser \
+  --wait
+```
+
+4. Add a first always-on watch rule:
+
+```bash
+node dist/bin/agentos.js watch add \
+  "Always watch Slack and reply to low-risk unread threads in my style" \
+  --surface browser \
+  --workspace personal-main
 ```
 
 The daemon listens on `http://127.0.0.1:3017` by default. The web console remains available for trace and debug use, but the primary entrypoint is the CLI.
+
+## Common personal agent scenarios
+
+These are the kinds of workflows AgentOS is meant to handle without forcing users to hand-author JSON.
+
+### 1. Browser research and capture
+
+```bash
+node dist/bin/agentos.js run \
+  "Open the target site, gather the key points, and save a short summary in the workspace" \
+  --surface browser \
+  --wait
+```
+
+### 2. Email triage with drafts first
+
+```bash
+node dist/bin/agentos.js watch add \
+  "Always watch my email, draft replies for new customer messages, and leave risky replies for approval" \
+  --surface browser \
+  --workspace personal-main
+```
+
+### 3. Slack low-risk reply automation
+
+```bash
+node dist/bin/agentos.js watch add \
+  "Always watch Slack and reply to low-risk unread threads in my style" \
+  --surface browser \
+  --workspace personal-main
+```
+
+### 4. WeChat desktop inbox assistance
+
+```bash
+node dist/bin/agentos.js watch add \
+  "Always watch WeChat desktop and draft replies to unread customer messages" \
+  --surface desktop \
+  --workspace personal-main
+```
+
+### 5. Recruiting follow-up on BOSS
+
+```bash
+node dist/bin/agentos.js watch add \
+  "Always watch BOSS直聘, review new candidates, and draft polite follow-ups" \
+  --surface browser \
+  --workspace recruiting-main
+```
+
+### 6. Google Drive and document workflows
+
+```bash
+node dist/bin/agentos.js run \
+  "Open Google Drive, upload the latest file from Downloads, and confirm the upload finished" \
+  --surface browser \
+  --wait
+
+node dist/bin/agentos.js run \
+  "Open Google Docs, update the weekly report, and save it" \
+  --surface browser \
+  --wait
+```
+
+### 7. Daily memory, digest, and follow-up proposals
+
+```bash
+node dist/bin/agentos.js learn status
+node dist/bin/agentos.js memory search "pricing"
+node dist/bin/agentos.js digest run
+node dist/bin/agentos.js proposals ls
+```
+
+### 8. Teach a repeated workflow after doing it once
+
+```bash
+node dist/bin/agentos.js watch teach \
+  <task-id> \
+  "Keep watching this inbox and handle similar messages the same way" \
+  --pack generic-mail-desktop \
+  --workspace personal-main
+```
 
 ## Build requirements
 

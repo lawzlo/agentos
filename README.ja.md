@@ -4,6 +4,16 @@ Languages: [English](./README.md) | [简体中文](./README.zh-CN.md) | [日本�
 
 AgentOS は、ユーザーの代わりにブラウザやデスクトップアプリを操作するためのローカルファーストな personal agent runtime です。ベアメタル OS ではなく、macOS / Windows 上で動作する常駐 agent layer であり、タスク、workspace、trace、学習、watch rule を 1 つのローカル runtime にまとめます。
 
+## 推奨デプロイ方法
+
+AgentOS は、ブラウザ、デスクトップアプリ、ローカルファイル、常駐 watch rule を操作できるほど強力です。小さな補助スクリプトではなく、実際のオペレーターとして扱うべきです。
+
+- 初期導入は専用マシン、mini PC、VM、または別 OS ユーザーで行うことを推奨します
+- いきなり普段使いのメイン browser profile に接続しないでください
+- まずは低リスクな app と `draft-first` の返信ポリシーから始めてください
+- 支払い、削除、署名、送信などの高リスク操作は人間の承認を残すべきです
+- 常時稼働を信用する前に `doctor` を実行してください
+
 ## AgentOS でできること
 
 - ローカル daemon と CLI を起動し、継続的に常駐させる
@@ -36,7 +46,9 @@ AgentOS は、ユーザーの代わりにブラウザやデスクトップアプ
 
 ## クイックスタート
 
-依存関係を入れ、TypeScript runtime を build して daemon を起動します。
+多くのユーザーは自然言語の CLI から始めるべきです。最初から JSON を書く必要はありません。
+
+1. 依存関係を入れ、runtime を build して daemon を起動します。
 
 ```bash
 npm install
@@ -44,15 +56,114 @@ npm run build:ts
 node dist/bin/agentos.js daemon start
 ```
 
-起動確認:
+2. 起動確認:
 
 ```bash
-node dist/bin/agentos.js daemon status --json
-node dist/bin/agentos.js doctor --json
-node dist/bin/agentos.js version --json
+node dist/bin/agentos.js daemon status
+node dist/bin/agentos.js doctor
+```
+
+3. 最初の単発タスクを実行します。
+
+```bash
+node dist/bin/agentos.js run \
+  "example.com を開き、More information をクリックして、スクリーンショットを撮る" \
+  --surface browser \
+  --wait
+```
+
+4. 最初の常駐 watch rule を追加します。
+
+```bash
+node dist/bin/agentos.js watch add \
+  "Slack を監視し、低リスクの未読スレッドには自分の文体で返信する" \
+  --surface browser \
+  --workspace personal-main
 ```
 
 デフォルトでは `http://127.0.0.1:3017` で待ち受けます。Web console は trace / debug 用に残っていますが、主入口は CLI です。
+
+## よくある personal agent シナリオ
+
+以下は AgentOS が想定している代表的な実運用シナリオです。通常はユーザーが JSON を手書きする必要はありません。
+
+### 1. ブラウザ調査と整理
+
+```bash
+node dist/bin/agentos.js run \
+  "対象サイトを開き、重要ポイントを集めて、短い要約を workspace に保存する" \
+  --surface browser \
+  --wait
+```
+
+### 2. メールの仕分けと草稿返信
+
+```bash
+node dist/bin/agentos.js watch add \
+  "メールを監視し、新しい顧客メッセージにはまず草稿を作り、リスクの高い返信は承認待ちにする" \
+  --surface browser \
+  --workspace personal-main
+```
+
+### 3. Slack の低リスク自動返信
+
+```bash
+node dist/bin/agentos.js watch add \
+  "Slack を監視し、低リスクの未読スレッドには自分の文体で返信する" \
+  --surface browser \
+  --workspace personal-main
+```
+
+### 4. WeChat desktop のメッセージ補助
+
+```bash
+node dist/bin/agentos.js watch add \
+  "WeChat desktop を監視し、未読の顧客メッセージには返信草稿を作る" \
+  --surface desktop \
+  --workspace personal-main
+```
+
+### 5. BOSS直聘 の採用フォロー
+
+```bash
+node dist/bin/agentos.js watch add \
+  "BOSS直聘 を監視し、新しい候補者を確認して、丁寧なフォローアップを草稿化する" \
+  --surface browser \
+  --workspace recruiting-main
+```
+
+### 6. Google Drive とドキュメント作業
+
+```bash
+node dist/bin/agentos.js run \
+  "Google Drive を開き、Downloads の最新ファイルをアップロードして、完了を確認する" \
+  --surface browser \
+  --wait
+
+node dist/bin/agentos.js run \
+  "Google Docs を開き、週報を更新して保存する" \
+  --surface browser \
+  --wait
+```
+
+### 7. 毎日の学習、digest、フォローアップ候補
+
+```bash
+node dist/bin/agentos.js learn status
+node dist/bin/agentos.js memory search "pricing"
+node dist/bin/agentos.js digest run
+node dist/bin/agentos.js proposals ls
+```
+
+### 8. 一度やった作業を常駐フローに教える
+
+```bash
+node dist/bin/agentos.js watch teach \
+  <task-id> \
+  "この inbox を見続け、似たメッセージは同じ流れで処理する" \
+  --pack generic-mail-desktop \
+  --workspace personal-main
+```
 
 ## ビルド要件
 
