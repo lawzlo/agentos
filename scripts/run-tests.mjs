@@ -8,10 +8,11 @@ const testDir = path.join(rootDir, "dist", "test");
 const runnerArgs = process.argv.slice(2);
 const hasConcurrencyArg = runnerArgs.some((value) => value.startsWith("--test-concurrency="));
 const hasTimeoutArg = runnerArgs.some((value) => value.startsWith("--test-timeout="));
+const defaultTimeoutMs = Number.parseInt(process.env.AGENTOS_TEST_TIMEOUT_MS ?? "", 10) || 600000;
 
 const defaultRunnerArgs = [
   ...(!hasConcurrencyArg ? ["--test-concurrency=1"] : []),
-  ...(!hasTimeoutArg ? ["--test-timeout=300000"] : [])
+  ...(!hasTimeoutArg ? [`--test-timeout=${defaultTimeoutMs}`] : [])
 ];
 
 const entries = (await fs.readdir(testDir))

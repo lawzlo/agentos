@@ -361,7 +361,7 @@ export class ControlPlane {
     return this.watchService.disable(watchRuleId);
   }
 
-  deleteWatchRule(watchRuleId) {
+  async deleteWatchRule(watchRuleId) {
     return this.watchService.delete(watchRuleId);
   }
 

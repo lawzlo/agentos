@@ -48,6 +48,22 @@ export class WatchScheduler {
     this.inFlight.clear();
   }
 
+  async removeAndWait(ruleId: string, timeoutMs = 5000): Promise<void> {
+    const timer = this.timers.get(ruleId);
+    if (timer) {
+      clearInterval(timer);
+      this.timers.delete(ruleId);
+    }
+
+    const started = Date.now();
+    while (this.inFlight.has(ruleId)) {
+      if (Date.now() - started >= timeoutMs) {
+        throw new Error(`Timed out waiting for watch scan to finish for ${ruleId}`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+
   sync(rule: WatchRuleLike): void {
     const current = this.timers.get(rule.id);
     if (current) {

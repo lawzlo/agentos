@@ -166,6 +166,8 @@ export class LearningService {
   digestTimer: NodeJS.Timeout | null;
   subscriptions: Array<[string, (...args: unknown[]) => void]>;
   textExtensions: Set<string>;
+  scanInProgress: Promise<void> | null;
+  digestInProgress: Promise<DigestRecord | null> | null;
 
   constructor({ store, eventBus, config, createTask }: LearningServiceOptions) {
     this.store = store;
@@ -177,6 +179,8 @@ export class LearningService {
     this.digestTimer = null;
     this.subscriptions = [];
     this.textExtensions = toLowerSet(config.learning.textExtensions);
+    this.scanInProgress = null;
+    this.digestInProgress = null;
   }
 
   async start(): Promise<void> {
@@ -187,18 +191,21 @@ export class LearningService {
     this.running = true;
     this.ensureSources();
     this.#subscribe();
-    await this.scanFileSystem();
-    await this.runDigestIfDue();
+    await this.#runScanOnce();
+    await this.#runDigestOnce();
     this.scanTimer = setInterval(() => {
-      void this.scanFileSystem();
+      void this.#runScanOnce();
     }, this.config.learning.scanIntervalMs);
     this.digestTimer = setInterval(() => {
-      void this.runDigestIfDue();
+      void this.#runDigestOnce();
     }, Math.max(this.config.learning.scanIntervalMs, 60 * 60 * 1000));
   }
 
   async stop(): Promise<void> {
     this.running = false;
+    await Promise.allSettled(
+      [this.scanInProgress, this.digestInProgress].map((task) => task ?? Promise.resolve(null))
+    );
     if (this.scanTimer) {
       clearInterval(this.scanTimer);
       this.scanTimer = null;
@@ -211,6 +218,34 @@ export class LearningService {
       this.eventBus.off(event, handler);
     }
     this.subscriptions = [];
+  }
+
+  async #runScanOnce(): Promise<void> {
+    if (!this.running || this.scanInProgress) {
+      return;
+    }
+
+    const run = this.scanFileSystem().finally(() => {
+      if (this.scanInProgress === run) {
+        this.scanInProgress = null;
+      }
+    });
+    this.scanInProgress = run;
+    await run;
+  }
+
+  async #runDigestOnce(): Promise<void> {
+    if (!this.running || this.digestInProgress) {
+      return;
+    }
+
+    const run = this.runDigestIfDue().finally(() => {
+      if (this.digestInProgress === run) {
+        this.digestInProgress = null;
+      }
+    });
+    this.digestInProgress = run;
+    await run;
   }
 
   ensureSources(): LearningSource[] {
@@ -430,6 +465,9 @@ export class LearningService {
   }
 
   async observeEvent(event: EventRecord): Promise<void> {
+    if (!this.running) {
+      return;
+    }
     const source = this.store.putLearningSource({
       kind: "watch-events",
       enabled: true,
@@ -459,6 +497,9 @@ export class LearningService {
   }
 
   async observeWatchSignal(kind: string, payload: WatchSignalPayload): Promise<void> {
+    if (!this.running) {
+      return;
+    }
     const detection = payload.detection ?? {};
     const source = this.store.putLearningSource({
       kind: "watch-events",
@@ -497,6 +538,9 @@ export class LearningService {
   }
 
   async observeTaskCompletion(task: TaskSnapshot): Promise<void> {
+    if (!this.running) {
+      return;
+    }
     const source = this.store.putLearningSource({
       kind: "task-results",
       enabled: true,

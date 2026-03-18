@@ -213,12 +213,12 @@ export class WatchService {
     return watchRule;
   }
 
-  delete(watchRuleId: string) {
+  async delete(watchRuleId: string) {
+    await this.watchScheduler.removeAndWait(watchRuleId);
     const deleted = this.store.deleteWatchRule(watchRuleId);
     if (!deleted) {
       throw new Error(`Watch rule not found: ${watchRuleId}`);
     }
-    this.watchScheduler.remove(watchRuleId);
     this.eventBus.broadcast("watch.deleted", { id: watchRuleId });
     return true;
   }

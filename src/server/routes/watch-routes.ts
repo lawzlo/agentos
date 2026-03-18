@@ -97,7 +97,7 @@ export async function handleWatchRoutes({
   if (req.method === "DELETE" && url.pathname.startsWith("/watches/")) {
     const watchRuleId = url.pathname.split("/")[2];
     try {
-      controlPlane.deleteWatchRule(watchRuleId);
+      await controlPlane.deleteWatchRule(watchRuleId);
       json(res, 200, { ok: true });
     } catch (error: unknown) {
       json(res, 404, { error: error instanceof Error ? error.message : String(error) });

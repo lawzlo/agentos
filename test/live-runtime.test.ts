@@ -63,6 +63,23 @@ async function waitForDraft(baseUrl, matcher, timeoutMs = 10000) {
   throw new Error("Timed out waiting for draft");
 }
 
+async function waitForWatchDeletion(baseUrl, watchRuleId, timeoutMs = 10000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const response = await fetch(`${baseUrl}/watches/${watchRuleId}`);
+    if (response.status === 404) {
+      return;
+    }
+    if (response.status !== 200) {
+      const body = await response.text();
+      throw new Error(`Unexpected status while waiting for watch rule deletion: ${response.status}: ${body}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+
+  throw new Error(`Timed out waiting for watch rule ${watchRuleId} to be deleted`);
+}
+
 test("watch rules trigger deduped tasks and can be enabled or disabled", async () => {
   const dataDir = await createTempDir();
   const fakeLivePack = {
@@ -1497,11 +1514,86 @@ test("watch deletion removes the rule and subsequent lookups return 404", async 
     const deletePayload = await deleteResponse.json();
     assert.equal(deletePayload.ok, true);
 
+    await waitForWatchDeletion(server.baseUrl, watch.id);
+
     const getResponse = await fetch(`${server.baseUrl}/watches/${watch.id}`);
     assert.equal(getResponse.status, 404);
     const notFoundPayload = await getResponse.json();
     assert.equal(notFoundPayload.error, "Watch rule not found");
   } finally {
+    await server.close();
+  }
+});
+
+test("watch deletion waits for in-flight scans before deleting", async () => {
+  const dataDir = await createTempDir();
+  let resolveScanHold = () => {};
+  const scanHold = new Promise<void>((resolve) => {
+    resolveScanHold = resolve;
+  });
+  let scanStarted = false;
+  let notifyScanStarted = () => {};
+  const scanStartedSignal = new Promise<void>((resolve) => {
+    notifyScanStarted = () => {
+      if (!scanStarted) {
+        scanStarted = true;
+        resolve();
+      }
+    };
+  });
+
+  const server = await startAgentServer({
+    dataDir,
+    livePacks: {
+      "delete-race-live": {
+        async detectNewItems() {
+          notifyScanStarted();
+          await scanHold;
+          return null;
+        }
+      }
+    }
+  });
+
+  try {
+    const createResponse = await fetch(`${server.baseUrl}/watches`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        goal: "Watch this dummy goal",
+        livePack: "delete-race-live",
+        preferredSurface: "desktop",
+        workspaceName: "delete-race-main",
+        pollIntervalMs: 50
+      })
+    });
+    const { watch } = await createResponse.json();
+
+    await Promise.race([
+      scanStartedSignal,
+      new Promise((_, reject) => setTimeout(() => reject(new Error("scan did not start")), 500))
+    ]);
+
+    const releaseScanHandle = setTimeout(() => resolveScanHold(), 30);
+    const deleteResponse = await fetch(`${server.baseUrl}/watches/${watch.id}`, {
+      method: "DELETE"
+    });
+    clearTimeout(releaseScanHandle);
+    resolveScanHold();
+
+    const deletePayload = await deleteResponse.json();
+    assert.equal(deleteResponse.status, 200);
+    assert.equal(deletePayload.ok, true);
+    await waitForWatchDeletion(server.baseUrl, watch.id);
+
+    const listResponse = await fetch(`${server.baseUrl}/watches`);
+    const listPayload = await listResponse.json();
+    assert.equal(
+      listPayload.watches.some((candidate) => candidate.id === watch.id),
+      false
+    );
+  } finally {
+    resolveScanHold();
     await server.close();
   }
 });
