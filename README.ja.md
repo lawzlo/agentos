@@ -23,6 +23,14 @@ AgentOS は、ブラウザ、デスクトップアプリ、ローカルファイ
 - タスク結果、watch 検出、手動修正、選択されたローカルファイルから学習する
 - 学習内容から提案タスクを作るが、デフォルトでは自動実行しない
 
+## なぜ使うのか
+
+- 繰り返しのブラウザ作業や inbox 対応を、その場限りのスクリプトではなく常駐ローカル workflow にできる
+- 初日から完全自動化しなくても、低リスクなデジタルオペレーターを一日中待機させられる
+- まず返信、要約、フォローアップを草稿として出し、信頼に応じて徐々に自律性を広げられる
+- 一度うまくいった task を watch profile や定期ジョブに変えて、翌日ゼロからやり直さなくてよい
+- trace、memory、資格情報、実行コンテキストをローカルに残し、ホスト型 SaaS control plane に丸ごと渡さなくてよい
+
 ## 現在の実装範囲
 
 - ローカル HTTP + WebSocket control plane
@@ -31,6 +39,7 @@ AgentOS は、ブラウザ、デスクトップアプリ、ローカルファイ
 - Playwright ベースの managed browser workspace
 - Rust sidecar による native desktop runtime
 - `clickTarget`、`typeIntoTarget`、`waitForTarget`、`extractFromTarget` などの target-based action
+- Slack、WeChat desktop、browser / desktop mail、BOSS、Google Drive、Google Docs、Feishu Docs 向けの live pack を同梱
 - 永続化された workspace profile、watch rule、draft approval flow
 - observations、entities、knowledge chunks、daily digest、proposals を含む local learning loop
 - SQLite ベースのローカル永続化
@@ -97,13 +106,26 @@ agentos watch add \
 - Slack、メール、BOSS、Drive、Docs へのログインは自動では行いません
 - model の資格情報は自動では設定しません
 - desktop の Accessibility や Screen Recording 権限を迂回しません
-- `setup --fix` の後にもう一度 `agentos setup` を実行し、まず smoke test を 1 つ、その後に低リスクな always-on workflow を 1 つ追加するのが安全です
+- `setup --fix` の後にもう一度 `agentos setup` を実行し、まず smoke test を 1 つ、その後に低リスクな常駐 workflow を 1 つ追加するのが安全です
+
+## 最初の 10 分で試すなら
+
+価値を最短で感じたいなら、次の順で試すのが分かりやすいです。
+
+```bash
+agentos "example.com を開き、More information をクリックして、スクリーンショットを撮る" --surface browser
+agentos "ローカルのテキストエディタを開き、短いメモを入力して、私に制御を返す" --surface desktop
+agentos jobs add daily_digest --hour 18
+agentos watch add "メールを監視し、新しい顧客メッセージにはまず草稿を作り、リスクの高い返信は承認待ちにする" --surface browser --workspace personal-main
+```
 
 ## よくある personal agent シナリオ
 
 以下は AgentOS が想定している代表的な実運用シナリオです。通常はユーザーが JSON を手書きする必要はありません。
 
 ### 1. ブラウザ調査と整理
+
+workspace と trace を残しながら動く Web リサーチャーとして使えます。
 
 ```bash
 agentos run \
@@ -112,7 +134,20 @@ agentos run \
   --wait
 ```
 
-### 2. メールの仕分けと草稿返信
+### 2. 価格ページ、FAQ、競合ページの要約
+
+会議前の整理や競合把握に向いた使い方です。
+
+```bash
+agentos run \
+  "価格ページと FAQ を開いて差分を整理し、メモを workspace に保存する" \
+  --surface browser \
+  --wait
+```
+
+### 3. メールの仕分けと草稿返信
+
+inbox を進めつつ、高リスクな返信は人間の承認に残します。
 
 ```bash
 agentos watch add \
@@ -121,7 +156,9 @@ agentos watch add \
   --workspace personal-main
 ```
 
-### 3. Slack の低リスク自動返信
+### 4. Slack の低リスク自動返信
+
+単純なスレッドは片付け、難しいものだけ人に戻せます。
 
 ```bash
 agentos watch add \
@@ -130,7 +167,9 @@ agentos watch add \
   --workspace personal-main
 ```
 
-### 4. WeChat desktop のメッセージ補助
+### 5. WeChat desktop のメッセージ補助
+
+公開 API がない desktop app でも、実際の画面を前提に扱えます。
 
 ```bash
 agentos watch add \
@@ -139,7 +178,9 @@ agentos watch add \
   --workspace personal-main
 ```
 
-### 5. BOSS直聘 の採用フォロー
+### 6. BOSS直聘 の採用フォロー
+
+候補者確認、文脈収集、丁寧な follow-up 草稿までを繰り返し処理できます。
 
 ```bash
 agentos watch add \
@@ -148,7 +189,20 @@ agentos watch add \
   --workspace recruiting-main
 ```
 
-### 6. Google Drive とドキュメント作業
+### 7. ローカル文書の整理と保管
+
+契約書、請求書、領収書、PDF などの整頓に向いています。
+
+```bash
+agentos run \
+  "Downloads で最新の PDF を見つけて contracts workspace に移動し、保存先を教える" \
+  --surface desktop \
+  --wait
+```
+
+### 8. Google Drive とドキュメント作業
+
+アップロード、編集、保存の繰り返しを browser 側のオペレーターとして処理できます。
 
 ```bash
 agentos run \
@@ -162,7 +216,27 @@ agentos run \
   --wait
 ```
 
-### 7. 毎日の学習、digest、フォローアップ候補
+### 9. 朝のスキャンと inbox sweep job
+
+一回限りの task 実行ではなく、毎日の定期オペレーターにできます。
+
+```bash
+agentos jobs add morning_scan --workspace personal-main --surface browser --hour 9
+agentos jobs add inbox_sweep --workspace personal-main --surface browser --hour 10
+```
+
+### 10. 終業時 digest と proposal の確認
+
+危険な外部作用を自動送信せずに、能動性だけを高める安全な形です。
+
+```bash
+agentos jobs add daily_digest --hour 18
+agentos jobs add proposal_sweep --workspace personal-main --hour 19
+```
+
+### 11. 毎日の学習、digest、フォローアップ候補
+
+何を学んだかを検索し、次にやるべきことだけを受け取れます。
 
 ```bash
 agentos learn status
@@ -171,7 +245,9 @@ agentos digest run
 agentos proposals ls
 ```
 
-### 8. 一度やった作業を常駐フローに教える
+### 12. 一度やった作業を常駐フローに教える
+
+最初は人間が丁寧にやり、安定したら standing workflow に変えるやり方です。
 
 ```bash
 agentos watch teach \
@@ -304,7 +380,17 @@ agentos proposals ls
 agentos proposals accept <proposal-id>
 ```
 
-### 9. setup を修復する、またはローカルインストールをアンインストールする
+### 9. 定期ジョブを管理する
+
+```bash
+agentos jobs ls
+agentos jobs inspect <job-id>
+agentos jobs run <job-id>
+agentos jobs disable <job-id>
+agentos jobs enable <job-id>
+```
+
+### 10. setup を修復する、またはローカルインストールをアンインストールする
 
 ```bash
 agentos setup --fix --dry-run

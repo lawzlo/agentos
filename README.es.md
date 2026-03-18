@@ -23,6 +23,14 @@ AgentOS es lo bastante potente como para operar navegadores, aplicaciones de esc
 - Aprende de resultados de tareas, detecciones de watch, correcciones manuales y archivos locales seleccionados
 - Genera propuestas de tareas a partir de lo aprendido, sin ejecutarlas automáticamente por defecto
 
+## Por qué la gente lo usa
+
+- Sustituye tareas repetitivas de navegador e inbox por workflows locales permanentes en vez de scripts de una sola vez
+- Mantiene un operador digital de bajo riesgo activo todo el día sin entregar autonomía total desde el primer día
+- Empieza redactando respuestas, resúmenes y follow-ups, y solo amplía la autonomía cuando ya hay confianza
+- Convierte una tarea exitosa en watch profile o job recurrente para no empezar desde cero mañana
+- Mantiene traces, memoria, credenciales y contexto operativo en local en vez de enviarlo todo a un control plane SaaS alojado
+
 ## Capacidades actuales
 
 - Control plane local HTTP + WebSocket
@@ -31,6 +39,7 @@ AgentOS es lo bastante potente como para operar navegadores, aplicaciones de esc
 - Workspace de navegador administrado con Playwright
 - Runtime nativo de escritorio mediante Rust sidecar
 - Acciones target-based como `clickTarget`, `typeIntoTarget`, `waitForTarget` y `extractFromTarget`
+- Live packs incluidos para Slack, WeChat desktop, correo en navegador/escritorio, BOSS, Google Drive, Google Docs y Feishu Docs
 - Workspace profiles persistentes, watch rules y flujo de drafts con aprobación
 - Learning loop local con observations, entities, knowledge chunks, daily digests y proposals
 - Persistencia local sobre SQLite
@@ -97,13 +106,26 @@ Si `agentos` todavía no está en tu PATH, ejecuta primero `npm run cli:link` de
 - No inicia sesión por ti en Slack, correo, BOSS, Drive o Docs
 - No inyecta credenciales del modelo por ti
 - No evita los permisos de Accessibility o Screen Recording en plataformas de escritorio
-- Después de `setup --fix`, vuelve a ejecutar `agentos setup` y empieza con una smoke test y luego con un flujo always-on de bajo riesgo
+- Después de `setup --fix`, vuelve a ejecutar `agentos setup` y empieza con una smoke test y luego con un flujo continuo de bajo riesgo
+
+## Los mejores primeros 10 minutos
+
+Si quieres sentir valor rápido, prueba esto en este orden:
+
+```bash
+agentos "Abrir example.com, hacer clic en More information y capturar una pantalla" --surface browser
+agentos "Abrir un editor de texto local, escribir una nota corta y devolverme el control" --surface desktop
+agentos jobs add daily_digest --hour 18
+agentos watch add "Vigila mi correo, redacta respuestas para mensajes nuevos de clientes y deja las respuestas riesgosas para aprobación" --surface browser --workspace personal-main
+```
 
 ## Escenarios comunes para un agente personal
 
 Estos son flujos reales para los que AgentOS está pensado. En condiciones normales el usuario no debería tener que escribir JSON a mano.
 
 ### 1. Investigación en navegador y resumen
+
+Úsalo como un investigador web que deja workspace, trace y resumen listos para reutilizar.
 
 ```bash
 agentos run \
@@ -112,7 +134,20 @@ agentos run \
   --wait
 ```
 
-### 2. Triaje de correo con drafts primero
+### 2. Resumir páginas de precios, FAQ o competidores
+
+Sirve para escaneos de mercado rápidos o preparación de reuniones.
+
+```bash
+agentos run \
+  "Abrir las páginas de precios y FAQ, resumir las diferencias y guardar las notas en el workspace" \
+  --surface browser \
+  --wait
+```
+
+### 3. Triaje de correo con drafts primero
+
+Mantén el inbox avanzando sin enviar respuestas riesgosas automáticamente.
 
 ```bash
 agentos watch add \
@@ -121,7 +156,9 @@ agentos watch add \
   --workspace personal-main
 ```
 
-### 3. Automatización de respuestas de bajo riesgo en Slack
+### 4. Automatización de respuestas de bajo riesgo en Slack
+
+Deja que AgentOS limpie hilos simples y escale solo los casos delicados.
 
 ```bash
 agentos watch add \
@@ -130,7 +167,9 @@ agentos watch add \
   --workspace personal-main
 ```
 
-### 4. Asistencia sobre WeChat desktop
+### 5. Asistencia sobre WeChat desktop
+
+Es útil cuando el inbox importante no tiene una API pública usable.
 
 ```bash
 agentos watch add \
@@ -139,7 +178,9 @@ agentos watch add \
   --workspace personal-main
 ```
 
-### 5. Seguimiento de candidatos en BOSS
+### 6. Seguimiento de candidatos en BOSS
+
+Revisa candidatos nuevos, abre contexto y prepara follow-ups educados sin repetir siempre los mismos clics.
 
 ```bash
 agentos watch add \
@@ -148,7 +189,20 @@ agentos watch add \
   --workspace recruiting-main
 ```
 
-### 6. Flujos con Google Drive y documentos
+### 7. Descargar, renombrar y archivar documentos locales
+
+Útil para facturas, contratos, recibos o PDFs que necesitan una ruta consistente.
+
+```bash
+agentos run \
+  "Encontrar el PDF más reciente en Downloads, moverlo al workspace contracts y decirme dónde quedó guardado" \
+  --surface desktop \
+  --wait
+```
+
+### 8. Flujos con Google Drive y documentos
+
+Usa el navegador como operador para bucles de subir, editar y guardar.
 
 ```bash
 agentos run \
@@ -162,7 +216,27 @@ agentos run \
   --wait
 ```
 
-### 7. Memoria diaria, digest y propuestas de seguimiento
+### 9. Jobs de morning scan e inbox sweep
+
+Convierte AgentOS en un operador rutinario en lugar de un simple runner de tareas puntuales.
+
+```bash
+agentos jobs add morning_scan --workspace personal-main --surface browser --hour 9
+agentos jobs add inbox_sweep --workspace personal-main --surface browser --hour 10
+```
+
+### 10. Digest de fin de día y revisión de propuestas
+
+Es una forma segura de ser proactivo sin enviar trabajo riesgoso al mundo automáticamente.
+
+```bash
+agentos jobs add daily_digest --hour 18
+agentos jobs add proposal_sweep --workspace personal-main --hour 19
+```
+
+### 11. Memoria diaria, digest y propuestas de seguimiento
+
+Busca lo que AgentOS aprendió en lugar de reconstruir tú mismo el contexto.
 
 ```bash
 agentos learn status
@@ -171,7 +245,9 @@ agentos digest run
 agentos proposals ls
 ```
 
-### 8. Enseñar un flujo repetido después de hacerlo una vez
+### 12. Enseñar un flujo repetido después de hacerlo una vez
+
+Hazlo una vez con cuidado y luego conviértelo en un flujo permanente.
 
 ```bash
 agentos watch teach \
@@ -304,7 +380,17 @@ agentos proposals ls
 agentos proposals accept <proposal-id>
 ```
 
-### 9. Reparar el setup o desinstalar la instalación local
+### 9. Gestionar jobs recurrentes
+
+```bash
+agentos jobs ls
+agentos jobs inspect <job-id>
+agentos jobs run <job-id>
+agentos jobs disable <job-id>
+agentos jobs enable <job-id>
+```
+
+### 10. Reparar el setup o desinstalar la instalación local
 
 ```bash
 agentos setup --fix --dry-run

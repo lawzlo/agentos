@@ -23,6 +23,14 @@ AgentOS is powerful enough to operate browsers, desktop apps, local files, and l
 - Learns from task outcomes, watch detections, manual corrections, and selected local files
 - Proposes follow-up tasks from learned information instead of auto-running them by default
 
+## Why people use it
+
+- Replace repetitive browser and inbox chores with standing local workflows instead of one-off scripts
+- Keep a low-risk digital operator online all day without granting full autonomy on day one
+- Draft replies, summaries, and follow-ups first, then let trust expand gradually
+- Reuse a successful task as a watch profile or recurring job instead of starting from zero tomorrow
+- Keep traces, memory, credentials, and operating context local instead of shipping everything to a hosted SaaS control plane
+
 ## Current capability summary
 
 - Local HTTP + WebSocket control plane
@@ -31,6 +39,7 @@ AgentOS is powerful enough to operate browsers, desktop apps, local files, and l
 - Browser automation through a managed Playwright-driven Chrome profile
 - Desktop automation through shared browser/desktop abstractions plus a Rust native sidecar
 - Target-based actions such as `clickTarget`, `typeIntoTarget`, `waitForTarget`, and `extractFromTarget`
+- Built-in live packs for Slack, WeChat desktop, browser/desktop mail, BOSS, Google Drive, Google Docs, and Feishu Docs
 - Persistent workspace profiles and watch rules
 - Conservative live automation with draft/approval flow
 - Local learning loop with observations, entities, searchable knowledge chunks, daily digests, and proposals
@@ -100,11 +109,24 @@ If `agentos` is not on your PATH yet, run `npm run cli:link` from the source che
 - It does not bypass Accessibility or Screen Recording permissions on desktop platforms
 - After `setup --fix`, rerun `agentos setup` and then start with one smoke test plus one low-risk always-on workflow
 
+## Best first 10 minutes
+
+If you want the fastest path to value, try these in order:
+
+```bash
+agentos "Open example.com, click More information, then capture a screenshot" --surface browser
+agentos "Open a local text editor, type a short note, and wait for me" --surface desktop
+agentos jobs add daily_digest --hour 18
+agentos watch add "Always watch my email, draft replies for new customer messages, and leave risky replies for approval" --surface browser --workspace personal-main
+```
+
 ## Common personal agent scenarios
 
 These are the kinds of workflows AgentOS is meant to handle without forcing users to hand-author JSON.
 
 ### 1. Browser research and capture
+
+Use it like a web researcher that leaves behind artifacts and a reusable workspace.
 
 ```bash
 agentos run \
@@ -113,7 +135,20 @@ agentos run \
   --wait
 ```
 
-### 2. Email triage with drafts first
+### 2. Pricing, FAQ, or competitor page summarization
+
+Good for fast market scans or collecting talking points before a meeting.
+
+```bash
+agentos run \
+  "Open the pricing and FAQ pages, summarize the differences, and save the notes in the workspace" \
+  --surface browser \
+  --wait
+```
+
+### 3. Email triage with drafts first
+
+Keep the inbox moving without auto-sending risky replies.
 
 ```bash
 agentos watch add \
@@ -122,7 +157,9 @@ agentos watch add \
   --workspace personal-main
 ```
 
-### 3. Slack low-risk reply automation
+### 4. Slack low-risk reply automation
+
+Let AgentOS clear low-risk threads while leaving the sharp edges to humans.
 
 ```bash
 agentos watch add \
@@ -131,7 +168,9 @@ agentos watch add \
   --workspace personal-main
 ```
 
-### 4. WeChat desktop inbox assistance
+### 5. WeChat desktop inbox assistance
+
+Useful when the important inbox is not exposed by a public API.
 
 ```bash
 agentos watch add \
@@ -140,7 +179,9 @@ agentos watch add \
   --workspace personal-main
 ```
 
-### 5. Recruiting follow-up on BOSS
+### 6. Recruiting follow-up on BOSS
+
+Review new candidates, open context, and prepare polite outreach without manually redoing the same clicks.
 
 ```bash
 agentos watch add \
@@ -149,7 +190,20 @@ agentos watch add \
   --workspace recruiting-main
 ```
 
-### 6. Google Drive and document workflows
+### 7. Download, rename, and file local documents
+
+This is useful for invoices, contracts, receipts, or PDFs that need consistent filing.
+
+```bash
+agentos run \
+  "Find the newest PDF in Downloads, move it into the contracts workspace, and tell me where it was saved" \
+  --surface desktop \
+  --wait
+```
+
+### 8. Google Drive and document workflows
+
+Use the browser as the operator for upload, edit, and save loops.
 
 ```bash
 agentos run \
@@ -163,7 +217,27 @@ agentos run \
   --wait
 ```
 
-### 7. Daily memory, digest, and follow-up proposals
+### 9. Morning scan and inbox sweep jobs
+
+Turn AgentOS into a routine operator instead of a one-off task runner.
+
+```bash
+agentos jobs add morning_scan --workspace personal-main --surface browser --hour 9
+agentos jobs add inbox_sweep --workspace personal-main --surface browser --hour 10
+```
+
+### 10. End-of-day digest and proposal review
+
+This is a safe way to stay proactive without auto-sending work into the world.
+
+```bash
+agentos jobs add daily_digest --hour 18
+agentos jobs add proposal_sweep --workspace personal-main --hour 19
+```
+
+### 11. Daily memory, digest, and follow-up proposals
+
+Search what AgentOS learned instead of manually reconstructing context.
 
 ```bash
 agentos learn status
@@ -172,7 +246,9 @@ agentos digest run
 agentos proposals ls
 ```
 
-### 8. Teach a repeated workflow after doing it once
+### 12. Teach a repeated workflow after doing it once
+
+Do it once carefully, then turn that pattern into a standing workflow.
 
 ```bash
 agentos watch teach \
@@ -305,7 +381,17 @@ agentos proposals ls
 agentos proposals accept <proposal-id>
 ```
 
-### 9. Repair setup or uninstall the local install
+### 9. Manage recurring jobs
+
+```bash
+agentos jobs ls
+agentos jobs inspect <job-id>
+agentos jobs run <job-id>
+agentos jobs disable <job-id>
+agentos jobs enable <job-id>
+```
+
+### 10. Repair setup or uninstall the local install
 
 ```bash
 agentos setup --fix --dry-run

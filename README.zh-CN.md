@@ -23,6 +23,14 @@ AgentOS 的能力足够强，可以操作浏览器、桌面应用、本地文件
 - 从任务结果、watch 检测、人工修正和部分本地文件中持续学习
 - 基于学到的信息生成建议任务，默认不自动执行
 
+## 为什么用户会想用它
+
+- 把重复性的浏览器操作和消息处理，变成长期站岗的本地 workflow，而不是一次性脚本
+- 在不第一天就全自动放权的前提下，先得到一个低风险、全天在线的数字执行者
+- 先让它起草回复、总结和后续动作，再随着信任逐步放开自治边界
+- 一次成功任务可以直接教成 watch profile 或定时任务，第二天不用从零再来
+- traces、记忆、凭据和上下文都留在本地，不需要把整套工作过程交给托管式 SaaS 控制面
+
 ## 当前已实现能力
 
 - 本地 HTTP + WebSocket control plane
@@ -31,6 +39,7 @@ AgentOS 的能力足够强，可以操作浏览器、桌面应用、本地文件
 - Playwright 驱动的托管浏览器 workspace
 - 通过 Rust sidecar 驱动的本地桌面能力
 - `clickTarget`、`typeIntoTarget`、`waitForTarget`、`extractFromTarget` 等 target-based action
+- 已内置 Slack、微信桌面版、浏览器/桌面邮箱、BOSS、Google Drive、Google Docs、飞书文档等 live packs
 - 持久化 workspace profile、watch rule、draft 审批流
 - 本地 learning loop：observations、entities、knowledge chunks、daily digest、proposals
 - SQLite 本地存储
@@ -97,13 +106,26 @@ agentos watch add \
 - 它不会替你登录 Slack、邮箱、BOSS、Drive、Docs
 - 它不会替你注入模型凭据
 - 它不会绕过桌面端的辅助功能或屏幕录制权限
-- 跑完 `setup --fix` 之后，建议再跑一遍 `agentos setup`，然后先做一个 smoke test，再加一个低风险 always-on workflow
+- 跑完 `setup --fix` 之后，建议再跑一遍 `agentos setup`，然后先做一个 smoke test，再加一个低风险长期值守 workflow
+
+## 最适合先试的 10 分钟
+
+如果你想最快感受到价值，可以按这个顺序试：
+
+```bash
+agentos "打开 example.com，点击 More information，然后截图" --surface browser
+agentos "打开一个本地文本编辑器，输入一段短笔记，然后等待我接管" --surface desktop
+agentos jobs add daily_digest --hour 18
+agentos watch add "一直盯我的邮箱，给新的客户邮件先起草回复，高风险内容保留审批" --surface browser --workspace personal-main
+```
 
 ## 常见个人 Agent 场景
 
 下面这些都是 AgentOS 设计时优先考虑的真实使用场景，正常情况下不需要用户手写 JSON。
 
 ### 1. 浏览器调研与信息整理
+
+把它当成一个会留下 workspace、trace 和总结的网页调研员。
 
 ```bash
 agentos run \
@@ -112,7 +134,20 @@ agentos run \
   --wait
 ```
 
-### 2. 邮件分拣与草稿回复
+### 2. 价格页、FAQ、竞品页面快速总结
+
+适合会前准备、竞品扫描或者整理 talking points。
+
+```bash
+agentos run \
+  "打开价格页和 FAQ 页面，整理差异，并把笔记保存到 workspace" \
+  --surface browser \
+  --wait
+```
+
+### 3. 邮件分拣与草稿回复
+
+让 inbox 先流动起来，但保留高风险回复的人工把关。
 
 ```bash
 agentos watch add \
@@ -121,7 +156,9 @@ agentos watch add \
   --workspace personal-main
 ```
 
-### 3. Slack 低风险自动回复
+### 4. Slack 低风险自动回复
+
+让 AgentOS 先清掉低风险线程，复杂情况再交给人。
 
 ```bash
 agentos watch add \
@@ -130,7 +167,9 @@ agentos watch add \
   --workspace personal-main
 ```
 
-### 4. 微信桌面消息辅助
+### 5. 微信桌面消息辅助
+
+适合那种没有公开 API、但必须长期盯着的桌面消息入口。
 
 ```bash
 agentos watch add \
@@ -139,7 +178,9 @@ agentos watch add \
   --workspace personal-main
 ```
 
-### 5. BOSS 直聘候选人跟进
+### 6. BOSS 直聘候选人跟进
+
+查看新候选人、拉上下文、起草礼貌 follow-up，不再每次重复同一套点击。
 
 ```bash
 agentos watch add \
@@ -148,7 +189,20 @@ agentos watch add \
   --workspace recruiting-main
 ```
 
-### 6. Google Drive 和文档工作流
+### 7. 下载、重命名并归档本地文档
+
+适合合同、发票、收据、PDF 之类需要稳定归档的文件。
+
+```bash
+agentos run \
+  "找到 Downloads 里最新的 PDF，把它移动到 contracts workspace，并告诉我最终保存位置" \
+  --surface desktop \
+  --wait
+```
+
+### 8. Google Drive 和文档工作流
+
+让浏览器变成上传、编辑、保存的执行层。
 
 ```bash
 agentos run \
@@ -162,7 +216,27 @@ agentos run \
   --wait
 ```
 
-### 7. 每日学习、摘要和后续建议
+### 9. 每日晨间扫描和 inbox sweep
+
+把 AgentOS 从一次性执行器变成每天固定值守的操作员。
+
+```bash
+agentos jobs add morning_scan --workspace personal-main --surface browser --hour 9
+agentos jobs add inbox_sweep --workspace personal-main --surface browser --hour 10
+```
+
+### 10. 下班前 digest 和建议任务回顾
+
+这是更安全的主动化方式，不会直接把高风险动作发出去。
+
+```bash
+agentos jobs add daily_digest --hour 18
+agentos jobs add proposal_sweep --workspace personal-main --hour 19
+```
+
+### 11. 每日学习、摘要和后续建议
+
+需要上下文时，直接搜它学到了什么，而不是自己重新回忆。
 
 ```bash
 agentos learn status
@@ -171,7 +245,9 @@ agentos digest run
 agentos proposals ls
 ```
 
-### 8. 先做一次，再教成长期流程
+### 12. 先做一次，再教成长期流程
+
+先人工做稳，再把这条路径教成长期规则。
 
 ```bash
 agentos watch teach \
@@ -304,7 +380,17 @@ agentos proposals ls
 agentos proposals accept <proposal-id>
 ```
 
-### 9. 修复 setup 或卸载本地安装
+### 9. 管理定时任务
+
+```bash
+agentos jobs ls
+agentos jobs inspect <job-id>
+agentos jobs run <job-id>
+agentos jobs disable <job-id>
+agentos jobs enable <job-id>
+```
+
+### 10. 修复 setup 或卸载本地安装
 
 ```bash
 agentos setup --fix --dry-run
