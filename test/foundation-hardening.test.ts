@@ -40,6 +40,8 @@ test("doctor bundle and version endpoints expose hardening metadata", async () =
     assert.equal(typeof doctorPayload.doctor.store.schemaVersion, "number");
     assert.equal(typeof doctorPayload.doctor.version.appVersion, "string");
     assert.equal(typeof doctorPayload.doctor.native.compatible, "boolean");
+    assert.equal(typeof doctorPayload.doctor.readyLivePackCount, "number");
+    assert.equal(typeof doctorPayload.doctor.blockedLivePackCount, "number");
     assert.equal(typeof doctorPayload.doctor.pendingProposalCount, "number");
     assert.equal(typeof doctorPayload.doctor.awaitingApprovalWatchCount, "number");
     assert.equal(typeof doctorPayload.doctor.backoffWatchCount, "number");
@@ -47,6 +49,9 @@ test("doctor bundle and version endpoints expose hardening metadata", async () =
     assert.equal(Array.isArray(doctorPayload.doctor.recentErrors), true);
 
     const daemonPayload = await (await fetch(`${server.baseUrl}/daemon/status`)).json();
+    assert.equal(typeof daemonPayload.daemon.livePackCount, "number");
+    assert.equal(typeof daemonPayload.daemon.readyLivePackCount, "number");
+    assert.equal(typeof daemonPayload.daemon.blockedLivePackCount, "number");
     assert.equal(typeof daemonPayload.daemon.degradedWatchCount, "number");
     assert.equal(typeof daemonPayload.daemon.pendingDraftCount, "number");
     assert.equal(typeof daemonPayload.daemon.pendingProposalCount, "number");
@@ -61,6 +66,26 @@ test("doctor bundle and version endpoints expose hardening metadata", async () =
       await fs.readFile(path.join(bundlePayload.bundle.bundlePath, "doctor.json"), "utf8")
     );
     assert.equal(doctorBundle.doctor.version.appVersion, getRuntimeVersionInfo().appVersion);
+  } finally {
+    await server.close();
+  }
+});
+
+test("packs endpoint reports browser packs as blocked when no browser executable is configured", async () => {
+  const dataDir = await createTempDir();
+  const server = await startAgentServer({
+    dataDir,
+    browserExecutable: ""
+  });
+
+  try {
+    const packsPayload = await (await fetch(`${server.baseUrl}/packs`)).json();
+    const slackBrowser = packsPayload.packs.find((pack) => pack.name === "slack-browser");
+    assert.equal(slackBrowser?.ready, false);
+    assert.equal(
+      slackBrowser?.healthChecks?.some((check) => check.id === "browser-runtime" && check.status === "blocked"),
+      true
+    );
   } finally {
     await server.close();
   }

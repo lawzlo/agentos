@@ -25,6 +25,9 @@ export interface DaemonStatus {
   startedAt?: string | null;
   dataDir?: string;
   connectorCount?: number;
+  livePackCount?: number;
+  readyLivePackCount?: number;
+  blockedLivePackCount?: number;
   watchCount?: number;
   enabledWatchCount?: number;
   degradedWatchCount?: number;
@@ -54,6 +57,8 @@ export interface DoctorReport {
   browserExecutable: string | null;
   modelConfigured: boolean;
   livePackCount: number;
+  readyLivePackCount: number;
+  blockedLivePackCount: number;
   degradedWatchCount: number;
   pendingDraftCount: number;
   pendingProposalCount: number;

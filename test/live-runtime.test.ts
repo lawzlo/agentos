@@ -707,6 +707,8 @@ test("doctor and packs endpoints expose live runtime diagnostics", async () => {
     const doctorPayload = await (await fetch(`${server.baseUrl}/doctor`)).json();
     assert.equal(typeof doctorPayload.doctor.ok, "boolean");
     assert.ok(Array.isArray(doctorPayload.doctor.warnings));
+    assert.equal(typeof doctorPayload.doctor.readyLivePackCount, "number");
+    assert.equal(typeof doctorPayload.doctor.blockedLivePackCount, "number");
 
     const packsPayload = await (await fetch(`${server.baseUrl}/packs`)).json();
     assert.ok(packsPayload.packs.some((pack) => pack.name === "generic-mail-browser"));
@@ -721,6 +723,13 @@ test("doctor and packs endpoints expose live runtime diagnostics", async () => {
     assert.equal(packsPayload.packs.find((pack) => pack.name === "slack-browser")?.defaultReplyPolicy, "auto_send");
     assert.equal(packsPayload.packs.find((pack) => pack.name === "generic-mail-browser")?.defaultReplyPolicy, "draft_first");
     assert.equal(packsPayload.packs.find((pack) => pack.name === "boss-browser")?.defaultReplyPolicy, "draft_first");
+    assert.equal(packsPayload.packs.find((pack) => pack.name === "slack-browser")?.category, "conversation");
+    assert.equal(packsPayload.packs.find((pack) => pack.name === "google-docs-browser")?.category, "documents");
+    assert.equal(packsPayload.packs.find((pack) => pack.name === "google-drive-browser")?.category, "files");
+    assert.ok(packsPayload.packs.find((pack) => pack.name === "slack-browser")?.capabilities.includes("thread_context"));
+    assert.ok(packsPayload.packs.find((pack) => pack.name === "boss-browser")?.capabilities.includes("candidate_review"));
+    assert.ok(Array.isArray(packsPayload.packs.find((pack) => pack.name === "slack-browser")?.healthChecks));
+    assert.equal(typeof packsPayload.packs.find((pack) => pack.name === "slack-browser")?.ready, "boolean");
   } finally {
     await server.close();
   }
@@ -935,6 +944,7 @@ test("slack desktop pack can detect unread threads and build reply steps from a 
     controlPlane: {} as never
   });
   assert.equal(detection?.summary, "Acme renewal");
+  assert.equal(detection?.metadata?.threadKey, "acme renewal");
 
   const context = await pack?.extractContext?.({
     rule,
@@ -948,6 +958,8 @@ test("slack desktop pack can detect unread threads and build reply steps from a 
   });
   assert.equal(context?.inputs?.typeTarget, "Message");
   assert.equal(context?.inputs?.sendTarget, "Send");
+  assert.equal(context?.metadata?.threadKey, "acme renewal");
+  assert.equal(context?.metadata?.sender, "Customer");
   assert.equal(Array.isArray(context?.taskSpec?.steps), true);
   assert.equal(context?.taskSpec?.steps?.[0]?.action, "clickTarget");
   assert.equal(context?.taskSpec?.steps?.[2]?.params?.text, "{{typeText}}");
@@ -1081,6 +1093,7 @@ test("wechat desktop pack can detect unread conversations and build reply steps 
     controlPlane: {} as never
   });
   assert.equal(detection?.summary, "张三");
+  assert.equal(detection?.metadata?.threadKey, "张三");
 
   const context = await pack?.extractContext?.({
     rule,
@@ -1095,6 +1108,8 @@ test("wechat desktop pack can detect unread conversations and build reply steps 
   assert.equal(context?.inputs?.typeTarget, "输入消息");
   assert.equal(context?.inputs?.sendTarget, "发送");
   assert.equal(context?.context?.[0], "客户: 明天下午方便吗？");
+  assert.equal(context?.metadata?.threadKey, "张三");
+  assert.equal(context?.metadata?.sender, "客户");
   assert.equal(Array.isArray(context?.taskSpec?.steps), true);
   assert.equal(context?.taskSpec?.steps?.[0]?.action, "clickTarget");
   assert.equal(context?.taskSpec?.steps?.[2]?.params?.text, "{{typeText}}");
@@ -1223,6 +1238,9 @@ test("boss browser pack can extract candidate thread context and build approval-
     controlPlane: {} as never
   });
   assert.equal(detection?.summary, "李雷 · 产品经理");
+  assert.equal(detection?.metadata?.threadKey, "李雷 · 产品经理");
+  assert.equal(detection?.metadata?.sender, "候选人");
+  assert.equal(detection?.metadata?.direction, "inbound");
 
   const context = await pack?.extractContext?.({
     rule,
@@ -1236,6 +1254,8 @@ test("boss browser pack can extract candidate thread context and build approval-
   });
   assert.equal(context?.inputs?.typeTarget, "发送消息给李雷");
   assert.equal(context?.inputs?.sendTarget, "发送");
+  assert.equal(context?.metadata?.threadKey, "李雷 · 产品经理");
+  assert.equal(context?.metadata?.sender, "候选人");
   assert.equal(context?.taskSpec?.skillName, null);
   assert.equal(Array.isArray(context?.taskSpec?.steps), true);
   assert.equal(context?.taskSpec?.steps?.[0]?.action, "clickTarget");

@@ -27,6 +27,7 @@ import { DraftService } from "./draft-service.js";
 import { WatchExecutionService } from "./watch-execution-service.js";
 import { RuntimeSupervisor } from "./runtime-supervisor.js";
 import { LearningService } from "./learning-service.js";
+import { withLivePackHealth } from "./live-pack-health.js";
 import { getDaemonInstallStatus } from "../daemon-autostart.js";
 import { createDiagnosticBundle } from "../diagnostics.js";
 import { getRuntimeVersionInfo } from "../version.js";
@@ -282,8 +283,14 @@ export class ControlPlane {
     return this.livePackRegistry.list();
   }
 
-  listLivePackInfo(): LivePackInfo[] {
-    return this.livePackRegistry.listInfo();
+  async listLivePackInfo(): Promise<LivePackInfo[]> {
+    const native = await this.#collectNativeDiagnostics();
+    return this.livePackRegistry.listInfo().map((pack) =>
+      withLivePackHealth(pack, {
+        config: this.config,
+        native
+      })
+    );
   }
 
   listSkills(): SkillDefinition[] {
@@ -459,9 +466,17 @@ export class ControlPlane {
     const version = this.getVersionInfo();
     const schemaVersion = this.store.getSchemaVersion();
     const native = await this.#collectNativeDiagnostics();
+    const livePacks = this.livePackRegistry.listInfo().map((pack) =>
+      withLivePackHealth(pack, {
+        config: this.config,
+        native
+      })
+    );
     const learning = this.learningService.status();
     const install = await getDaemonInstallStatus();
     const watches = this.listWatchRules();
+    const blockedLivePacks = livePacks.filter((pack) => pack.ready === false);
+    const readyLivePackCount = livePacks.length - blockedLivePacks.length;
     const pendingProposalCount = learning.pendingProposalCount;
     const awaitingApprovalWatchCount = watches.filter((rule) => rule.status === "awaiting_approval").length;
     const backoffWatchCount = watches.filter((rule) => rule.status === "backoff").length;
@@ -499,6 +514,11 @@ export class ControlPlane {
     if (install.installed && install.loaded === false) {
       warnings.push("Daemon auto-start is installed but not loaded.");
     }
+    if (blockedLivePacks.length) {
+      warnings.push(
+        `${blockedLivePacks.length} live pack(s) are blocked: ${blockedLivePacks.map((pack) => pack.name).join(", ")}.`
+      );
+    }
 
     return {
       ...base,
@@ -511,6 +531,9 @@ export class ControlPlane {
       learning,
       version,
       install,
+      livePackCount: livePacks.length,
+      readyLivePackCount,
+      blockedLivePackCount: blockedLivePacks.length,
       pendingProposalCount,
       awaitingApprovalWatchCount,
       backoffWatchCount,

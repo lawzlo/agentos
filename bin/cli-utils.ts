@@ -166,7 +166,8 @@ export function formatWatch(
 }
 
 export function formatPack(pack: LivePackInfo) {
-  return `${pack.name.padEnd(20)}  ${String(pack.family).padEnd(7)}  ${pack.surface.padEnd(7)}  ${pack.description}`;
+  const health = pack.ready === false ? "blocked" : pack.healthChecks?.some((check) => check.status === "warning") ? "warn" : "ready";
+  return `${pack.name.padEnd(20)}  ${String(pack.category ?? pack.family).padEnd(13)}  ${pack.surface.padEnd(7)}  ${health.padEnd(7)}  ${pack.description}`;
 }
 
 export function formatDraft(draft: Pick<DraftRecord, "id" | "status" | "livePack" | "summary">) {

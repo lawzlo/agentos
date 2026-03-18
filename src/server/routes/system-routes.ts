@@ -59,11 +59,15 @@ export async function handleSystemRoutes({
     const watches = controlPlane.listWatchRules();
     const drafts = controlPlane.listDrafts(200);
     const proposals = controlPlane.listProposals(200);
+    const livePacks = await controlPlane.listLivePackInfo();
     const install = await getDaemonInstallStatus();
     json(res, 200, {
       daemon: {
         ...daemon,
         connectorCount: controlPlane.listConnectors().length,
+        livePackCount: livePacks.length,
+        readyLivePackCount: livePacks.filter((pack) => pack.ready !== false).length,
+        blockedLivePackCount: livePacks.filter((pack) => pack.ready === false).length,
         watchCount: watches.length,
         enabledWatchCount: watches.filter((rule) => rule.enabled).length,
         degradedWatchCount: watches.filter((rule) => ["degraded", "backoff"].includes(rule.status)).length,

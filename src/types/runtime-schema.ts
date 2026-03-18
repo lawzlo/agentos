@@ -238,6 +238,24 @@ export interface WatchQuietHours {
 }
 
 export type ReplyPolicyMode = "pack_default" | "auto_send" | "draft_first" | "approve_once_then_auto" | "blocked";
+export type LivePackCategory = "conversation" | "documents" | "files" | "generic";
+export type LivePackCapability =
+  | "watch_events"
+  | "thread_context"
+  | "draft_reply"
+  | "send_reply"
+  | "auto_send_replies"
+  | "candidate_review"
+  | "document_edit"
+  | "file_upload"
+  | "file_download";
+
+export interface LivePackHealthCheck {
+  id: string;
+  label: string;
+  status: "ready" | "warning" | "blocked";
+  detail?: string | null;
+}
 
 export interface WatchGovernance {
   approvalMode?: "auto" | "draft_only" | "confirm_required" | "blocked";
@@ -275,7 +293,20 @@ export interface WatchDetection {
   taskSpec?: Partial<TaskSpec> | null;
   replyText?: string | null;
   context?: string[];
-  metadata?: Record<string, unknown>;
+  metadata?: WatchDetectionMetadata;
+}
+
+export interface WatchDetectionMetadata extends Record<string, unknown> {
+  threadKey?: string | null;
+  replyThreadKey?: string | null;
+  messageId?: string | null;
+  sender?: string | null;
+  direction?: "inbound" | "outbound" | "unknown";
+  receivedAt?: string | null;
+  requiresAttention?: boolean;
+  openCandidate?: InteractionCandidate | Record<string, unknown> | null;
+  surface?: "browser" | "desktop";
+  skillName?: string | null;
 }
 
 export interface TeachTemplateInput {
@@ -397,11 +428,15 @@ export interface AutonomyExecutionResult extends ExecutionSummary {
 export interface LivePackInfo {
   name: string;
   family: "chat" | "mail" | "generic" | "docs" | "files";
+  category: LivePackCategory;
   surface: "desktop" | "browser";
   supportsDrafts: boolean;
   supportsAutoSend: boolean;
+  capabilities: LivePackCapability[];
   defaultReplyPolicy: Exclude<ReplyPolicyMode, "pack_default">;
   description: string;
+  ready?: boolean;
+  healthChecks?: LivePackHealthCheck[];
 }
 
 export interface ConnectorStatus {

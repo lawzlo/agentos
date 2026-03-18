@@ -71,7 +71,9 @@ export function deriveReplyThreadKey(detection: WatchDetection | Record<string, 
   const metadata = (typedDetection.metadata ?? {}) as Record<string, unknown>;
   return (
     normalizeThreadKey(metadata.replyThreadKey) ??
+    normalizeThreadKey(metadata.threadKey) ??
     normalizeThreadKey(inputs.replyThreadKey) ??
+    normalizeThreadKey(inputs.threadKey) ??
     normalizeThreadKey(inputs.openTarget) ??
     normalizeThreadKey(typedDetection.summary) ??
     normalizeThreadKey(typedDetection.text)

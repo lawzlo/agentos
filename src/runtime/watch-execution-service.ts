@@ -415,6 +415,10 @@ export class WatchExecutionService {
             ...(detection.inputs ?? {}),
             ...(context?.inputs ?? {})
           },
+          metadata: {
+            ...(detection.metadata ?? {}),
+            ...(context?.metadata ?? {})
+          },
           ...(mergedTaskSpec ? { taskSpec: mergedTaskSpec } : {})
         };
       }
@@ -515,6 +519,15 @@ export class WatchExecutionService {
           summary: detection.summary ?? null,
           metadata: {
             replyThreadKey: deriveReplyThreadKey(detection),
+            threadKey: String(detection.metadata?.threadKey ?? "").trim() || null,
+            messageId: String(detection.metadata?.messageId ?? "").trim() || null,
+            sender: String(detection.metadata?.sender ?? "").trim() || null,
+            direction: String(detection.metadata?.direction ?? "").trim() || null,
+            receivedAt: String(detection.metadata?.receivedAt ?? "").trim() || null,
+            requiresAttention:
+              typeof detection.metadata?.requiresAttention === "boolean"
+                ? detection.metadata.requiresAttention
+                : null,
             reply: replyDraft?.metadata ?? {},
             context: detection.context ?? []
           }

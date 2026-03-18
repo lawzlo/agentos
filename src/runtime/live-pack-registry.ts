@@ -4,10 +4,13 @@ import { packDefaultReplyPolicy } from "./reply-policy.js";
 import type { SurfaceRegistry } from "./surface-registry.js";
 import type {
   InteractionCandidate,
+  LivePackCapability,
+  LivePackCategory,
   LivePackInfo,
   RuntimeStep,
   TaskRecord,
   WatchDetection,
+  WatchDetectionMetadata,
   WatchRule,
   WorldState,
   WorkspaceProfile,
@@ -328,6 +331,150 @@ function draftHeuristicReply({
       rationale: "heuristic fallback",
       source: "heuristic"
     }
+  };
+}
+
+function defaultPackCategory(family: LivePackInfo["family"]): LivePackCategory {
+  if (family === "chat" || family === "mail") {
+    return "conversation";
+  }
+  if (family === "docs") {
+    return "documents";
+  }
+  if (family === "files") {
+    return "files";
+  }
+  return "generic";
+}
+
+function defaultPackCapabilities({
+  name,
+  family,
+  supportsDrafts,
+  supportsAutoSend
+}: {
+  name: string;
+  family: LivePackInfo["family"];
+  supportsDrafts: boolean;
+  supportsAutoSend: boolean;
+}): LivePackCapability[] {
+  const capabilities: LivePackCapability[] = ["watch_events"];
+
+  if (family === "chat" || family === "mail") {
+    capabilities.push("thread_context");
+  }
+  if (supportsDrafts) {
+    capabilities.push("draft_reply");
+  }
+  if (family === "chat" || family === "mail" || name === "boss-browser") {
+    capabilities.push("send_reply");
+  }
+  if (supportsAutoSend) {
+    capabilities.push("auto_send_replies");
+  }
+  if (family === "docs") {
+    capabilities.push("document_edit");
+  }
+  if (name === "google-drive-browser") {
+    capabilities.push("file_upload", "file_download");
+  }
+  if (name === "boss-browser") {
+    capabilities.push("candidate_review");
+  }
+
+  return uniqueStrings(capabilities) as LivePackCapability[];
+}
+
+function inferPackSurface(name: string, surface: LivePackInfo["surface"] | null | undefined): LivePackInfo["surface"] {
+  if (surface === "browser" || surface === "desktop") {
+    return surface;
+  }
+  return /desktop/iu.test(name) ? "desktop" : "browser";
+}
+
+function normalizePackInfo(name: string, info: Partial<LivePackInfo> | null | undefined): LivePackInfo {
+  const family = (info?.family ?? "generic") as LivePackInfo["family"];
+  const supportsDrafts = Boolean(info?.supportsDrafts);
+  const supportsAutoSend = Boolean(info?.supportsAutoSend);
+
+  return {
+    name,
+    family,
+    category: info?.category ?? defaultPackCategory(family),
+    surface: inferPackSurface(name, info?.surface),
+    supportsDrafts,
+    supportsAutoSend,
+    capabilities:
+      (Array.isArray(info?.capabilities) && info?.capabilities.length
+        ? uniqueStrings(info.capabilities)
+        : defaultPackCapabilities({ name, family, supportsDrafts, supportsAutoSend })) as LivePackCapability[],
+    defaultReplyPolicy: info?.defaultReplyPolicy ?? packDefaultReplyPolicy(name),
+    description: String(info?.description ?? "Custom live pack"),
+    ...(typeof info?.ready === "boolean" ? { ready: info.ready } : {}),
+    ...(Array.isArray(info?.healthChecks) ? { healthChecks: info.healthChecks } : {})
+  };
+}
+
+function normalizeThreadKeyValue(value: unknown): string | null {
+  const normalized = String(value ?? "").trim().replace(/\s+/gu, " ");
+  return normalized ? normalized.toLowerCase() : null;
+}
+
+function parseConversationSender(lines: string[] = []): string | null {
+  for (const line of lines) {
+    const match = String(line ?? "").trim().match(/^([^:：]{1,40})\s*[:：]\s*\S/u);
+    const candidate = match?.[1]?.trim() ?? "";
+    if (
+      candidate &&
+      !/^(conversation|chat|unread|unread thread|new message|new messages|未读|新消息|新候选人|candidate|new candidate)$/iu.test(candidate)
+    ) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function inferConversationDirection(sender: string | null): WatchDetectionMetadata["direction"] {
+  if (!sender) {
+    return "unknown";
+  }
+  return /^(agentos|assistant|me|我|本人|自己)$/iu.test(sender) ? "outbound" : "inbound";
+}
+
+function buildConversationMetadata({
+  packName,
+  surface,
+  summary,
+  context = [],
+  openTarget = null,
+  candidate = null
+}: {
+  packName: string;
+  surface: LivePackInfo["surface"];
+  summary: string;
+  context?: string[];
+  openTarget?: string | null;
+  candidate?: InteractionCandidate | Record<string, unknown> | null;
+}): WatchDetectionMetadata {
+  const sender = parseConversationSender(context);
+  const threadKey =
+    normalizeThreadKeyValue(summary) ??
+    normalizeThreadKeyValue(openTarget) ??
+    normalizeThreadKeyValue(candidate && typeof candidate === "object" ? (candidate as { text?: unknown }).text : null) ??
+    normalizeThreadKeyValue(context[0]) ??
+    normalizeThreadKeyValue(packName);
+  const messageSeed = [packName, threadKey ?? "", summary, context.join("|")].join("|");
+
+  return {
+    threadKey,
+    replyThreadKey: threadKey,
+    messageId: fingerprint(messageSeed),
+    sender,
+    direction: inferConversationDirection(sender),
+    receivedAt: new Date().toISOString(),
+    requiresAttention: true,
+    openCandidate: candidate ?? null,
+    surface
   };
 }
 
@@ -1089,7 +1236,7 @@ function createDocumentPack({
 }): LivePack {
   return {
     name,
-    info: {
+    info: normalizePackInfo(name, {
       name,
       family,
       surface: "browser",
@@ -1097,7 +1244,7 @@ function createDocumentPack({
       supportsAutoSend: false,
       defaultReplyPolicy: packDefaultReplyPolicy(name),
       description
-    },
+    }),
     async activate({ rule, workspace, surfaceRegistry }) {
       const adapter = surfaceRegistry.get("browser");
       if (!adapter) {
@@ -1288,7 +1435,7 @@ function createSlackPack({
 }): LivePack {
   return {
     name,
-    info: {
+    info: normalizePackInfo(name, {
       name,
       family: "chat",
       surface,
@@ -1296,7 +1443,7 @@ function createSlackPack({
       supportsAutoSend: true,
       defaultReplyPolicy: packDefaultReplyPolicy(name),
       description
-    },
+    }),
     async activate({ rule, workspace, surfaceRegistry }) {
       const adapter = surfaceRegistry.get(surface);
       if (!adapter) {
@@ -1379,10 +1526,14 @@ function createSlackPack({
           watchContext: context.join("\n"),
           openTarget: String(candidate.text ?? summary).trim() || summary
         },
-        metadata: {
-          openCandidate: candidate,
-          surface
-        }
+        metadata: buildConversationMetadata({
+          packName: name,
+          surface,
+          summary,
+          context,
+          openTarget: String(candidate.text ?? summary).trim() || summary,
+          candidate
+        })
       };
     },
     async extractContext(args) {
@@ -1391,15 +1542,27 @@ function createSlackPack({
       const sendTarget = pickSlackSendQuery(threadState, surface);
       const summary = String(args.detection.summary ?? "").trim();
       const context = extractSlackThreadContext(threadState, summary);
+      const openTarget = String(args.detection.inputs?.openTarget ?? summary).trim() || summary;
       return {
         summary,
         context,
         inputs: {
           ...(args.detection.inputs ?? {}),
           watchContext: context.join("\n"),
-          openTarget: String(args.detection.inputs?.openTarget ?? summary).trim() || summary,
+          openTarget,
           typeTarget: composeTarget,
           sendTarget
+        },
+        metadata: {
+          ...(args.detection.metadata ?? {}),
+          ...buildConversationMetadata({
+            packName: name,
+            surface,
+            summary,
+            context,
+            openTarget,
+            candidate: (args.detection.metadata?.openCandidate ?? null) as InteractionCandidate | Record<string, unknown> | null
+          })
         },
         taskSpec: {
           preferredSurface: surface,
@@ -1440,7 +1603,7 @@ function createSlackPack({
 function createWeChatPack(): LivePack {
   return {
     name: "wechat-desktop",
-    info: {
+    info: normalizePackInfo("wechat-desktop", {
       name: "wechat-desktop",
       family: "chat",
       surface: "desktop",
@@ -1448,7 +1611,7 @@ function createWeChatPack(): LivePack {
       supportsAutoSend: true,
       defaultReplyPolicy: packDefaultReplyPolicy("wechat-desktop"),
       description: "WeChat desktop watcher that detects unread conversations, extracts context, and sends low-risk replies."
-    },
+    }),
     async activate({ rule, workspace, surfaceRegistry }) {
       const adapter = surfaceRegistry.get("desktop");
       if (!adapter) {
@@ -1502,10 +1665,14 @@ function createWeChatPack(): LivePack {
           watchContext: context.join("\n"),
           openTarget: String(candidate.text ?? summary).trim() || summary
         },
-        metadata: {
-          openCandidate: candidate,
-          surface: "desktop"
-        }
+        metadata: buildConversationMetadata({
+          packName: "wechat-desktop",
+          surface: "desktop",
+          summary,
+          context,
+          openTarget: String(candidate.text ?? summary).trim() || summary,
+          candidate
+        })
       };
     },
     async extractContext({ rule, workspace, surfaceRegistry, detection }) {
@@ -1514,8 +1681,8 @@ function createWeChatPack(): LivePack {
         return null;
       }
 
-      const openTarget = String(detection.inputs?.openTarget ?? detection.summary ?? "").trim();
-      if (openTarget) {
+      const candidateOpenTarget = String(detection.inputs?.openTarget ?? detection.summary ?? "").trim();
+      if (candidateOpenTarget) {
         const openCandidate = (detection.metadata?.openCandidate ?? null) as Record<string, unknown> | null;
         await adapter.act({
           task: createWatchTask(rule),
@@ -1525,7 +1692,7 @@ function createWeChatPack(): LivePack {
             surface: "desktop",
             action: "clickTarget",
             params: {
-              targetQuery: openTarget,
+              targetQuery: candidateOpenTarget,
               ...(openCandidate ? { target: openCandidate } : {})
             }
           },
@@ -1544,15 +1711,27 @@ function createWeChatPack(): LivePack {
       });
       const summary = String(detection.summary ?? "").trim();
       const context = extractWeChatThreadContext(threadState, summary);
+      const openTarget = String(detection.inputs?.openTarget ?? summary).trim() || summary;
       return {
         summary,
         context,
         inputs: {
           ...(detection.inputs ?? {}),
           watchContext: context.join("\n"),
-          openTarget: String(detection.inputs?.openTarget ?? summary).trim() || summary,
+          openTarget,
           typeTarget: pickWeChatComposeQuery(threadState),
           sendTarget: pickWeChatSendQuery(threadState)
+        },
+        metadata: {
+          ...(detection.metadata ?? {}),
+          ...buildConversationMetadata({
+            packName: "wechat-desktop",
+            surface: "desktop",
+            summary,
+            context,
+            openTarget,
+            candidate: (detection.metadata?.openCandidate ?? null) as InteractionCandidate | Record<string, unknown> | null
+          })
         },
         taskSpec: {
           preferredSurface: "desktop",
@@ -1738,7 +1917,7 @@ function createMailPack({
 }): LivePack {
   return {
     name,
-    info: {
+    info: normalizePackInfo(name, {
       name,
       family: "mail",
       surface,
@@ -1746,7 +1925,7 @@ function createMailPack({
       supportsAutoSend: false,
       defaultReplyPolicy: packDefaultReplyPolicy(name),
       description
-    },
+    }),
     async activate({ rule, workspace, surfaceRegistry }) {
       const adapter = surfaceRegistry.get(surface);
       if (!adapter) {
@@ -1831,25 +2010,41 @@ function createMailPack({
           watchContext: context.join("\n"),
           openTarget: String(candidate.text ?? summary).trim() || summary
         },
-        metadata: {
-          openCandidate: candidate,
-          surface
-        }
+        metadata: buildConversationMetadata({
+          packName: name,
+          surface,
+          summary,
+          context,
+          openTarget: String(candidate.text ?? summary).trim() || summary,
+          candidate
+        })
       };
     },
     async extractContext(args) {
       const threadState = await openMailThreadForContext({ ...args, surface });
       const summary = String(args.detection.summary ?? "").trim();
       const context = extractMailThreadContext(threadState, summary);
+      const openTarget = String(args.detection.inputs?.openTarget ?? summary).trim() || summary;
       return {
         summary,
         context,
         inputs: {
           ...(args.detection.inputs ?? {}),
           watchContext: context.join("\n"),
-          openTarget: String(args.detection.inputs?.openTarget ?? summary).trim() || summary,
+          openTarget,
           typeTarget: pickMailComposeQuery(threadState, surface),
           sendTarget: pickMailSendQuery(threadState, surface)
+        },
+        metadata: {
+          ...(args.detection.metadata ?? {}),
+          ...buildConversationMetadata({
+            packName: name,
+            surface,
+            summary,
+            context,
+            openTarget,
+            candidate: (args.detection.metadata?.openCandidate ?? null) as InteractionCandidate | Record<string, unknown> | null
+          })
         },
         taskSpec: {
           preferredSurface: surface,
@@ -1890,7 +2085,7 @@ function createMailPack({
 function createBossPack(): LivePack {
   return {
     name: "boss-browser",
-    info: {
+    info: normalizePackInfo("boss-browser", {
       name: "boss-browser",
       family: "generic",
       surface: "browser",
@@ -1898,7 +2093,7 @@ function createBossPack(): LivePack {
       supportsAutoSend: false,
       defaultReplyPolicy: packDefaultReplyPolicy("boss-browser"),
       description: "BOSS browser watcher that detects new candidates, opens conversation context, and drafts approval-first follow-ups."
-    },
+    }),
     async activate({ rule, workspace, surfaceRegistry }) {
       const adapter = surfaceRegistry.get("browser");
       if (!adapter) {
@@ -1971,8 +2166,14 @@ function createBossPack(): LivePack {
           executionMode: "planned"
         },
         metadata: {
-          openCandidate: candidate,
-          surface: "browser",
+          ...buildConversationMetadata({
+            packName: "boss-browser",
+            surface: "browser",
+            summary,
+            context,
+            openTarget: String(candidate.text ?? summary).trim() || summary,
+            candidate
+          }),
           skillName: "boss-open-candidate"
         }
       };
@@ -1982,6 +2183,7 @@ function createBossPack(): LivePack {
       const summary = String(args.detection.summary ?? "").trim();
       const context = extractBossThreadContext(threadState, summary);
       const replyWorkflow = wantsBossReplyWorkflow(args.rule.goal);
+      const openTarget = String(args.detection.inputs?.openTarget ?? summary).trim() || summary;
 
       return {
         summary,
@@ -1989,7 +2191,7 @@ function createBossPack(): LivePack {
         inputs: {
           ...(args.detection.inputs ?? {}),
           watchContext: context.join("\n"),
-          openTarget: String(args.detection.inputs?.openTarget ?? summary).trim() || summary,
+          openTarget,
           detailReadyTarget: String(args.detection.inputs?.detailReadyTarget ?? "在线沟通"),
           ...(replyWorkflow
             ? {
@@ -1997,6 +2199,18 @@ function createBossPack(): LivePack {
                 sendTarget: pickBossSendQuery(threadState)
               }
             : {})
+        },
+        metadata: {
+          ...(args.detection.metadata ?? {}),
+          ...buildConversationMetadata({
+            packName: "boss-browser",
+            surface: "browser",
+            summary,
+            context,
+            openTarget,
+            candidate: (args.detection.metadata?.openCandidate ?? null) as InteractionCandidate | Record<string, unknown> | null
+          }),
+          ...(args.detection.metadata?.skillName ? { skillName: args.detection.metadata.skillName } : {})
         },
         ...(replyWorkflow
           ? {
@@ -2061,7 +2275,7 @@ function createVisualDesktopPack({
 }): LivePack {
   return {
     name,
-    info: {
+    info: normalizePackInfo(name, {
       name,
       family,
       surface: "desktop",
@@ -2069,7 +2283,7 @@ function createVisualDesktopPack({
       supportsAutoSend: family === "chat",
       defaultReplyPolicy: packDefaultReplyPolicy(name),
       description
-    },
+    }),
     async activate({ rule, workspace, surfaceRegistry }) {
       if (rule.appTarget && rule.preferredSurface === "desktop") {
         const desktop = surfaceRegistry.get("desktop");
@@ -2320,7 +2534,10 @@ export class LivePackRegistry {
   }
 
   register(name: string, pack: LivePack): void {
-    this.packs.set(name, pack);
+    this.packs.set(name, {
+      ...pack,
+      info: normalizePackInfo(name, pack.info)
+    });
   }
 
   get(name: string): LivePack | null {
@@ -2333,7 +2550,7 @@ export class LivePackRegistry {
 
   listInfo(): LivePackInfo[] {
     return [...this.packs.values()]
-      .map((pack) => pack.info)
+      .map((pack) => normalizePackInfo(pack.name, pack.info))
       .sort((left, right) => String(left.name).localeCompare(String(right.name)));
   }
 }

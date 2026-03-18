@@ -22,7 +22,7 @@ export async function handleWatchRoutes({
   }
 
   if (req.method === "GET" && url.pathname === "/packs") {
-    json(res, 200, { packs: controlPlane.listLivePackInfo() });
+    json(res, 200, { packs: await controlPlane.listLivePackInfo() });
     return true;
   }
 
