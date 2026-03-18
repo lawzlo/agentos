@@ -292,7 +292,7 @@ export function hydrateAutomationJob(row: SqliteRow | null): AutomationJobRecord
     kind: asEnum(row.job_kind, ["digest", "task"] as const, "task"),
     template: asEnum(
       row.template,
-      ["daily_digest", "morning_scan", "inbox_sweep", "proposal_sweep", "custom_task"] as const,
+      ["daily_digest", "morning_scan", "inbox_sweep", "follow_up_sweep", "proposal_sweep", "custom_task"] as const,
       "custom_task"
     ),
     enabled: asBoolean(row.enabled),

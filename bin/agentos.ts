@@ -51,7 +51,7 @@ agentos learn sources ls
 agentos memory search <query>
 agentos memory inspect <entity-id>
 agentos jobs ls
-agentos jobs add daily_digest|morning_scan|inbox_sweep|proposal_sweep|custom_task [--name "..."] [--goal "..."] [--workspace name] [--surface auto|browser|desktop] [--hour 9] [--interval-minutes 120]
+agentos jobs add daily_digest|morning_scan|inbox_sweep|follow_up_sweep|proposal_sweep|custom_task [--name "..."] [--goal "..."] [--workspace name] [--surface auto|browser|desktop] [--hour 9] [--interval-minutes 120]
 agentos jobs inspect|run|enable|disable|rm <job-id>
 agentos digest run
 agentos proposals ls|accept|reject`;

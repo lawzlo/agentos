@@ -5,6 +5,7 @@ export type AutomationJobTemplate =
   | "daily_digest"
   | "morning_scan"
   | "inbox_sweep"
+  | "follow_up_sweep"
   | "proposal_sweep"
   | "custom_task";
 export type AutomationJobStatus = "idle" | "running" | "healthy" | "degraded";

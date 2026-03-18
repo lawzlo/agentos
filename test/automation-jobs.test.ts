@@ -74,6 +74,40 @@ test("automation job service runs due jobs and reschedules them", async () => {
   }
 });
 
+test("follow_up_sweep jobs default to interval scheduling and a conversation follow-up goal", async () => {
+  const dataDir = await createTempDir();
+  const config = resolveConfig({
+    dataDir,
+    jobs: {
+      pollIntervalMs: 20
+    }
+  });
+  const store = new ControlPlaneStore(path.join(dataDir, "agentos.sqlite"));
+  const eventBus = new EventBus();
+  const service = new AutomationJobService({
+    store,
+    eventBus,
+    config,
+    createTask: async () => ({ id: "task-1" }),
+    runDigest: async () => ({ id: "digest-1" })
+  });
+
+  try {
+    const job = service.createJob({
+      template: "follow_up_sweep"
+    });
+
+    assert.equal(job.scheduleType, "interval");
+    assert.equal(job.intervalMinutes, 180);
+    assert.equal(job.taskSpec?.preferredSurface, "auto");
+    assert.match(String(job.taskSpec?.goal ?? ""), /slack|wechat|email|boss/i);
+    assert.match(String(job.taskSpec?.goal ?? ""), /follow-up|follow up|nudge/i);
+  } finally {
+    await service.stop();
+    store.close();
+  }
+});
+
 test("jobs API can add, run, disable, enable, and remove automation jobs", async () => {
   const dataDir = await createTempDir();
   const server = await startAgentServer({
@@ -131,6 +165,36 @@ test("jobs API can add, run, disable, enable, and remove automation jobs", async
     );
     assert.match(taskPayload.task.goal, /morning brief|priority inbox|urgent chat/i);
 
+    const followUpCreate = await fetchJson<{ job: { id: string; template: string; scheduleType: string } }>(
+      `${server.baseUrl}/jobs`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          template: "follow_up_sweep",
+          workspaceName: "jobs-main",
+          preferredSurface: "auto"
+        })
+      }
+    );
+    assert.equal(followUpCreate.job.template, "follow_up_sweep");
+    assert.equal(followUpCreate.job.scheduleType, "interval");
+
+    const followUpRun = await fetchJson<{ job: { status: string; lastTaskId: string | null } }>(
+      `${server.baseUrl}/jobs/${followUpCreate.job.id}/run`,
+      {
+        method: "POST"
+      }
+    );
+    assert.equal(followUpRun.job.status, "healthy");
+    assert.equal(typeof followUpRun.job.lastTaskId, "string");
+
+    const followUpTaskPayload = await fetchJson<{ task: { goal: string } }>(
+      `${server.baseUrl}/tasks/${followUpRun.job.lastTaskId}`
+    );
+    assert.match(followUpTaskPayload.task.goal, /slack|wechat|email|boss/i);
+    assert.match(followUpTaskPayload.task.goal, /follow-up|follow up|nudge/i);
+
     const disable = await fetchJson<{ job: { enabled: boolean } }>(`${server.baseUrl}/jobs/${taskCreate.job.id}/disable`, {
       method: "POST"
     });
@@ -144,8 +208,8 @@ test("jobs API can add, run, disable, enable, and remove automation jobs", async
     const daemon = await fetchJson<{ daemon: { jobCount: number; enabledJobCount: number } }>(
       `${server.baseUrl}/daemon/status`
     );
-    assert.equal(daemon.daemon.jobCount, 2);
-    assert.equal(daemon.daemon.enabledJobCount, 2);
+    assert.equal(daemon.daemon.jobCount, 3);
+    assert.equal(daemon.daemon.enabledJobCount, 3);
 
     const removed = await fetchJson<{ ok: boolean }>(`${server.baseUrl}/jobs/${taskCreate.job.id}`, {
       method: "DELETE"

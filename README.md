@@ -238,6 +238,7 @@ Turn AgentOS into a routine operator instead of a one-off task runner.
 ```bash
 agentos jobs add morning_scan --workspace personal-main --surface browser --hour 9
 agentos jobs add inbox_sweep --workspace personal-main --surface browser --hour 10
+agentos jobs add follow_up_sweep --workspace personal-main --surface auto --interval-minutes 180
 ```
 
 ### 10. End-of-day digest and proposal review

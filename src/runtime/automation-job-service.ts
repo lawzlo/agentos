@@ -73,7 +73,9 @@ function scheduleTypeForTemplate(
   if (input.hourOfDay != null) {
     return "daily";
   }
-  return template === "inbox_sweep" || template === "proposal_sweep" ? "interval" : "daily";
+  return template === "inbox_sweep" || template === "follow_up_sweep" || template === "proposal_sweep"
+    ? "interval"
+    : "daily";
 }
 
 function defaultHourForTemplate(template: AutomationJobTemplate): number {
@@ -90,6 +92,9 @@ function defaultHourForTemplate(template: AutomationJobTemplate): number {
 }
 
 function defaultIntervalForTemplate(template: AutomationJobTemplate): number {
+  if (template === "follow_up_sweep") {
+    return 180;
+  }
   if (template === "proposal_sweep") {
     return 180;
   }
@@ -122,6 +127,17 @@ function templateTaskDefaults(
         input.goal?.trim() ||
         "Sweep my inbox and messaging apps, identify urgent items, and draft safe replies while leaving risky replies for approval.",
       preferredSurface: input.preferredSurface ?? "browser",
+      workspaceName: input.workspaceName ?? "personal-main"
+    };
+  }
+
+  if (template === "follow_up_sweep") {
+    return {
+      name: "Follow-up sweep",
+      goal:
+        input.goal?.trim() ||
+        "Review Slack, WeChat, email, and BOSS conversations that are waiting on me, identify stale threads that need a follow-up, draft low-risk replies or nudges, and leave uncertain or risky outreach for approval.",
+      preferredSurface: input.preferredSurface ?? "auto",
       workspaceName: input.workspaceName ?? "personal-main"
     };
   }
