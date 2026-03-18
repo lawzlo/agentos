@@ -100,8 +100,65 @@ test("follow_up_sweep jobs default to interval scheduling and a conversation fol
     assert.equal(job.scheduleType, "interval");
     assert.equal(job.intervalMinutes, 180);
     assert.equal(job.taskSpec?.preferredSurface, "auto");
-    assert.match(String(job.taskSpec?.goal ?? ""), /slack|wechat|email|boss/i);
-    assert.match(String(job.taskSpec?.goal ?? ""), /follow-up|follow up|nudge/i);
+    assert.deepEqual(job.taskSpec?.inputs, {
+      scope: ["slack", "wechat", "mail", "boss"],
+      staleAfterHours: 24,
+      awaitingMyReplyOnly: true,
+      priorityMode: "stale_first",
+      maxThreads: 12
+    });
+    assert.match(String(job.taskSpec?.goal ?? ""), /slack, wechat, email, and boss/i);
+    assert.match(String(job.taskSpec?.goal ?? ""), /24 hours/i);
+    assert.match(String(job.taskSpec?.goal ?? ""), /waiting on me/i);
+    assert.match(String(job.taskSpec?.goal ?? ""), /follow-ups|follow up|nudge/i);
+  } finally {
+    await service.stop();
+    store.close();
+  }
+});
+
+test("follow_up_sweep jobs normalize custom thread filters into task inputs and goal text", async () => {
+  const dataDir = await createTempDir();
+  const config = resolveConfig({
+    dataDir,
+    jobs: {
+      pollIntervalMs: 20
+    }
+  });
+  const store = new ControlPlaneStore(path.join(dataDir, "agentos.sqlite"));
+  const eventBus = new EventBus();
+  const service = new AutomationJobService({
+    store,
+    eventBus,
+    config,
+    createTask: async () => ({ id: "task-1" }),
+    runDigest: async () => ({ id: "digest-1" })
+  });
+
+  try {
+    const job = service.createJob({
+      template: "follow_up_sweep",
+      inputs: {
+        scope: "slack,mail",
+        staleAfterHours: "36",
+        awaiting: "false",
+        priorityMode: "balanced",
+        maxThreads: "8"
+      }
+    });
+
+    assert.deepEqual(job.taskSpec?.inputs, {
+      scope: ["slack", "mail"],
+      staleAfterHours: 36,
+      awaitingMyReplyOnly: false,
+      priorityMode: "balanced",
+      maxThreads: 8
+    });
+    assert.match(String(job.taskSpec?.goal ?? ""), /slack and email conversations/i);
+    assert.match(String(job.taskSpec?.goal ?? ""), /36 hours/i);
+    assert.match(String(job.taskSpec?.goal ?? ""), /may need a proactive touch/i);
+    assert.match(String(job.taskSpec?.goal ?? ""), /balance stale urgency with recent activity/i);
+    assert.match(String(job.taskSpec?.goal ?? ""), /handle up to 8 thread\(s\)/i);
   } finally {
     await service.stop();
     store.close();
@@ -173,7 +230,14 @@ test("jobs API can add, run, disable, enable, and remove automation jobs", async
         body: JSON.stringify({
           template: "follow_up_sweep",
           workspaceName: "jobs-main",
-          preferredSurface: "auto"
+          preferredSurface: "auto",
+          inputs: {
+            scope: "slack,mail",
+            staleAfterHours: 36,
+            awaiting: false,
+            priorityMode: "balanced",
+            maxThreads: 8
+          }
         })
       }
     );
@@ -189,11 +253,18 @@ test("jobs API can add, run, disable, enable, and remove automation jobs", async
     assert.equal(followUpRun.job.status, "healthy");
     assert.equal(typeof followUpRun.job.lastTaskId, "string");
 
-    const followUpTaskPayload = await fetchJson<{ task: { goal: string } }>(
+    const followUpTaskPayload = await fetchJson<{ task: { goal: string; taskSpec: { inputs: Record<string, unknown> } } }>(
       `${server.baseUrl}/tasks/${followUpRun.job.lastTaskId}`
     );
-    assert.match(followUpTaskPayload.task.goal, /slack|wechat|email|boss/i);
-    assert.match(followUpTaskPayload.task.goal, /follow-up|follow up|nudge/i);
+    assert.match(followUpTaskPayload.task.goal, /slack and email conversations/i);
+    assert.match(followUpTaskPayload.task.goal, /36 hours/i);
+    assert.deepEqual(followUpTaskPayload.task.taskSpec.inputs, {
+      scope: ["slack", "mail"],
+      staleAfterHours: 36,
+      awaitingMyReplyOnly: false,
+      priorityMode: "balanced",
+      maxThreads: 8
+    });
 
     const disable = await fetchJson<{ job: { enabled: boolean } }>(`${server.baseUrl}/jobs/${taskCreate.job.id}/disable`, {
       method: "POST"

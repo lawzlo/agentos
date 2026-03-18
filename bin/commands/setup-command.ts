@@ -167,7 +167,8 @@ function buildSuggestedCommands({
     commands.push({
       id: "follow-up-sweep-job",
       label: "Follow-up sweep job",
-      command: "agentos jobs add follow_up_sweep --workspace personal-main --surface auto --interval-minutes 180",
+      command:
+        "agentos jobs add follow_up_sweep --workspace personal-main --surface auto --interval-minutes 180 --input staleAfterHours=24 --input awaiting=true --input priorityMode=stale_first",
       reason: "Revisits Slack, WeChat, email, and BOSS threads that still need a nudge or a safe draft.",
       category: "always_on",
       risk: "low"
@@ -547,7 +548,7 @@ function buildOnboardingGuides(report: SetupReport): SetupGuide[] {
           : "",
         (report.doctor.degradedJobCount ?? 0) > 0 ? "Run `agentos jobs ls` to review recurring jobs that were degraded or recovered after restart." : "",
         report.doctor.pendingDraftCount === 0 && report.doctor.awaitingApprovalWatchCount === 0 && report.doctor.backoffWatchCount === 0 && report.doctor.degradedWatchCount === 0 && (report.doctor.degradedJobCount ?? 0) === 0
-          ? "Add one low-risk recurring workflow first, for example `agentos jobs add daily_digest --hour 18` or `agentos jobs add follow_up_sweep --workspace personal-main --surface auto --interval-minutes 180`."
+          ? "Add one low-risk recurring workflow first, for example `agentos jobs add daily_digest --hour 18` or `agentos jobs add follow_up_sweep --workspace personal-main --surface auto --interval-minutes 180 --input staleAfterHours=24 --input awaiting=true --input priorityMode=stale_first`."
           : ""
       ])
     }

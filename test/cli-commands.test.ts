@@ -402,26 +402,37 @@ const server = http.createServer(async (req, res) => {
       const body = (await readBody()) as Record<string, unknown>;
       const id = `job-${state.jobCounter}`;
       state.jobCounter += 1;
-      const scheduleType = typeof body.intervalMinutes === "number" ? "interval" : "daily";
+      const template = String(body.template ?? "custom_task");
+      const scheduleType =
+        typeof body.intervalMinutes === "number"
+          ? "interval"
+          : typeof body.hourOfDay === "number"
+            ? "daily"
+            : ["inbox_sweep", "follow_up_sweep", "proposal_sweep"].includes(template)
+              ? "interval"
+              : "daily";
       const job: CliJob = {
         id,
-        name: String(body.name ?? String(body.template ?? "Automation job")),
-        kind: String(body.template ?? "") === "daily_digest" ? "digest" : "task",
-        template: String(body.template ?? "custom_task"),
+        name: String(body.name ?? template),
+        kind: template === "daily_digest" ? "digest" : "task",
+        template,
         enabled: body.enabled !== false,
         status: "idle",
         scheduleType,
         hourOfDay: scheduleType === "daily" ? Number(body.hourOfDay ?? 9) : null,
         intervalMinutes: scheduleType === "interval" ? Number(body.intervalMinutes ?? 120) : null,
         taskSpec:
-          String(body.template ?? "") === "daily_digest"
+          template === "daily_digest"
             ? null
             : {
                 goal: String(body.goal ?? "Automation task"),
                 preferredSurface: String(body.preferredSurface ?? "auto"),
-                workspaceName: asNullableString(body.workspaceName)
+                workspaceName: asNullableString(body.workspaceName),
+                ...(body.inputs && typeof body.inputs === "object" ? { inputs: body.inputs as Record<string, unknown> } : {})
               },
-        metadata: {},
+        metadata: {
+          ...(body.inputs && typeof body.inputs === "object" ? { inputs: body.inputs as Record<string, unknown> } : {})
+        },
         lastRunAt: null,
         lastTaskId: null,
         nextRunAt: nowIso(),
@@ -1630,6 +1641,58 @@ test("cli jobs add/ls/inspect/run/disable/enable/rm operate as expected", async 
     );
     const rm = JSON.parse(rmResult.stdout);
     assert.equal(rm.ok, true);
+  } finally {
+    await api.close();
+    await fs.rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("cli jobs add forwards follow_up_sweep filter inputs", async () => {
+  const dataDir = await createTempDir("agentos-cli-");
+  const api = await startCliApiFixture();
+  const env = {
+    ...process.env,
+    AGENTOS_BASE_URL: api.baseUrl,
+    AGENTOS_DATA_DIR: dataDir
+  };
+
+  try {
+    const addResult = await execFileAsync(
+      process.execPath,
+      [
+        "dist/bin/agentos.js",
+        "jobs",
+        "add",
+        "follow_up_sweep",
+        "--workspace",
+        "personal-main",
+        "--surface",
+        "auto",
+        "--interval-minutes",
+        "180",
+        "--input",
+        "scope=slack,mail",
+        "--input",
+        "staleAfterHours=36",
+        "--input",
+        "awaiting=false",
+        "--input",
+        "priorityMode=balanced",
+        "--input",
+        "maxThreads=8",
+        "--json"
+      ],
+      { cwd: process.cwd(), env }
+    );
+    const created = JSON.parse(addResult.stdout);
+    assert.equal(created.template, "follow_up_sweep");
+    assert.deepEqual(api.state.lastJobBody?.inputs, {
+      scope: "slack,mail",
+      staleAfterHours: "36",
+      awaiting: "false",
+      priorityMode: "balanced",
+      maxThreads: "8"
+    });
   } finally {
     await api.close();
     await fs.rm(dataDir, { recursive: true, force: true });

@@ -968,6 +968,7 @@ export class ControlPlane {
           ? input.preferredSurface
           : null,
       goal: typeof input.goal === "string" ? input.goal : null,
+      inputs: input.inputs && typeof input.inputs === "object" ? (input.inputs as Record<string, unknown>) : null,
       enabled: typeof input.enabled === "boolean" ? input.enabled : true,
       hourOfDay: input.hourOfDay == null ? null : Number(input.hourOfDay),
       intervalMinutes: input.intervalMinutes == null ? null : Number(input.intervalMinutes)

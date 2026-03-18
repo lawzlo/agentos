@@ -1,6 +1,7 @@
 import {
   apiRequest,
   boolOption,
+  parseInputs,
   print,
   type CliOptions
 } from "../cli-utils.js";
@@ -44,6 +45,7 @@ export async function commandJobs(subcommand: string | undefined, positionals: s
       goal: typeof options.goal === "string" ? options.goal : goalParts.join(" ").trim() || undefined,
       preferredSurface: options.surface,
       workspaceName: options.workspace,
+      inputs: parseInputs(options.input),
       enabled: options.enabled == null ? true : boolOption(options.enabled),
       hourOfDay: options.hour != null ? Number(options.hour) : undefined,
       intervalMinutes: options.intervalMinutes != null ? Number(options.intervalMinutes) : undefined

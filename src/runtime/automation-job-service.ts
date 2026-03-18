@@ -26,6 +26,7 @@ interface CreateAutomationJobInput {
   workspaceName?: string | null;
   preferredSurface?: "auto" | "browser" | "desktop" | null;
   goal?: string | null;
+  inputs?: Record<string, unknown> | null;
   enabled?: boolean;
   hourOfDay?: number | null;
   intervalMinutes?: number | null;
@@ -41,6 +42,17 @@ interface TaskTemplateDefaults {
 interface AutomationJobStartupRecovery {
   reconciledRunningJobCount: number;
   dueJobCountAtStartup: number;
+}
+
+type FollowUpScope = "slack" | "wechat" | "mail" | "boss";
+type FollowUpPriorityMode = "stale_first" | "balanced" | "recent_first";
+
+interface FollowUpSweepInputs extends Record<string, unknown> {
+  scope: FollowUpScope[];
+  staleAfterHours: number;
+  awaitingMyReplyOnly: boolean;
+  priorityMode: FollowUpPriorityMode;
+  maxThreads: number;
 }
 
 function nowIso(): string {
@@ -101,9 +113,138 @@ function defaultIntervalForTemplate(template: AutomationJobTemplate): number {
   return 120;
 }
 
+function parseBooleanish(value: unknown, fallback: boolean): boolean {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "number") {
+    return value !== 0;
+  }
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["true", "1", "yes", "y", "on"].includes(normalized)) {
+      return true;
+    }
+    if (["false", "0", "no", "n", "off"].includes(normalized)) {
+      return false;
+    }
+  }
+  return fallback;
+}
+
+function normalizeStringArray(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.flatMap((entry) => normalizeStringArray(entry));
+  }
+  if (typeof value !== "string") {
+    return [];
+  }
+  return value
+    .split(/[,\n]/)
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean)
+    .flatMap((entry) => entry.split(/\s+/))
+    .filter(Boolean);
+}
+
+function normalizeFollowUpScope(value: unknown): FollowUpScope[] {
+  const aliases: Record<string, FollowUpScope> = {
+    slack: "slack",
+    wechat: "wechat",
+    weixin: "wechat",
+    wx: "wechat",
+    mail: "mail",
+    email: "mail",
+    gmail: "mail",
+    outlook: "mail",
+    boss: "boss",
+    bosszhipin: "boss",
+    "boss-zhipin": "boss",
+    "boss直聘": "boss"
+  };
+  const seen = new Set<FollowUpScope>();
+  for (const entry of normalizeStringArray(value)) {
+    const normalized = aliases[entry];
+    if (normalized) {
+      seen.add(normalized);
+    }
+  }
+  return seen.size ? Array.from(seen) : ["slack", "wechat", "mail", "boss"];
+}
+
+function normalizePositiveInteger(value: unknown, fallback: number): number {
+  const numberValue = Number(value);
+  if (!Number.isFinite(numberValue) || numberValue <= 0) {
+    return fallback;
+  }
+  return Math.max(1, Math.round(numberValue));
+}
+
+function normalizeFollowUpPriority(value: unknown): FollowUpPriorityMode {
+  const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (normalized === "balanced" || normalized === "recent_first" || normalized === "stale_first") {
+    return normalized;
+  }
+  if (normalized === "recent-first") {
+    return "recent_first";
+  }
+  if (normalized === "stale-first" || normalized === "oldest_first") {
+    return "stale_first";
+  }
+  return "stale_first";
+}
+
+function formatFollowUpScope(scope: FollowUpScope[]): string {
+  const labels: Record<FollowUpScope, string> = {
+    slack: "Slack",
+    wechat: "WeChat",
+    mail: "email",
+    boss: "BOSS"
+  };
+  const parts = scope.map((entry) => labels[entry]);
+  if (parts.length <= 1) {
+    return parts[0] ?? "Slack, WeChat, email, and BOSS";
+  }
+  if (parts.length === 2) {
+    return `${parts[0]} and ${parts[1]}`;
+  }
+  return `${parts.slice(0, -1).join(", ")}, and ${parts.at(-1)}`;
+}
+
+function normalizeFollowUpSweepInputs(value: Record<string, unknown> | null | undefined): FollowUpSweepInputs {
+  const raw = value ?? {};
+  const scope = normalizeFollowUpScope(raw.scope ?? raw.channels ?? raw.packs);
+  const staleAfterHours = normalizePositiveInteger(raw.staleAfterHours ?? raw.staleHours, 24);
+  const awaitingMyReplyOnly = parseBooleanish(
+    raw.awaitingMyReplyOnly ?? raw.awaitingMe ?? raw.awaiting,
+    true
+  );
+  const priorityMode = normalizeFollowUpPriority(raw.priorityMode ?? raw.priority);
+  const maxThreads = normalizePositiveInteger(raw.maxThreads ?? raw.limit, 12);
+  return {
+    scope,
+    staleAfterHours,
+    awaitingMyReplyOnly,
+    priorityMode,
+    maxThreads
+  };
+}
+
+function buildFollowUpSweepGoal(inputs: FollowUpSweepInputs): string {
+  const scopeText = formatFollowUpScope(inputs.scope);
+  const attentionText = inputs.awaitingMyReplyOnly ? "are waiting on me" : "may need a proactive touch";
+  const priorityText =
+    inputs.priorityMode === "balanced"
+      ? "balance stale urgency with recent activity"
+      : inputs.priorityMode === "recent_first"
+        ? "prioritize the most recent high-signal threads first"
+        : "prioritize the oldest stale threads first";
+  return `Review ${scopeText} conversations that have been stale for at least ${inputs.staleAfterHours} hours and ${attentionText}, ${priorityText}, handle up to ${inputs.maxThreads} thread(s), draft low-risk follow-ups or nudges, and leave uncertain or risky outreach for approval.`;
+}
+
 function templateTaskDefaults(
   template: AutomationJobTemplate,
-  input: Pick<CreateAutomationJobInput, "goal" | "preferredSurface" | "workspaceName">
+  input: Pick<CreateAutomationJobInput, "goal" | "preferredSurface" | "workspaceName" | "inputs">
 ): TaskTemplateDefaults | null {
   if (template === "daily_digest") {
     return null;
@@ -132,11 +273,10 @@ function templateTaskDefaults(
   }
 
   if (template === "follow_up_sweep") {
+    const followUpInputs = normalizeFollowUpSweepInputs(input.inputs);
     return {
       name: "Follow-up sweep",
-      goal:
-        input.goal?.trim() ||
-        "Review Slack, WeChat, email, and BOSS conversations that are waiting on me, identify stale threads that need a follow-up, draft low-risk replies or nudges, and leave uncertain or risky outreach for approval.",
+      goal: input.goal?.trim() || buildFollowUpSweepGoal(followUpInputs),
       preferredSurface: input.preferredSurface ?? "auto",
       workspaceName: input.workspaceName ?? "personal-main"
     };
@@ -167,18 +307,26 @@ function templateTaskDefaults(
 
 function buildTaskSpecForTemplate(
   template: AutomationJobTemplate,
-  input: Pick<CreateAutomationJobInput, "goal" | "preferredSurface" | "workspaceName">
+  input: Pick<CreateAutomationJobInput, "goal" | "preferredSurface" | "workspaceName" | "inputs">
 ): TaskSpec | null {
   const defaults = templateTaskDefaults(template, input);
   if (!defaults) {
     return null;
   }
 
+  const normalizedInputs =
+    template === "follow_up_sweep"
+      ? normalizeFollowUpSweepInputs(input.inputs)
+      : input.inputs && Object.keys(input.inputs).length
+        ? input.inputs
+        : undefined;
+
   return {
     goal: defaults.goal,
     preferredSurface: defaults.preferredSurface,
     workspaceName: defaults.workspaceName ?? null,
-    triggerSource: "automation_job"
+    triggerSource: "automation_job",
+    ...(normalizedInputs ? { inputs: normalizedInputs } : {})
   };
 }
 
@@ -316,7 +464,8 @@ export class AutomationJobService {
       taskSpec,
       metadata: {
         workspaceName: taskSpec?.workspaceName ?? null,
-        preferredSurface: taskSpec?.preferredSurface ?? null
+        preferredSurface: taskSpec?.preferredSurface ?? null,
+        inputs: taskSpec?.inputs ?? {}
       },
       lastRunAt: null,
       lastTaskId: null,
