@@ -61,7 +61,16 @@ npm run cli:link
 agentos setup
 ```
 
-3. 然后直接进入交互模式，或者先跑一个一次性任务：
+3. 如果 setup 提示有低风险本地修复项，比如 runtime 目录或自启动，就让 AgentOS 先修掉：
+
+```bash
+agentos setup --fix --dry-run
+agentos setup --fix
+```
+
+`setup --fix` 只会处理低风险本地修复。浏览器登录态、模型凭据、桌面权限这些仍然需要人手完成，`agentos setup` 会把它们列在手动步骤里。
+
+4. 然后直接进入交互模式，或者先跑一个一次性任务：
 
 ```bash
 agentos
@@ -69,7 +78,7 @@ agentos
 agentos "打开 example.com，点击 More information，然后截图" --surface browser
 ```
 
-4. 再加一个长期 watch rule：
+5. 再加一个长期 watch rule：
 
 ```bash
 agentos watch add \
@@ -81,6 +90,14 @@ agentos watch add \
 默认监听 `http://127.0.0.1:3017`。Web console 仍可用于 trace/debug，但主入口是 CLI。
 
 如果当前 shell 里还没有 `agentos` 命令，先在源码目录执行一次 `npm run cli:link`。
+
+## setup 会自动修什么，不会自动修什么
+
+- `agentos setup --fix` 可以补 runtime 目录，并为当前用户安装 daemon 自启动
+- 它不会替你登录 Slack、邮箱、BOSS、Drive、Docs
+- 它不会替你注入模型凭据
+- 它不会绕过桌面端的辅助功能或屏幕录制权限
+- 跑完 `setup --fix` 之后，建议再跑一遍 `agentos setup`，然后先做一个 smoke test，再加一个低风险 always-on workflow
 
 ## 常见个人 Agent 场景
 

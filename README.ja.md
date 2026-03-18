@@ -55,13 +55,22 @@ npm install
 npm run cli:link
 ```
 
-2. 最初に setup チェックを実行します。daemon、browser、model 設定、native sidecar、live pack をまとめて確認できます。
+2. 最初に setup チェックを実行します。daemon、browser、model 設定、native sidecar、live pack、次の手順をまとめて確認できます。
 
 ```bash
 agentos setup
 ```
 
-3. 対話シェルを開くか、最初の単発タスクを実行します。
+3. runtime ディレクトリや自動起動などの低リスクなローカル修復が必要なら、先に AgentOS に適用させます。
+
+```bash
+agentos setup --fix --dry-run
+agentos setup --fix
+```
+
+`setup --fix` は低リスクなローカル修復だけを適用します。browser のログイン、model の認証情報、desktop 権限は人間が行う必要があり、`agentos setup` の manual step に表示されます。
+
+4. 対話シェルを開くか、最初の単発タスクを実行します。
 
 ```bash
 agentos
@@ -69,7 +78,7 @@ agentos
 agentos "example.com を開き、More information をクリックして、スクリーンショットを撮る" --surface browser
 ```
 
-4. 最初の常駐 watch rule を追加します。
+5. 最初の常駐 watch rule を追加します。
 
 ```bash
 agentos watch add \
@@ -81,6 +90,14 @@ agentos watch add \
 デフォルトでは `http://127.0.0.1:3017` で待ち受けます。Web console は trace / debug 用に残っていますが、主入口は CLI です。
 
 まだ `agentos` コマンドが PATH にない場合は、source checkout で先に `npm run cli:link` を実行してください。
+
+## setup が自動で直すものと直さないもの
+
+- `agentos setup --fix` は不足している runtime ディレクトリの作成と、現在のユーザー向け daemon 自動起動の導入ができます
+- Slack、メール、BOSS、Drive、Docs へのログインは自動では行いません
+- model の資格情報は自動では設定しません
+- desktop の Accessibility や Screen Recording 権限を迂回しません
+- `setup --fix` の後にもう一度 `agentos setup` を実行し、まず smoke test を 1 つ、その後に低リスクな always-on workflow を 1 つ追加するのが安全です
 
 ## よくある personal agent シナリオ
 

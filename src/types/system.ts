@@ -147,6 +147,7 @@ export interface SetupStatusCheck {
   label: string;
   status: "ready" | "warning" | "blocking" | "fixed" | "info";
   detail: string;
+  actionKind?: "none" | "auto_fix" | "manual" | "mixed";
   nextStep?: string | null;
 }
 
@@ -165,6 +166,8 @@ export interface SetupCommandTemplate {
   label: string;
   command: string;
   reason: string;
+  category?: "smoke_test" | "always_on";
+  risk?: "low" | "medium" | "high";
 }
 
 export interface SetupGuide {
@@ -173,6 +176,7 @@ export interface SetupGuide {
   status: "ready" | "warning" | "blocking";
   summary: string;
   whyItMatters: string;
+  actionKind?: "none" | "auto_fix" | "manual" | "mixed";
   actions: string[];
 }
 
@@ -185,6 +189,8 @@ export interface SetupReport {
   statusChecks: SetupStatusCheck[];
   packSummaries: SetupPackSummary[];
   starterActions: string[];
+  fixableActions: string[];
+  manualSteps: string[];
   onboardingGuides: SetupGuide[];
   suggestedCommands: SetupCommandTemplate[];
   blockingIssues: string[];

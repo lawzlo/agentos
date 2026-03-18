@@ -884,6 +884,8 @@ test("cli interactive shell accepts natural-language tasks with slash-command de
 
     assert.match(session.stdout, /AgentOS onboarding/);
     assert.match(session.stdout, /Start here:/);
+    assert.match(session.stdout, /AgentOS can fix now:/);
+    assert.match(session.stdout, /You still need to do:/);
     assert.match(session.stdout, /AgentOS interactive shell/);
     assert.match(session.stdout, /Default surface: browser/);
     assert.match(session.stdout, /Default workspace: cli-main/);
@@ -917,15 +919,18 @@ test("cli setup summarizes readiness and recommended next steps", async () => {
     assert.match(result.stdout, /Install source: source checkout or npm link/);
     assert.match(result.stdout, /Setup checks:/);
     assert.match(result.stdout, /Starter actions:/);
+    assert.match(result.stdout, /Low-risk fixes AgentOS can apply now:/);
+    assert.match(result.stdout, /Manual steps you still need to finish:/);
     assert.match(result.stdout, /Setup guides:/);
     assert.match(result.stdout, /CLI runtime/);
     assert.match(result.stdout, /Browser app sessions/);
     assert.match(result.stdout, /Pack availability:/);
     assert.match(result.stdout, /slack-browser/);
+    assert.match(result.stdout, /Safe first tasks:/);
+    assert.match(result.stdout, /Good first always-on workflows:/);
     assert.match(result.stdout, /Recommended next steps:/);
     assert.match(result.stdout, /agentos setup --fix/);
     assert.match(result.stdout, /agentos packs ls/);
-    assert.match(result.stdout, /Suggested commands:/);
   } finally {
     await api.close();
     await fs.rm(dataDir, { recursive: true, force: true });
@@ -957,13 +962,31 @@ test("cli setup --json returns structured onboarding data", async () => {
     assert.equal(Array.isArray(payload.statusChecks), true);
     assert.equal(Array.isArray(payload.starterActions), true);
     assert.equal(payload.starterActions.length > 0, true);
+    assert.equal(Array.isArray(payload.fixableActions), true);
+    assert.equal(payload.fixableActions.some((entry: string) => entry.includes("agentos setup --fix")), true);
+    assert.equal(Array.isArray(payload.manualSteps), true);
+    assert.equal(payload.manualSteps.some((entry: string) => entry.includes("MODEL_API_KEY")), true);
     assert.equal(Array.isArray(payload.onboardingGuides), true);
     assert.equal(payload.onboardingGuides.some((entry: { id: string }) => entry.id === "model-access"), true);
+    assert.equal(
+      payload.onboardingGuides.some((entry: { id: string; actionKind: string }) => entry.id === "always-on" && entry.actionKind === "mixed"),
+      true
+    );
     assert.equal(payload.statusChecks.some((entry: { id: string }) => entry.id === "cli-runtime"), true);
     assert.equal(payload.statusChecks.some((entry: { id: string }) => entry.id === "browser-sessions"), true);
+    assert.equal(
+      payload.statusChecks.some((entry: { id: string; actionKind: string }) => entry.id === "autostart" && entry.actionKind === "manual"),
+      true
+    );
     assert.equal(Array.isArray(payload.packSummaries), true);
     assert.equal(payload.packSummaries.some((entry: { name: string }) => entry.name === "slack-browser"), true);
     assert.equal(Array.isArray(payload.suggestedCommands), true);
+    assert.equal(
+      payload.suggestedCommands.some(
+        (entry: { id: string; category: string; risk: string }) => entry.id === "daily-digest-job" && entry.category === "always_on" && entry.risk === "low"
+      ),
+      true
+    );
     assert.equal(Array.isArray(payload.recommendedActions), true);
     assert.equal(payload.recommendedActions.some((entry: string) => entry.includes("agentos setup --fix")), true);
     assert.equal(Array.isArray(payload.blockingIssues), true);
@@ -1043,6 +1066,25 @@ test("cli interactive shell exposes the /setup shortcut", async () => {
     assert.match(session.stdout, /AgentOS interactive shell/);
     assert.match(session.stdout, /AgentOS setup/);
     assert.match(session.stdout, /Recommended next steps:/);
+  } finally {
+    await api.close();
+    await fs.rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("cli interactive shell can run /setup --fix --dry-run", async () => {
+  const dataDir = await createTempDir("agentos-cli-");
+  const api = await startCliApiFixture();
+  const env = {
+    ...process.env,
+    AGENTOS_BASE_URL: api.baseUrl,
+    AGENTOS_DATA_DIR: dataDir
+  };
+
+  try {
+    const session = await runCliSession(["dist/bin/agentos.js"], "/setup --fix --dry-run\n/exit\n", env);
+    assert.match(session.stdout, /Planned fixes:/);
+    assert.match(session.stdout, /Install daemon auto-start for the current user/);
   } finally {
     await api.close();
     await fs.rm(dataDir, { recursive: true, force: true });

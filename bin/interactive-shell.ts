@@ -29,7 +29,7 @@ function banner() {
     "AgentOS interactive shell",
     "Type a task in plain language and press Enter.",
     "Start with /setup, then a plain-language goal, then a watch or job when you want always-on behavior.",
-    "Slash commands: /help /setup /status /doctor /ps /watch <goal> /watches /jobs /drafts /approve <draft-id> /reject <draft-id> [reason] /surface browser|desktop /workspace <name|clear> /wait on|off /exit"
+    "Slash commands: /help /setup [--fix] [--dry-run] /status /doctor /ps /watch <goal> /watches /jobs /drafts /approve <draft-id> /reject <draft-id> [reason] /surface browser|desktop /workspace <name|clear> /wait on|off /exit"
   ].join("\n");
 }
 
@@ -130,7 +130,10 @@ async function handleSlashCommand(input: string, state: InteractiveSessionState)
   }
 
   if (name === "setup") {
-    await commandSetup({});
+    await commandSetup({
+      fix: rest.includes("--fix"),
+      dryRun: rest.includes("--dry-run")
+    });
     return false;
   }
 

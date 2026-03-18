@@ -55,13 +55,22 @@ npm install
 npm run cli:link
 ```
 
-2. Ejecuta primero el chequeo de setup. Verifica daemon, navegador, configuración del modelo, sidecar nativo y packs disponibles:
+2. Ejecuta primero el chequeo de setup. Verifica daemon, navegador, configuración del modelo, sidecar nativo, packs disponibles y siguientes pasos:
 
 ```bash
 agentos setup
 ```
 
-3. Entra en la shell interactiva o ejecuta una primera tarea puntual:
+3. Si AgentOS detecta arreglos locales de bajo riesgo, como directorios del runtime o autoarranque, aplícalos primero:
+
+```bash
+agentos setup --fix --dry-run
+agentos setup --fix
+```
+
+`setup --fix` solo aplica arreglos locales de bajo riesgo. El inicio de sesión en navegador, las credenciales del modelo y los permisos de escritorio siguen siendo pasos humanos explícitos, y `agentos setup` los mostrará como pasos manuales.
+
+4. Entra en la shell interactiva o ejecuta una primera tarea puntual:
 
 ```bash
 agentos
@@ -69,7 +78,7 @@ agentos
 agentos "Abrir example.com, hacer clic en More information y capturar una pantalla" --surface browser
 ```
 
-4. Añade una primera watch rule permanente:
+5. Añade una primera watch rule permanente:
 
 ```bash
 agentos watch add \
@@ -81,6 +90,14 @@ agentos watch add \
 Por defecto escucha en `http://127.0.0.1:3017`. La consola web sigue disponible para trace y debug, pero la entrada principal es la CLI.
 
 Si `agentos` todavía no está en tu PATH, ejecuta primero `npm run cli:link` desde el checkout fuente.
+
+## Qué corrige setup automáticamente y qué no
+
+- `agentos setup --fix` puede crear directorios faltantes del runtime e instalar el autoarranque del daemon para el usuario actual
+- No inicia sesión por ti en Slack, correo, BOSS, Drive o Docs
+- No inyecta credenciales del modelo por ti
+- No evita los permisos de Accessibility o Screen Recording en plataformas de escritorio
+- Después de `setup --fix`, vuelve a ejecutar `agentos setup` y empieza con una smoke test y luego con un flujo always-on de bajo riesgo
 
 ## Escenarios comunes para un agente personal
 

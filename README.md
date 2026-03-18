@@ -56,13 +56,22 @@ npm install
 npm run cli:link
 ```
 
-2. Run the first-time setup check. This will verify the daemon, browser, model config, native sidecar, packs, and recommended next steps:
+2. Run the first-time setup check. This verifies the daemon, browser, model config, native sidecar, packs, and next steps:
 
 ```bash
 agentos setup
 ```
 
-3. Start the interactive shell or run a first one-off task:
+3. If AgentOS reports low-risk local fixes such as runtime directories or auto-start, let it apply them:
+
+```bash
+agentos setup --fix --dry-run
+agentos setup --fix
+```
+
+`setup --fix` only applies low-risk local fixes. Browser sign-in, model credentials, and desktop permissions remain explicit human steps, and `agentos setup` will list them under manual steps.
+
+4. Start the interactive shell or run a first one-off task:
 
 ```bash
 agentos
@@ -70,7 +79,7 @@ agentos
 agentos "Open example.com, click More information, then capture a screenshot" --surface browser
 ```
 
-4. Add a first always-on watch rule:
+5. Add a first always-on watch rule:
 
 ```bash
 agentos watch add \
@@ -82,6 +91,14 @@ agentos watch add \
 The daemon listens on `http://127.0.0.1:3017` by default. The web console remains available for trace and debug use, but the primary entrypoint is the CLI.
 
 If `agentos` is not on your PATH yet, run `npm run cli:link` from the source checkout first.
+
+## What setup fixes automatically and what it does not
+
+- `agentos setup --fix` can create missing runtime directories and install daemon auto-start for the current user
+- It does not log into Slack, email, BOSS, Drive, or Docs for you
+- It does not inject model credentials for you
+- It does not bypass Accessibility or Screen Recording permissions on desktop platforms
+- After `setup --fix`, rerun `agentos setup` and then start with one smoke test plus one low-risk always-on workflow
 
 ## Common personal agent scenarios
 

@@ -106,7 +106,9 @@ function buildSuggestedCommands({
       id: "browser-smoke",
       label: "Browser smoke test",
       command: 'agentos "Open example.com, click More information, then capture a screenshot" --surface browser',
-      reason: "Fastest low-risk way to verify browser automation."
+      reason: "Fastest low-risk way to verify browser automation.",
+      category: "smoke_test",
+      risk: "low"
     });
   }
 
@@ -115,7 +117,9 @@ function buildSuggestedCommands({
       id: "desktop-smoke",
       label: "Desktop smoke test",
       command: 'agentos "Open a local text editor, type a short note, and wait for me" --surface desktop',
-      reason: "Checks desktop automation without needing a third-party app pack."
+      reason: "Checks desktop automation without needing a third-party app pack.",
+      category: "smoke_test",
+      risk: "low"
     });
   }
 
@@ -124,21 +128,27 @@ function buildSuggestedCommands({
       id: "slack-watch",
       label: "Slack watch rule",
       command: 'agentos watch add "Always watch Slack and reply to low-risk unread threads in my style" --surface browser --workspace personal-main',
-      reason: "Turns a ready Slack pack into a standing workflow."
+      reason: "Turns a ready Slack pack into a standing workflow.",
+      category: "always_on",
+      risk: "low"
     });
   } else if (packs.some((pack) => pack.name === "generic-mail-browser" && pack.status === "ready")) {
     commands.push({
       id: "mail-watch",
       label: "Mail watch rule",
       command: 'agentos watch add "Always watch my email, draft replies for new customer messages, and leave risky replies for approval" --surface browser --workspace personal-main',
-      reason: "Good first real workflow once browser mail is signed in."
+      reason: "Good first real workflow once browser mail is signed in.",
+      category: "always_on",
+      risk: "low"
     });
   } else if (packs.some((pack) => pack.name === "boss-browser" && pack.status === "ready")) {
     commands.push({
       id: "boss-watch",
       label: "BOSS watch rule",
       command: 'agentos watch add "Always watch BOSS直聘, review new candidates, and draft polite follow-ups" --surface browser --workspace recruiting-main',
-      reason: "Exercises a real recruiting pack with drafts-first behavior."
+      reason: "Exercises a real recruiting pack with drafts-first behavior.",
+      category: "always_on",
+      risk: "low"
     });
   }
 
@@ -147,7 +157,9 @@ function buildSuggestedCommands({
       id: "daily-digest-job",
       label: "Daily digest job",
       command: "agentos jobs add daily_digest --hour 18",
-      reason: "Good first always-on job: a daily summary without risky side effects."
+      reason: "Good first always-on job: a daily summary without risky side effects.",
+      category: "always_on",
+      risk: "low"
     });
   }
 
@@ -156,7 +168,9 @@ function buildSuggestedCommands({
       id: "morning-scan-job",
       label: "Morning scan job",
       command: "agentos jobs add morning_scan --workspace personal-main --surface browser --hour 9",
-      reason: "Turns AgentOS into a recurring morning operator instead of one-off automation."
+      reason: "Turns AgentOS into a recurring morning operator instead of one-off automation.",
+      category: "always_on",
+      risk: "low"
     });
   }
 
@@ -188,6 +202,7 @@ function buildStatusChecks({
       id: "daemon",
       label: "Daemon runtime",
       status: startedDaemon ? "fixed" : "ready",
+      actionKind: "none",
       detail: startedDaemon
         ? "A local daemon was started automatically for this setup run."
         : "The AgentOS daemon is already reachable."
@@ -196,6 +211,7 @@ function buildStatusChecks({
       id: "data-dir",
       label: "Runtime directories",
       status: fixedDirectory ? "fixed" : missingRuntimeDirectories.length ? "warning" : "ready",
+      actionKind: missingRuntimeDirectories.length ? "auto_fix" : "none",
       detail: fixedDirectory
         ? `Missing runtime directories under ${config.dataDir} were created during setup.`
         : missingRuntimeDirectories.length
@@ -207,6 +223,7 @@ function buildStatusChecks({
       id: "cli-runtime",
       label: "CLI runtime",
       status: installSource.source === "source" ? "info" : installSource.bundledRuntime ? "ready" : "warning",
+      actionKind: installSource.source === "source" || installSource.bundledRuntime ? "none" : "manual",
       detail:
         installSource.source === "source"
           ? `This source checkout uses the local Node.js runtime at ${installSource.runtimeExecutablePath ?? process.execPath}.`
@@ -230,6 +247,12 @@ function buildStatusChecks({
             ? "ready"
             : "warning"
         : "info",
+      actionKind:
+        doctor.install.supported && !doctor.install.installed && !fixedAutostart
+          ? isRemoteControlPlaneMode()
+            ? "manual"
+            : "auto_fix"
+          : "none",
       detail: doctor.install.supported
         ? fixedAutostart
           ? "AgentOS auto-start was installed for the current user during setup."
@@ -246,6 +269,7 @@ function buildStatusChecks({
       id: "browser-runtime",
       label: "Browser runtime",
       status: doctor.browserExecutable ? "ready" : "blocking",
+      actionKind: doctor.browserExecutable ? "none" : "manual",
       detail: doctor.browserExecutable
         ? `Detected browser executable: ${doctor.browserExecutable}`
         : "No Chrome, Chromium, or Edge executable was detected.",
@@ -255,6 +279,7 @@ function buildStatusChecks({
       id: "browser-sessions",
       label: "Browser app sessions",
       status: doctor.browserExecutable ? "info" : "warning",
+      actionKind: "manual",
       detail: doctor.browserExecutable
         ? "Slack, mail, BOSS, and docs sessions are not verified during setup. They are checked when a pack runs."
         : "Browser sessions cannot be checked until a browser runtime is configured.",
@@ -264,6 +289,7 @@ function buildStatusChecks({
       id: "model",
       label: "Model access",
       status: doctor.modelConfigured ? "ready" : "blocking",
+      actionKind: doctor.modelConfigured ? "none" : "manual",
       detail: doctor.modelConfigured
         ? "Model access is configured."
         : "Model access is missing, so planning and reply drafting will stay degraded.",
@@ -273,6 +299,8 @@ function buildStatusChecks({
       id: "native-sidecar",
       label: "Desktop sidecar",
       status: process.platform === "linux" ? "info" : !doctor.native.available || !doctor.native.compatible ? "blocking" : "ready",
+      actionKind:
+        process.platform === "linux" || (doctor.native.available && doctor.native.compatible) ? "none" : "manual",
       detail:
         process.platform === "linux"
           ? "Linux desktop automation does not require the native sidecar."
@@ -297,6 +325,12 @@ function buildStatusChecks({
             : doctor.native.available && doctor.native.compatible
               ? "ready"
               : "info",
+      actionKind:
+        process.platform === "linux"
+          ? "none"
+          : doctor.native.permissions && Object.values(doctor.native.permissions).some((value) => value === false)
+            ? "manual"
+            : "none",
       detail:
         process.platform === "linux"
           ? "Linux permission checks are not required in the same way."
@@ -314,6 +348,7 @@ function buildStatusChecks({
       id: "store",
       label: "Local store",
       status: doctor.store.compatible ? "ready" : "blocking",
+      actionKind: "none",
       detail: doctor.store.compatible
         ? "The local store schema matches this runtime."
         : `The store schema (${doctor.store.schemaVersion}) does not match the runtime expectation (${doctor.version.storeSchemaVersion}).`
@@ -322,6 +357,7 @@ function buildStatusChecks({
       id: "packs",
       label: "Pack availability",
       status: blockedPackCount > 0 ? "warning" : warningPackCount > 0 ? "warning" : "ready",
+      actionKind: blockedPackCount > 0 || warningPackCount > 0 ? "manual" : "none",
       detail:
         blockedPackCount > 0
           ? `${blockedPackCount} pack(s) are blocked and ${warningPackCount} need attention.`
@@ -359,6 +395,7 @@ function buildOnboardingGuides(report: SetupReport): SetupGuide[] {
       id: "model-access",
       title: "Model access",
       status: modelCheck?.status === "blocking" ? "blocking" : "ready",
+      actionKind: modelCheck?.status === "blocking" ? "manual" : "none",
       summary:
         modelCheck?.status === "blocking"
           ? "AgentOS can still run simple direct tasks, but planning, drafting, summarization, and recovery stay degraded until a model is configured."
@@ -381,6 +418,10 @@ function buildOnboardingGuides(report: SetupReport): SetupGuide[] {
           : blockedBrowserPackCount > 0 || browserSessions?.status === "warning"
             ? "warning"
             : "ready",
+      actionKind:
+        browserRuntime?.status === "blocking" || blockedBrowserPackCount > 0 || browserSessions?.status === "warning"
+          ? "manual"
+          : "none",
       summary:
         browserRuntime?.status === "blocking"
           ? "Browser automation is not ready yet because AgentOS cannot find a Chrome-compatible browser."
@@ -410,6 +451,8 @@ function buildOnboardingGuides(report: SetupReport): SetupGuide[] {
           : desktopPermissions?.status === "warning"
             ? "warning"
             : "ready",
+      actionKind:
+        nativeSidecar?.status === "blocking" || desktopPermissions?.status === "warning" ? "manual" : "none",
       summary:
         nativeSidecar?.status === "blocking"
           ? "Desktop automation is blocked until the native sidecar is available and compatible."
@@ -438,6 +481,21 @@ function buildOnboardingGuides(report: SetupReport): SetupGuide[] {
         report.doctor.degradedWatchCount > 0
           ? "warning"
           : "ready",
+      actionKind:
+        autostart?.status === "warning" &&
+        (report.doctor.pendingDraftCount > 0 ||
+          report.doctor.awaitingApprovalWatchCount > 0 ||
+          report.doctor.backoffWatchCount > 0 ||
+          report.doctor.degradedWatchCount > 0)
+          ? "mixed"
+          : autostart?.status === "warning"
+            ? "auto_fix"
+            : report.doctor.pendingDraftCount > 0 ||
+                report.doctor.awaitingApprovalWatchCount > 0 ||
+                report.doctor.backoffWatchCount > 0 ||
+                report.doctor.degradedWatchCount > 0
+              ? "manual"
+              : "none",
       summary:
         autostart?.status === "warning"
           ? "The daemon is running now, but it is not yet configured to come back automatically when you log in."
@@ -461,16 +519,45 @@ function buildOnboardingGuides(report: SetupReport): SetupGuide[] {
   return guides;
 }
 
+function buildFixableActions(report: SetupReport) {
+  return uniqueActions(
+    report.statusChecks
+      .filter((check) => check.actionKind === "auto_fix" && (check.status === "warning" || check.status === "blocking"))
+      .map((check) => check.nextStep ?? "")
+  );
+}
+
+function buildManualSteps(report: SetupReport) {
+  const actions = report.onboardingGuides
+    .filter(
+      (guide) =>
+        guide.status !== "ready" &&
+        (guide.actionKind === "manual" || guide.actionKind === "mixed")
+    )
+    .flatMap((guide) =>
+      guide.actions.filter((action) => !action.includes("agentos setup --fix"))
+    );
+
+  return uniqueActions(actions);
+}
+
+function buildQuickstartCommands(report: SetupReport, category: SetupCommandTemplate["category"]) {
+  const commands = report.suggestedCommands.filter((command) => command.category === category);
+  if (commands.length) {
+    return commands;
+  }
+  return category === "smoke_test" ? report.suggestedCommands.slice(0, 1) : [];
+}
+
 function buildStarterActions(report: SetupReport) {
   const actions: string[] = [];
-  for (const guide of report.onboardingGuides) {
-    if (guide.status !== "ready" && guide.actions.length) {
-      actions.push(guide.actions[0]);
-    }
-  }
+
+  actions.push(...report.fixableActions.slice(0, 2));
+  actions.push(...report.manualSteps.slice(0, 2));
 
   if (!actions.length) {
-    for (const template of report.suggestedCommands.slice(0, 3)) {
+    const fallbackTemplates = buildQuickstartCommands(report, "smoke_test");
+    for (const template of (fallbackTemplates.length ? fallbackTemplates : report.suggestedCommands).slice(0, 2)) {
       actions.push(`Try ${template.label.toLowerCase()}: \`${template.command}\``);
     }
   }
@@ -479,42 +566,37 @@ function buildStarterActions(report: SetupReport) {
 }
 
 function buildRecommendedActions(report: SetupReport) {
-  const actions: string[] = [];
-
-  if (
-    report.statusChecks.some(
-      (check) => (check.id === "autostart" || check.id === "data-dir") && check.status === "warning"
+  return uniqueActions([
+    ...report.fixableActions,
+    ...report.manualSteps,
+    report.packSummaries.some((pack) => pack.status !== "ready")
+      ? "Run `agentos packs ls` for a full pack-by-pack health breakdown."
+      : "",
+    ...buildQuickstartCommands(report, "smoke_test").map(
+      (template) => `Try ${template.label.toLowerCase()}: \`${template.command}\``
+    ),
+    ...buildQuickstartCommands(report, "always_on").map(
+      (template) => `When you want always-on behavior, try ${template.label.toLowerCase()}: \`${template.command}\``
     )
-  ) {
-    actions.push("Run `agentos setup --fix` to install low-risk defaults like runtime directories and auto-start.");
-  }
-  if (report.statusChecks.some((check) => check.id === "browser-runtime" && check.status === "blocking")) {
-    actions.push("Configure a browser runtime before expecting browser packs to work.");
-  }
-  if (report.statusChecks.some((check) => check.id === "model" && check.status === "blocking")) {
-    actions.push("Configure your model endpoint and API key so AgentOS can plan and draft properly.");
-  }
-  if (report.packSummaries.some((pack) => pack.status !== "ready" && pack.surface === "browser")) {
-    actions.push("Sign in to the sites you plan to automate before enabling browser-based watch rules.");
-  }
-  if (report.doctor.pendingDraftCount > 0) {
-    actions.push("Run `agentos drafts ls` to review or approve pending drafts.");
-  }
-  if (report.doctor.awaitingApprovalWatchCount > 0 || report.doctor.backoffWatchCount > 0 || report.doctor.degradedWatchCount > 0) {
-    actions.push("Run `agentos watch ls` to review watches that are degraded, in backoff, or waiting for approval.");
-  }
-  if (report.packSummaries.some((pack) => pack.status !== "ready")) {
-    actions.push("Run `agentos packs ls` for a full pack-by-pack health breakdown.");
-  }
-  for (const template of report.suggestedCommands) {
-    actions.push(`Try ${template.label.toLowerCase()}: \`${template.command}\``);
-  }
+  ]);
+}
 
-  return uniqueActions(actions);
+function actionKindLabel(kind: SetupStatusCheck["actionKind"] | SetupGuide["actionKind"]) {
+  if (!kind || kind === "none") {
+    return "";
+  }
+  if (kind === "auto_fix") {
+    return "agentos-fix";
+  }
+  if (kind === "manual") {
+    return "manual";
+  }
+  return "mixed";
 }
 
 function renderCheck(check: SetupStatusCheck) {
-  return `[${check.status}] ${check.label}: ${check.detail}${check.nextStep ? ` Next: ${check.nextStep}` : ""}`;
+  const actionLabel = actionKindLabel(check.actionKind);
+  return `[${check.status}${actionLabel ? `/${actionLabel}` : ""}] ${check.label}: ${check.detail}${check.nextStep ? ` Next: ${check.nextStep}` : ""}`;
 }
 
 function renderPack(pack: SetupPackSummary) {
@@ -526,16 +608,22 @@ function renderPack(pack: SetupPackSummary) {
 }
 
 function renderTemplate(template: SetupCommandTemplate) {
-  return `- ${template.label}: \`${template.command}\`\n  ${template.reason}`;
+  const tags = [template.category === "smoke_test" ? "try now" : template.category === "always_on" ? "always-on" : "", template.risk ? `${template.risk} risk` : ""]
+    .filter(Boolean)
+    .join(", ");
+  return `- ${template.label}${tags ? ` (${tags})` : ""}: \`${template.command}\`\n  ${template.reason}`;
 }
 
 function renderGuide(guide: SetupGuide) {
+  const actionLabel = actionKindLabel(guide.actionKind);
   const actions = guide.actions.length ? ` Next: ${guide.actions.join(" ")}` : "";
-  return `[${guide.status}] ${guide.title}: ${guide.summary} Why: ${guide.whyItMatters}${actions}`;
+  return `[${guide.status}${actionLabel ? `/${actionLabel}` : ""}] ${guide.title}: ${guide.summary} Why: ${guide.whyItMatters}${actions}`;
 }
 
 function renderSetupReport(report: SetupReport, options: { compact?: boolean } = {}) {
   const packLimit = options.compact ? 4 : Math.max(report.packSummaries.length, 4);
+  const smokeTestCommands = buildQuickstartCommands(report, "smoke_test");
+  const alwaysOnCommands = buildQuickstartCommands(report, "always_on");
   const lines = [
     options.compact ? "AgentOS onboarding" : "AgentOS setup",
     "",
@@ -548,6 +636,20 @@ function renderSetupReport(report: SetupReport, options: { compact?: boolean } =
   if (report.starterActions.length) {
     lines.push("", options.compact ? "Start here:" : "Starter actions:");
     for (const action of report.starterActions) {
+      lines.push(`- ${action}`);
+    }
+  }
+
+  if (report.fixableActions.length) {
+    lines.push("", options.compact ? "AgentOS can fix now:" : "Low-risk fixes AgentOS can apply now:");
+    for (const action of report.fixableActions.slice(0, options.compact ? 3 : report.fixableActions.length)) {
+      lines.push(`- ${action}`);
+    }
+  }
+
+  if (report.manualSteps.length) {
+    lines.push("", options.compact ? "You still need to do:" : "Manual steps you still need to finish:");
+    for (const action of report.manualSteps.slice(0, options.compact ? 4 : report.manualSteps.length)) {
       lines.push(`- ${action}`);
     }
   }
@@ -591,9 +693,16 @@ function renderSetupReport(report: SetupReport, options: { compact?: boolean } =
     }
   }
 
-  if (report.suggestedCommands.length) {
-    lines.push("", options.compact ? "Try one of these now:" : "Suggested commands:");
-    for (const template of report.suggestedCommands) {
+  if (smokeTestCommands.length) {
+    lines.push("", options.compact ? "Try now:" : "Safe first tasks:");
+    for (const template of smokeTestCommands) {
+      lines.push(renderTemplate(template));
+    }
+  }
+
+  if (alwaysOnCommands.length) {
+    lines.push("", options.compact ? "When you want always-on:" : "Good first always-on workflows:");
+    for (const template of alwaysOnCommands) {
       lines.push(renderTemplate(template));
     }
   }
@@ -655,6 +764,8 @@ export async function buildSetupReport(options: {
     statusChecks: [],
     packSummaries,
     starterActions: [],
+    fixableActions: [],
+    manualSteps: [],
     onboardingGuides: [],
     suggestedCommands: [],
     blockingIssues: [],
@@ -694,6 +805,8 @@ export async function buildSetupReport(options: {
     doctor: report.doctor,
     packs: report.packSummaries
   });
+  report.fixableActions = buildFixableActions(report);
+  report.manualSteps = buildManualSteps(report);
   report.starterActions = buildStarterActions(report);
   report.recommendedActions = buildRecommendedActions(report);
   report.ok = !report.statusChecks.some((check) => check.status === "blocking" || check.status === "warning");
