@@ -58,6 +58,10 @@ const SLACK_UI_CHROME_PATTERN =
   /^(search|compose|home|later|activity|more|threads|drafts|canvas|huddle|send|reply|message|messages|slack|搜索|撰写|发送|回复|消息)$/iu;
 const SLACK_NAVIGATION_PATTERN =
   /^(threads|drafts(?:\s*&\s*sent)?|directories|huddles?|starred|direct messages|channels|later|activity|home|canvas|more)$/iu;
+const DESKTOP_WINDOW_CONTROL_SUBROLE_PATTERN =
+  /(axclosebutton|axminimizebutton|axzoombutton|axfullscreenbutton|axtoolbarbutton)/iu;
+const DESKTOP_WINDOW_CONTROL_TEXT_PATTERN =
+  /^(close|close button|minimi[sz]e|minimi[sz]e button|zoom|zoom button|full ?screen|enter full ?screen|exit full ?screen|toolbar)$/iu;
 const WECHAT_UI_CHROME_PATTERN =
   /^(wechat|微信|搜索|search|send|发送|reply|回复|聊天信息|聊天记录|通讯录|contacts|发现|moments|我|me|文件传输助手|表情|图片|文件|语音消息)$/iu;
 const MAIL_UI_CHROME_PATTERN =
@@ -676,12 +680,43 @@ function isWeChatDesktopForeground(worldState: WorldState | null): boolean {
   );
 }
 
-function preferAccessibilityCandidates(worldState: WorldState | null): InteractionCandidate[] {
+function isAccessibilityCandidate(candidate: InteractionCandidate | null | undefined): boolean {
+  return String((candidate?.sourceHints ?? {}).source ?? "").toLowerCase() === "accessibility";
+}
+
+function isDesktopWindowControlCandidate(candidate: InteractionCandidate | null | undefined): boolean {
+  if (!candidate || !isAccessibilityCandidate(candidate)) {
+    return false;
+  }
+
+  const hints = (candidate.sourceHints ?? {}) as Record<string, unknown>;
+  const axRole = String(hints.axRole ?? "").trim().toLowerCase();
+  const axSubrole = String(hints.axSubrole ?? "").trim().toLowerCase();
+  const hintStrings = candidateHintStrings(candidate).map((value) => value.toLowerCase());
+  const text = String(candidate.text ?? "").trim().toLowerCase();
+
+  if (DESKTOP_WINDOW_CONTROL_SUBROLE_PATTERN.test(axSubrole) || DESKTOP_WINDOW_CONTROL_SUBROLE_PATTERN.test(axRole)) {
+    return true;
+  }
+
+  if (String(candidate.role ?? "").toLowerCase() !== "button") {
+    return false;
+  }
+
+  return [text, ...hintStrings].some((value) => DESKTOP_WINDOW_CONTROL_TEXT_PATTERN.test(value));
+}
+
+function conversationCandidates(
+  worldState: WorldState | null,
+  { desktopRequiresAccessibility = false }: { desktopRequiresAccessibility?: boolean } = {}
+): InteractionCandidate[] {
   const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
-  const accessibilityCandidates = candidates.filter(
-    (candidate) => String((candidate.sourceHints ?? {}).source ?? "").toLowerCase() === "accessibility"
-  );
-  return accessibilityCandidates.length ? accessibilityCandidates : candidates;
+  const accessibilityCandidates = candidates.filter(isAccessibilityCandidate).filter((candidate) => !isDesktopWindowControlCandidate(candidate));
+  if (worldState?.surface === "desktop" && desktopRequiresAccessibility) {
+    return accessibilityCandidates;
+  }
+
+  return accessibilityCandidates.length ? accessibilityCandidates : candidates.filter((candidate) => !isDesktopWindowControlCandidate(candidate));
 }
 
 function scoreSlackCandidate({
@@ -734,7 +769,9 @@ function scoreSlackCandidate({
 }
 
 function findSlackUnreadCandidate(worldState: WorldState | null): InteractionCandidate | null {
-  const candidates = preferAccessibilityCandidates(worldState);
+  const candidates = conversationCandidates(worldState, {
+    desktopRequiresAccessibility: worldState?.surface === "desktop"
+  });
   const ranked = candidates
     .map((candidate) => ({ candidate, score: scoreSlackCandidate({ candidate, worldState }) }))
     .filter((entry): entry is { candidate: InteractionCandidate; score: number } => Number.isFinite(entry.score))
@@ -750,9 +787,11 @@ function defaultLocalizedTarget(surface: LivePackSurface, kind: "compose" | "sen
   return chinese || surface === "desktop" ? "发送" : "Send";
 }
 
-function pickSlackComposeQuery(worldState: WorldState | null, surface: LivePackSurface): string {
-  const candidates = preferAccessibilityCandidates(worldState);
-  const composeCandidate =
+function findSlackComposeCandidate(worldState: WorldState | null, surface: LivePackSurface): InteractionCandidate | null {
+  const candidates = conversationCandidates(worldState, {
+    desktopRequiresAccessibility: surface === "desktop"
+  });
+  return (
     candidates.find((candidate) => {
       const hintText = candidateHintText(candidate);
       return (
@@ -760,7 +799,12 @@ function pickSlackComposeQuery(worldState: WorldState | null, surface: LivePackS
         /(message|reply|消息|回复)/iu.test(hintText) ||
         /(message|reply|消息|回复)/iu.test(candidate.text)
       );
-    }) ?? null;
+    }) ?? null
+  );
+}
+
+function pickSlackComposeQuery(worldState: WorldState | null, surface: LivePackSurface): string {
+  const composeCandidate = findSlackComposeCandidate(worldState, surface);
 
   if (!composeCandidate) {
     return defaultLocalizedTarget(surface, "compose", worldState);
@@ -773,13 +817,20 @@ function pickSlackComposeQuery(worldState: WorldState | null, surface: LivePackS
   );
 }
 
-function pickSlackSendQuery(worldState: WorldState | null, surface: LivePackSurface): string {
-  const candidates = preferAccessibilityCandidates(worldState);
-  const sendCandidate =
+function findSlackSendCandidate(worldState: WorldState | null, surface: LivePackSurface): InteractionCandidate | null {
+  const candidates = conversationCandidates(worldState, {
+    desktopRequiresAccessibility: surface === "desktop"
+  });
+  return (
     candidates.find((candidate) => {
       const hintText = candidateHintText(candidate);
       return candidate.role === "button" && (SEND_PATTERN.test(hintText) || SEND_PATTERN.test(candidate.text));
-    }) ?? null;
+    }) ?? null
+  );
+}
+
+function pickSlackSendQuery(worldState: WorldState | null, surface: LivePackSurface): string {
+  const sendCandidate = findSlackSendCandidate(worldState, surface);
 
   if (!sendCandidate) {
     return defaultLocalizedTarget(surface, "send", worldState);
@@ -870,7 +921,9 @@ function scoreWeChatCandidate({
 }
 
 function findWeChatUnreadCandidate(worldState: WorldState | null): InteractionCandidate | null {
-  const candidates = preferAccessibilityCandidates(worldState);
+  const candidates = conversationCandidates(worldState, {
+    desktopRequiresAccessibility: worldState?.surface === "desktop"
+  });
   const ranked = candidates
     .map((candidate) => ({ candidate, score: scoreWeChatCandidate({ candidate, worldState }) }))
     .filter((entry): entry is { candidate: InteractionCandidate; score: number } => Number.isFinite(entry.score))
@@ -878,9 +931,11 @@ function findWeChatUnreadCandidate(worldState: WorldState | null): InteractionCa
   return ranked[0]?.candidate ?? null;
 }
 
-function pickWeChatComposeQuery(worldState: WorldState | null): string {
-  const candidates = preferAccessibilityCandidates(worldState);
-  const composeCandidate =
+function findWeChatComposeCandidate(worldState: WorldState | null): InteractionCandidate | null {
+  const candidates = conversationCandidates(worldState, {
+    desktopRequiresAccessibility: worldState?.surface === "desktop"
+  });
+  return (
     candidates.find((candidate) => {
       const hintText = candidateHintText(candidate);
       return (
@@ -888,7 +943,12 @@ function pickWeChatComposeQuery(worldState: WorldState | null): string {
         /(message|reply|input|chat|消息|回复|输入|请输入)/iu.test(hintText) ||
         /(message|reply|input|chat|消息|回复|输入|请输入)/iu.test(candidate.text)
       );
-    }) ?? null;
+    }) ?? null
+  );
+}
+
+function pickWeChatComposeQuery(worldState: WorldState | null): string {
+  const composeCandidate = findWeChatComposeCandidate(worldState);
 
   if (!composeCandidate) {
     return /[\u4e00-\u9fff]/u.test(String(worldState?.visibleText ?? "")) ? "输入" : "Message";
@@ -901,13 +961,20 @@ function pickWeChatComposeQuery(worldState: WorldState | null): string {
   );
 }
 
-function pickWeChatSendQuery(worldState: WorldState | null): string {
-  const candidates = preferAccessibilityCandidates(worldState);
-  const sendCandidate =
+function findWeChatSendCandidate(worldState: WorldState | null): InteractionCandidate | null {
+  const candidates = conversationCandidates(worldState, {
+    desktopRequiresAccessibility: worldState?.surface === "desktop"
+  });
+  return (
     candidates.find((candidate) => {
       const hintText = candidateHintText(candidate);
       return candidate.role === "button" && (SEND_PATTERN.test(hintText) || SEND_PATTERN.test(candidate.text));
-    }) ?? null;
+    }) ?? null
+  );
+}
+
+function pickWeChatSendQuery(worldState: WorldState | null): string {
+  const sendCandidate = findWeChatSendCandidate(worldState);
 
   if (!sendCandidate) {
     return /[\u4e00-\u9fff]/u.test(String(worldState?.visibleText ?? "")) ? "发送" : "Send";
@@ -1885,6 +1952,9 @@ function createSlackPack({
     },
     async extractContext(args) {
       const threadState = await openSlackThreadForContext({ ...args, surface });
+      if (surface === "desktop" && !findSlackComposeCandidate(threadState, surface)) {
+        return null;
+      }
       const composeTarget = pickSlackComposeQuery(threadState, surface);
       const sendTarget = pickSlackSendQuery(threadState, surface);
       const summary = String(args.detection.summary ?? "").trim();
@@ -2046,6 +2116,9 @@ function createWeChatPack(): LivePack {
         controlPlane: {} as LivePackControlPlane,
         surface: "desktop"
       });
+      if (!findWeChatComposeCandidate(threadState)) {
+        return null;
+      }
       const summary = String(detection.summary ?? "").trim();
       const context = extractWeChatThreadContext(threadState, summary);
       const openTarget = String(detection.inputs?.openTarget ?? summary).trim() || summary;

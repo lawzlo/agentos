@@ -533,6 +533,9 @@ export class WatchExecutionService {
           controlPlane: this.controlPlane,
           surfaceRegistry: this.controlPlane.surfaceRegistry
         });
+        if (!context) {
+          detection = null;
+        } else {
         const mergedTaskSpec =
           detection.taskSpec || context?.taskSpec
             ? {
@@ -553,6 +556,7 @@ export class WatchExecutionService {
           },
           ...(mergedTaskSpec ? { taskSpec: mergedTaskSpec } : {})
         };
+        }
       }
 
       if (!detection) {

@@ -142,3 +142,112 @@ test("buildTaskSpecFromWatchRule keeps explicit send steps when autoSend is true
   assert.equal(taskSpec.steps?.length, 3);
   assert.equal(taskSpec.steps?.some((step) => /send/i.test(String(step.label ?? ""))), true);
 });
+
+test("scan skips a watch trigger when extractContext cannot produce a stable reply context", async () => {
+  const timestamp = new Date().toISOString();
+  let storedRule = createWatchRule();
+  let createTaskCalls = 0;
+
+  const service = new WatchExecutionService({
+    controlPlane: {
+      modelClient: {
+        isConfigured() {
+          return true;
+        }
+      },
+      surfaceRegistry: {},
+      workspaceManager: {
+        async prepareProfile() {
+          return {
+            id: "profile-watch",
+            name: "desktop-main",
+            rootPath: "/tmp/desktop-main",
+            profilePath: "/tmp/desktop-main/profile",
+            downloadsPath: "/tmp/desktop-main/downloads",
+            artifactsPath: "/tmp/desktop-main/artifacts",
+            scratchPath: "/tmp/desktop-main/scratch",
+            metadata: {},
+            createdAt: timestamp,
+            updatedAt: timestamp
+          };
+        }
+      },
+      watchService: {
+        decorate(rule: WatchRule) {
+          return rule;
+        }
+      },
+      policyEngine: {
+        evaluateAutomation() {
+          return {
+            action: "draft",
+            policy: "draft_only",
+            riskLevel: "normal",
+            reasons: []
+          };
+        }
+      },
+      createTask() {
+        createTaskCalls += 1;
+        throw new Error("createTask should not be called when extractContext returns null");
+      }
+    } as never,
+    store: {
+      getWatchRule() {
+        return storedRule;
+      },
+      getTask() {
+        return null;
+      },
+      getDraft() {
+        return null;
+      },
+      putWatchRule(rule: WatchRule) {
+        storedRule = rule;
+        return rule;
+      }
+    } as never,
+    eventBus: {
+      broadcast() {}
+    } as never,
+    livePackRegistry: {
+      get() {
+        return {
+          name: "slack-desktop",
+          async observeInbox() {
+            return {
+              version: 1,
+              surface: "desktop",
+              workspaceId: "workspace-watch",
+              appContext: { appName: "Slack" },
+              capture: null,
+              ocrBlocks: [],
+              interactionCandidates: [],
+              visibleText: "Slack",
+              recentActions: [],
+              summary: "Slack",
+              timestamp
+            };
+          },
+          async detectNewItems() {
+            return {
+              summary: "#general",
+              inputs: {
+                openTarget: "#general"
+              }
+            };
+          },
+          async extractContext() {
+            return null;
+          }
+        };
+      }
+    } as never
+  });
+
+  await service.scan(storedRule.id);
+
+  assert.equal(createTaskCalls, 0);
+  assert.equal(storedRule.status, "watching");
+  assert.equal(storedRule.lastError, null);
+});

@@ -1617,6 +1617,213 @@ test("slack desktop pack ignores detections when Slack is not the foreground app
   assert.equal(detection, null);
 });
 
+test("slack desktop pack ignores OCR-only detections when no accessibility candidates are available", async () => {
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({})
+  });
+  const pack = registry.get("slack-desktop");
+  const rule: WatchRule = {
+    id: "watch-slack-ocr-only",
+    goal: "Always watch Slack and reply to unread threads",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "slack-desktop-main",
+    skillName: null,
+    appTarget: "Slack",
+    livePack: "slack-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-slack-ocr-only",
+    name: "slack-desktop-main",
+    rootPath: "/tmp/slack-desktop-main",
+    profilePath: "/tmp/slack-desktop-main/profile",
+    downloadsPath: "/tmp/slack-desktop-main/downloads",
+    artifactsPath: "/tmp/slack-desktop-main/artifacts",
+    scratchPath: "/tmp/slack-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: {
+      version: 1,
+      surface: "desktop",
+      workspaceId: "workspace-slack-ocr-only",
+      appContext: {
+        appName: "Slack",
+        windows: [{ title: "Slack" }]
+      },
+      capture: null,
+      ocrBlocks: [],
+      interactionCandidates: [
+        {
+          id: "ocr-close",
+          surface: "desktop",
+          kind: "text",
+          text: "close button",
+          role: "button",
+          bounds: { x: 12, y: 12, width: 24, height: 24, centerX: 24, centerY: 24 },
+          confidence: 0.72,
+          sourceHints: { source: "ocr" },
+          isInteractive: true
+        },
+        {
+          id: "ocr-thread",
+          surface: "desktop",
+          kind: "text",
+          text: "# bonkr",
+          role: "button",
+          bounds: { x: 32, y: 96, width: 120, height: 24, centerX: 92, centerY: 108 },
+          confidence: 0.76,
+          sourceHints: { source: "ocr" },
+          isInteractive: true
+        }
+      ],
+      visibleText: "Slack\nclose button\n# bonkr",
+      recentActions: [],
+      summary: "Slack with 0 accessibility candidates and 2 OCR observations",
+      timestamp: new Date().toISOString()
+    } as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {} as never
+  });
+
+  assert.equal(detection, null);
+});
+
+test("slack desktop pack skips reply context extraction when composer is missing", async () => {
+  let opened = false;
+  const initialWorldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-slack-missing-composer",
+    appContext: {
+      appName: "Slack",
+      windows: [{ title: "Slack" }]
+    },
+    capture: null,
+    ocrBlocks: [],
+    interactionCandidates: [
+      {
+        id: "thread-acme",
+        surface: "desktop",
+        kind: "text",
+        text: "Unread thread Acme renewal",
+        role: "row",
+        bounds: { x: 10, y: 10, width: 180, height: 24, centerX: 100, centerY: 22 },
+        confidence: 0.98,
+        sourceHints: { source: "accessibility", ariaLabel: "Unread thread Acme renewal", actions: ["AXPress"] },
+        isInteractive: true
+      }
+    ],
+    visibleText: "Slack\nUnread\nAcme renewal",
+    recentActions: [],
+    summary: "Slack unread list",
+    timestamp: new Date().toISOString()
+  };
+  const threadWorldState = {
+    ...initialWorldState,
+    interactionCandidates: [
+      {
+        id: "thread-acme-open",
+        surface: "desktop",
+        kind: "text",
+        text: "Acme renewal",
+        role: "row",
+        bounds: { x: 10, y: 10, width: 180, height: 24, centerX: 100, centerY: 22 },
+        confidence: 0.98,
+        sourceHints: { source: "accessibility", ariaLabel: "Acme renewal", actions: ["AXPress"] },
+        isInteractive: true
+      }
+    ],
+    visibleText: "Slack\nAcme renewal\nCustomer: Any update?"
+  };
+  const fakeSurface = {
+    async observe() {
+      return opened ? threadWorldState : initialWorldState;
+    },
+    async act({ step }) {
+      if (step.action === "clickTarget") {
+        opened = true;
+      }
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("slack-desktop");
+  const rule: WatchRule = {
+    id: "watch-slack-missing-composer",
+    goal: "Always watch Slack and reply to unread threads",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "slack-desktop-main",
+    skillName: null,
+    appTarget: "Slack",
+    livePack: "slack-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-slack-missing-composer",
+    name: "slack-desktop-main",
+    rootPath: "/tmp/slack-desktop-main",
+    profilePath: "/tmp/slack-desktop-main/profile",
+    downloadsPath: "/tmp/slack-desktop-main/downloads",
+    artifactsPath: "/tmp/slack-desktop-main/artifacts",
+    scratchPath: "/tmp/slack-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: initialWorldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {} as never
+  });
+  const context = await pack?.extractContext?.({
+    rule,
+    worldState: initialWorldState as never,
+    detection: detection as never,
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: { isConfigured: () => false }
+    } as never
+  });
+
+  assert.equal(context, null);
+});
+
 test("wechat desktop pack can detect unread conversations and build reply steps from a desktop world state", async () => {
   let opened = false;
   const initialWorldState = {
