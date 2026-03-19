@@ -26,6 +26,18 @@ test("normalizeWatchRule infers wechat desktop pack from goal", async () => {
   assert.equal(watch.appTarget, "WeChat");
 });
 
+test("normalizeWatchRule infers outlook desktop pack from goal", async () => {
+  const watch = normalizeWatchRule({
+    goal: "Watch Outlook for unread mail and prepare replies",
+    preferredSurface: "desktop"
+  });
+
+  assert.equal(watch.livePack, "outlook-desktop");
+  assert.equal(watch.preferredSurface, "desktop");
+  assert.equal(watch.appTarget, "Microsoft Outlook");
+  assert.equal(watch.watchProfile.triggerTexts.includes("outlook"), true);
+});
+
 test("normalizeWatchRule infers drive trigger hints for download and upload", async () => {
   const watch = normalizeWatchRule({
     goal: "Always check Google Drive for pending file operations",

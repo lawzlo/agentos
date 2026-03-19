@@ -66,6 +66,8 @@ const WECHAT_UI_CHROME_PATTERN =
   /^(wechat|微信|搜索|search|send|发送|reply|回复|聊天信息|聊天记录|通讯录|contacts|发现|moments|我|me|文件传输助手|表情|图片|文件|语音消息)$/iu;
 const MAIL_UI_CHROME_PATTERN =
   /^(mail|email|gmail|outlook|邮件|inbox|收件箱|已发送|sent|drafts|草稿|spam|archive|归档|trash|垃圾箱|delete|删除|search|搜索|compose|撰写|reply|回复|send|发送)$/iu;
+const OUTLOOK_UI_CHROME_PATTERN =
+  /^(outlook|focused|other|archive|flag|categories|categorize|junk email|junk|trash|deleted items|drafts|sent items|reply all|forward|new mail|focused inbox|other inbox|respond|收件箱|其他|重点|归档|标记|分类|垃圾邮件|已删除|已发送|新建邮件|回复全部|转发)$/iu;
 const BOSS_UI_CHROME_PATTERN =
   /^(boss直聘|boss zhipin|boss|搜索|search|筛选|filter|推荐|推荐牛人|消息|message|messages|职位|jobs|候选人列表|沟通|在线沟通|立即沟通|发消息|发送|send|查看简历)$/iu;
 const GOOGLE_DRIVE_UI_CHROME_PATTERN =
@@ -680,6 +682,23 @@ function isWeChatDesktopForeground(worldState: WorldState | null): boolean {
   );
 }
 
+function isOutlookDesktopForeground(worldState: WorldState | null): boolean {
+  if (!worldState || worldState.surface !== "desktop") {
+    return true;
+  }
+
+  const appContext = (worldState.appContext ?? {}) as Record<string, unknown>;
+  const appName = String(appContext.appName ?? "").trim().toLowerCase();
+  if (appName.includes("outlook")) {
+    return true;
+  }
+
+  const windows = Array.isArray(appContext.windows) ? (appContext.windows as Array<Record<string, unknown>>) : [];
+  return windows.some((windowInfo) =>
+    String(windowInfo?.title ?? windowInfo?.windowName ?? "").toLowerCase().includes("outlook")
+  );
+}
+
 function isAccessibilityCandidate(candidate: InteractionCandidate | null | undefined): boolean {
   return String((candidate?.sourceHints ?? {}).source ?? "").toLowerCase() === "accessibility";
 }
@@ -1076,6 +1095,15 @@ function isMailUiChrome(text: string): boolean {
   return MAIL_UI_CHROME_PATTERN.test(String(text ?? "").trim());
 }
 
+function isMailComposerChromeLine(text: string): boolean {
+  return /^(send|reply|compose|write|message|editor|发送|回复|撰写|输入)$/iu.test(String(text ?? "").trim());
+}
+
+function isOutlookUiChrome(text: string): boolean {
+  const normalized = String(text ?? "").trim();
+  return isMailUiChrome(normalized) || OUTLOOK_UI_CHROME_PATTERN.test(normalized);
+}
+
 function isBossUiChrome(text: string): boolean {
   return BOSS_UI_CHROME_PATTERN.test(String(text ?? "").trim());
 }
@@ -1251,6 +1279,70 @@ function findMailUnreadCandidate(worldState: WorldState | null): InteractionCand
   return ranked[0]?.candidate ?? null;
 }
 
+function scoreOutlookCandidate({
+  candidate,
+  worldState
+}: {
+  candidate: InteractionCandidate;
+  worldState: WorldState | null;
+}): number | null {
+  const hintText = candidateHintText(candidate);
+  const summary = normalizeMailSummary(candidate.text || hintText);
+  if (!summary || isOutlookUiChrome(summary) || SEND_PATTERN.test(summary)) {
+    return null;
+  }
+
+  let score = candidate.isInteractive ? 12 : 4;
+  if (candidate.role === "row") {
+    score += 8;
+  }
+  if (candidate.role === "button" || candidate.role === "link" || candidate.role === "text") {
+    score += 4;
+  }
+  if (isAccessibilityCandidate(candidate)) {
+    score += 16;
+  }
+  if (UNREAD_PATTERN.test(hintText) || /(mail|email|outlook|邮件|收件箱|focused inbox|focused)/iu.test(hintText)) {
+    score += 24;
+  }
+
+  const windowTitle = String(((candidate.sourceHints ?? {}) as Record<string, unknown>).windowTitle ?? "");
+  if (/(outlook|mail|inbox|focused|other|收件箱|重点)/iu.test(windowTitle)) {
+    score += 8;
+  }
+
+  const lines = visibleLines(worldState);
+  for (const [index, line] of lines.entries()) {
+    if (!UNREAD_PATTERN.test(line) && !/(mail|email|outlook|邮件|收件箱|focused|other)/iu.test(line)) {
+      continue;
+    }
+    const nearby = lines
+      .slice(Math.max(0, index - 2), index + 6)
+      .some((entry) => entry.includes(summary) || summary.includes(normalizeMailSummary(entry)));
+    if (nearby) {
+      score += 16;
+      break;
+    }
+  }
+
+  if (summary.length >= 3 && summary.length <= 140) {
+    score += 3;
+  }
+
+  return score;
+}
+
+function findOutlookUnreadCandidate(worldState: WorldState | null): InteractionCandidate | null {
+  const candidates = conversationCandidates(worldState, {
+    desktopRequiresAccessibility: true
+  });
+  const ranked = candidates
+    .map((candidate) => ({ candidate, score: scoreOutlookCandidate({ candidate, worldState }) }))
+    .filter((entry): entry is { candidate: InteractionCandidate; score: number } => Number.isFinite(entry.score))
+    .sort((left, right) => right.score - left.score);
+  return ranked[0]?.candidate ?? null;
+}
+
 function scoreBossCandidate({
   candidate,
   worldState
@@ -1367,8 +1459,84 @@ function extractMailThreadContext(worldState: WorldState | null, summary: string
         normalized &&
         normalized !== normalizedSummary &&
         !UNREAD_PATTERN.test(line) &&
-        !SEND_PATTERN.test(line) &&
-        !/(reply|message|compose|write|回复|撰写|输入)/iu.test(line)
+        !isMailComposerChromeLine(line)
+      );
+    })
+  ).slice(0, 5);
+}
+
+function findOutlookComposeCandidate(worldState: WorldState | null): InteractionCandidate | null {
+  const candidates = conversationCandidates(worldState, {
+    desktopRequiresAccessibility: true
+  });
+  return (
+    candidates.find((candidate) => {
+      const hintText = candidateHintText(candidate);
+      return (
+        candidate.role === "textbox" ||
+        /(reply|message|compose|write|editor|回复|撰写|输入)/iu.test(hintText) ||
+        /(reply|message|compose|write|editor|回复|撰写|输入)/iu.test(candidate.text)
+      );
+    }) ?? null
+  );
+}
+
+function pickOutlookComposeQuery(worldState: WorldState | null): string {
+  const composeCandidate = findOutlookComposeCandidate(worldState);
+  if (!composeCandidate) {
+    return /[\u4e00-\u9fff]/u.test(String(worldState?.visibleText ?? "")) ? "回复" : "Reply";
+  }
+
+  const hints = (composeCandidate.sourceHints ?? {}) as Record<string, unknown>;
+  return (
+    String(hints.placeholder ?? hints.ariaLabel ?? composeCandidate.text ?? "").trim() ||
+    (/[\u4e00-\u9fff]/u.test(String(worldState?.visibleText ?? "")) ? "回复" : "Reply")
+  );
+}
+
+function findOutlookSendCandidate(worldState: WorldState | null): InteractionCandidate | null {
+  const candidates = conversationCandidates(worldState, {
+    desktopRequiresAccessibility: true
+  });
+  return (
+    candidates.find((candidate) => {
+      const hintText = candidateHintText(candidate);
+      return candidate.role === "button" && (SEND_PATTERN.test(hintText) || SEND_PATTERN.test(candidate.text));
+    }) ?? null
+  );
+}
+
+function pickOutlookSendQuery(worldState: WorldState | null): string {
+  const sendCandidate = findOutlookSendCandidate(worldState);
+  if (!sendCandidate) {
+    return /[\u4e00-\u9fff]/u.test(String(worldState?.visibleText ?? "")) ? "发送" : "Send";
+  }
+
+  return (
+    String(sendCandidate.text ?? "").trim() ||
+    String(((sendCandidate.sourceHints ?? {}) as Record<string, unknown>).ariaLabel ?? "").trim() ||
+    (/[\u4e00-\u9fff]/u.test(String(worldState?.visibleText ?? "")) ? "发送" : "Send")
+  );
+}
+
+function extractOutlookThreadContext(worldState: WorldState | null, summary: string): string[] {
+  const lines = visibleLines(worldState).filter((line) => !isOutlookUiChrome(line));
+  const normalizedSummary = normalizeMailSummary(summary);
+  const summaryIndex = lines.findIndex((line) => normalizeMailSummary(line) === normalizedSummary);
+  const pool = summaryIndex === -1 ? lines : lines.slice(summaryIndex + 1);
+  return uniqueStrings(
+    pool.filter((line) => {
+      const normalized = normalizeMailSummary(line);
+      return (
+        normalized &&
+        normalized !== normalizedSummary &&
+        !UNREAD_PATTERN.test(line) &&
+        !isMailComposerChromeLine(line) &&
+        !isOutlookUiChrome(line) &&
+        !/(microsoft outlook|outlook)$/iu.test(line.trim()) &&
+        !/^(inbox|focused inbox|other inbox|收件箱|重点收件箱|其他收件箱)(\s*-\s*(microsoft\s+)?outlook)?$/iu.test(
+          line.trim()
+        )
       );
     })
   ).slice(0, 5);
@@ -2476,6 +2644,142 @@ function createMailPack({
   };
 }
 
+function createOutlookDesktopPack(): LivePack {
+  return {
+    name: "outlook-desktop",
+    info: normalizePackInfo("outlook-desktop", {
+      name: "outlook-desktop",
+      family: "mail",
+      surface: "desktop",
+      supportsDrafts: true,
+      supportsAutoSend: false,
+      defaultReplyPolicy: packDefaultReplyPolicy("outlook-desktop"),
+      description: "Outlook desktop watcher that detects unread mail, extracts thread context, and pre-fills approval-first replies."
+    }),
+    async activate({ rule, workspace, surfaceRegistry }) {
+      const adapter = surfaceRegistry.get("desktop");
+      if (!adapter) {
+        return;
+      }
+      await adapter
+        .act({
+          task: createWatchTask(rule),
+          step: {
+            id: `watch-focus-${rule.id}`,
+            action: "focusApp",
+            surface: "desktop",
+            params: { name: rule.appTarget ?? "Microsoft Outlook" }
+          },
+          workspace: profileAsWorkspace(rule, workspace),
+          traceId: null,
+          outputs: {}
+        })
+        .catch(() => null);
+    },
+    async observeInbox(args) {
+      return observeWatchSurface({ ...args, surface: "desktop" });
+    },
+    async detectNewItems({ rule, worldState, dedupeState = {} }) {
+      if (!isOutlookDesktopForeground(worldState)) {
+        return null;
+      }
+
+      const candidate = findOutlookUnreadCandidate(worldState);
+      if (!candidate) {
+        return null;
+      }
+
+      const summary = normalizeMailSummary(candidate.text || candidateHintText(candidate));
+      if (!summary || isOutlookUiChrome(summary)) {
+        return null;
+      }
+
+      const context = contextForSignal(worldState, { text: candidate.text || summary });
+      const itemFingerprint = fingerprint(`outlook-desktop:${rule.workspaceName ?? "default"}:${summary}:${context.join("|")}`);
+      if (dedupeState.lastFingerprint === itemFingerprint) {
+        return null;
+      }
+
+      return {
+        fingerprint: itemFingerprint,
+        summary,
+        text: summary,
+        context,
+        inputs: {
+          watchItemText: summary,
+          watchSummary: summary,
+          watchContext: context.join("\n"),
+          openTarget: String(candidate.text ?? summary).trim() || summary
+        },
+        metadata: buildConversationMetadata({
+          packName: "outlook-desktop",
+          surface: "desktop",
+          summary,
+          context,
+          openTarget: String(candidate.text ?? summary).trim() || summary,
+          candidate
+        })
+      };
+    },
+    async extractContext({ rule, workspace, surfaceRegistry, detection }) {
+      const threadState = await openMailThreadForContext({
+        rule,
+        workspace,
+        surfaceRegistry,
+        controlPlane: {} as LivePackControlPlane,
+        worldState: null,
+        detection,
+        surface: "desktop"
+      });
+      if (!findOutlookComposeCandidate(threadState)) {
+        return null;
+      }
+      const summary = String(detection.summary ?? "").trim();
+      const context = extractOutlookThreadContext(threadState, summary);
+      const openTarget = String(detection.inputs?.openTarget ?? summary).trim() || summary;
+      return {
+        summary,
+        context,
+        inputs: {
+          ...(detection.inputs ?? {}),
+          watchContext: context.join("\n"),
+          openTarget,
+          typeTarget: pickOutlookComposeQuery(threadState),
+          sendTarget: pickOutlookSendQuery(threadState)
+        },
+        metadata: {
+          ...(detection.metadata ?? {}),
+          ...buildConversationMetadata({
+            packName: "outlook-desktop",
+            surface: "desktop",
+            summary,
+            context,
+            openTarget,
+            candidate: (detection.metadata?.openCandidate ?? null) as InteractionCandidate | Record<string, unknown> | null
+          })
+        },
+        taskSpec: {
+          preferredSurface: "desktop",
+          steps: buildMailReplySteps("desktop")
+        }
+      };
+    },
+    async draftReply({ rule, detection, controlPlane }) {
+      const summary = String(detection?.summary ?? "").trim();
+      const context = Array.isArray(detection?.context) ? detection.context : [];
+      return draftPackReply({
+        controlPlane,
+        livePack: "outlook-desktop",
+        preferredSurface: "desktop",
+        family: "mail",
+        goal: rule.goal,
+        summary,
+        context
+      });
+    }
+  };
+}
+
 function createBossPack(): LivePack {
   return {
     name: "boss-browser",
@@ -2794,6 +3098,7 @@ export class LivePackRegistry {
         description: "Slack browser watcher that detects unread threads, extracts context, and sends low-risk replies."
       }),
       createWeChatPack(),
+      createOutlookDesktopPack(),
       createMailPack({
         name: "generic-mail-desktop",
         surface: "desktop",

@@ -173,6 +173,16 @@ function inferPack(
     };
   }
 
+  if (/(outlook)/iu.test(text) || /(outlook)/iu.test(String(input.appTarget ?? ""))) {
+    const preferredSurface = input.preferredSurface ?? "desktop";
+    return {
+      livePack: preferredSurface === "browser" ? "generic-mail-browser" : "outlook-desktop",
+      preferredSurface,
+      appTarget: preferredSurface === "browser" ? input.appTarget ?? null : (input.appTarget ?? "Microsoft Outlook"),
+      triggerTexts: ["unread", "inbox", "mail", "email", "outlook", "邮件", "未读", "收件箱"]
+    };
+  }
+
   if (/(mail|email|gmail|outlook|邮箱|邮件)/iu.test(text)) {
     const preferredSurface = input.preferredSurface ?? "desktop";
     return {

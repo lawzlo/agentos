@@ -28,7 +28,7 @@ export function packDefaultReplyPolicy(livePack: string): Exclude<ReplyPolicyMod
     return "auto_send";
   }
 
-  if (["generic-mail-desktop", "generic-mail-browser", "boss-browser"].includes(String(livePack))) {
+  if (["generic-mail-desktop", "generic-mail-browser", "outlook-desktop", "boss-browser"].includes(String(livePack))) {
     return "draft_first";
   }
 

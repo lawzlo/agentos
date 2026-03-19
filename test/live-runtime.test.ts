@@ -1164,12 +1164,14 @@ test("doctor and packs endpoints expose live runtime diagnostics", async () => {
     assert.ok(packsPayload.packs.some((pack) => pack.name === "slack-desktop"));
     assert.ok(packsPayload.packs.some((pack) => pack.name === "slack-browser"));
     assert.ok(packsPayload.packs.some((pack) => pack.name === "wechat-desktop"));
+    assert.ok(packsPayload.packs.some((pack) => pack.name === "outlook-desktop"));
     assert.ok(packsPayload.packs.some((pack) => pack.name === "generic-mail-desktop"));
     assert.ok(packsPayload.packs.some((pack) => pack.name === "boss-browser"));
     assert.ok(packsPayload.packs.some((pack) => pack.name === "google-drive-browser"));
     assert.ok(packsPayload.packs.some((pack) => pack.name === "google-docs-browser"));
     assert.ok(packsPayload.packs.some((pack) => pack.name === "feishu-docs-browser"));
     assert.equal(packsPayload.packs.find((pack) => pack.name === "slack-browser")?.defaultReplyPolicy, "auto_send");
+    assert.equal(packsPayload.packs.find((pack) => pack.name === "outlook-desktop")?.defaultReplyPolicy, "draft_first");
     assert.equal(packsPayload.packs.find((pack) => pack.name === "generic-mail-browser")?.defaultReplyPolicy, "draft_first");
     assert.equal(packsPayload.packs.find((pack) => pack.name === "boss-browser")?.defaultReplyPolicy, "draft_first");
     assert.equal(packsPayload.packs.find((pack) => pack.name === "slack-browser")?.category, "conversation");
@@ -2051,6 +2053,451 @@ test("wechat desktop pack ignores detections when WeChat is not the foreground a
   });
 
   assert.equal(detection, null);
+});
+
+test("outlook desktop pack can detect unread mail and build reply steps from a desktop world state", async () => {
+  let opened = false;
+  const initialWorldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-outlook",
+    appContext: {
+      appName: "Microsoft Outlook",
+      windows: [{ title: "Inbox - Microsoft Outlook" }]
+    },
+    capture: null,
+    ocrBlocks: [],
+    interactionCandidates: [
+      {
+        id: "thread-project-update",
+        surface: "desktop",
+        kind: "text",
+        text: "Project update",
+        role: "row",
+        bounds: { x: 10, y: 10, width: 220, height: 28, centerX: 120, centerY: 24 },
+        confidence: 0.98,
+        sourceHints: {
+          source: "accessibility",
+          ariaLabel: "Unread email Project update from Customer",
+          windowTitle: "Inbox - Microsoft Outlook",
+          actions: ["AXPress"]
+        },
+        isInteractive: true
+      }
+    ],
+    visibleText: "Outlook\nFocused Inbox\nUnread\nProject update\nCustomer: Please send the latest update",
+    recentActions: [],
+    summary: "Microsoft Outlook unread list",
+    timestamp: new Date().toISOString()
+  };
+  const threadWorldState = {
+    ...initialWorldState,
+    interactionCandidates: [
+      {
+        id: "thread-project-update-open",
+        surface: "desktop",
+        kind: "text",
+        text: "Project update",
+        role: "row",
+        bounds: { x: 10, y: 10, width: 220, height: 28, centerX: 120, centerY: 24 },
+        confidence: 0.98,
+        sourceHints: {
+          source: "accessibility",
+          ariaLabel: "Project update",
+          windowTitle: "Inbox - Microsoft Outlook",
+          actions: ["AXPress"]
+        },
+        isInteractive: true
+      },
+      {
+        id: "reply-editor",
+        surface: "desktop",
+        kind: "text",
+        text: "Reply",
+        role: "textbox",
+        bounds: { x: 10, y: 210, width: 260, height: 34, centerX: 140, centerY: 227 },
+        confidence: 0.98,
+        sourceHints: {
+          source: "accessibility",
+          placeholder: "Reply",
+          windowTitle: "Inbox - Microsoft Outlook",
+          actions: ["AXPress"]
+        },
+        isInteractive: true
+      },
+      {
+        id: "send",
+        surface: "desktop",
+        kind: "text",
+        text: "Send",
+        role: "button",
+        bounds: { x: 280, y: 210, width: 60, height: 32, centerX: 310, centerY: 226 },
+        confidence: 0.98,
+        sourceHints: {
+          source: "accessibility",
+          ariaLabel: "Send",
+          windowTitle: "Inbox - Microsoft Outlook",
+          actions: ["AXPress"]
+        },
+        isInteractive: true
+      }
+    ],
+    visibleText: "Outlook\nProject update\nCustomer: Please send the latest update\nMe: I will send it shortly.\nReply\nSend"
+  };
+  const fakeSurface = {
+    async observe() {
+      return opened ? threadWorldState : initialWorldState;
+    },
+    async act({ step }) {
+      if (step.action === "clickTarget") {
+        opened = true;
+      }
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("outlook-desktop");
+  const rule: WatchRule = {
+    id: "watch-outlook-desktop",
+    goal: "Always watch Outlook and prefill replies for unread mail",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "outlook-desktop-main",
+    skillName: null,
+    appTarget: "Microsoft Outlook",
+    livePack: "outlook-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-outlook",
+    name: "outlook-desktop-main",
+    rootPath: "/tmp/outlook-desktop-main",
+    profilePath: "/tmp/outlook-desktop-main/profile",
+    downloadsPath: "/tmp/outlook-desktop-main/downloads",
+    artifactsPath: "/tmp/outlook-desktop-main/artifacts",
+    scratchPath: "/tmp/outlook-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: initialWorldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {} as never
+  });
+  assert.equal(detection?.summary, "Project update");
+  assert.equal(detection?.metadata?.threadKey, "project update");
+  const openCandidate = detection?.metadata?.openCandidate as { sourceHints?: { source?: string } } | undefined;
+  assert.equal(openCandidate?.sourceHints?.source, "accessibility");
+
+  const context = await pack?.extractContext?.({
+    rule,
+    worldState: initialWorldState as never,
+    detection: detection as never,
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: { isConfigured: () => false }
+    } as never
+  });
+  assert.equal(context?.inputs?.typeTarget, "Reply");
+  assert.equal(context?.inputs?.sendTarget, "Send");
+  assert.equal(context?.context?.[0], "Customer: Please send the latest update");
+  assert.equal(context?.metadata?.threadKey, "project update");
+  assert.equal(context?.metadata?.sender, "Customer");
+  assert.equal(Array.isArray(context?.taskSpec?.steps), true);
+  assert.equal(context?.taskSpec?.steps?.[0]?.action, "clickTarget");
+  assert.equal(context?.taskSpec?.steps?.[2]?.params?.text, "{{typeText}}");
+});
+
+test("outlook desktop pack ignores detections when Outlook is not the foreground app", async () => {
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({})
+  });
+  const pack = registry.get("outlook-desktop");
+  const rule: WatchRule = {
+    id: "watch-outlook-background",
+    goal: "Always watch Outlook and prefill replies for unread mail",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "outlook-desktop-main",
+    skillName: null,
+    appTarget: "Microsoft Outlook",
+    livePack: "outlook-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-outlook-background",
+    name: "outlook-desktop-main",
+    rootPath: "/tmp/outlook-desktop-main",
+    profilePath: "/tmp/outlook-desktop-main/profile",
+    downloadsPath: "/tmp/outlook-desktop-main/downloads",
+    artifactsPath: "/tmp/outlook-desktop-main/artifacts",
+    scratchPath: "/tmp/outlook-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: {
+      version: 1,
+      surface: "desktop",
+      workspaceId: "workspace-terminal",
+      appContext: {
+        appName: "Terminal",
+        windows: [{ title: "Terminal" }]
+      },
+      capture: null,
+      ocrBlocks: [],
+      interactionCandidates: [
+        {
+          id: "thread-project-update",
+          surface: "desktop",
+          kind: "text",
+          text: "Project update",
+          role: "row",
+          bounds: { x: 10, y: 10, width: 220, height: 28, centerX: 120, centerY: 24 },
+          confidence: 0.98,
+          sourceHints: { source: "accessibility", ariaLabel: "Unread email Project update", actions: ["AXPress"] },
+          isInteractive: true
+        }
+      ],
+      visibleText: "Terminal\nnpm test\nProject update",
+      recentActions: [],
+      summary: "Terminal",
+      timestamp: new Date().toISOString()
+    } as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {} as never
+  });
+
+  assert.equal(detection, null);
+});
+
+test("outlook desktop pack ignores OCR-only detections when no accessibility candidates are available", async () => {
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({})
+  });
+  const pack = registry.get("outlook-desktop");
+  const rule: WatchRule = {
+    id: "watch-outlook-ocr-only",
+    goal: "Always watch Outlook and prefill replies for unread mail",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "outlook-desktop-main",
+    skillName: null,
+    appTarget: "Microsoft Outlook",
+    livePack: "outlook-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-outlook-ocr-only",
+    name: "outlook-desktop-main",
+    rootPath: "/tmp/outlook-desktop-main",
+    profilePath: "/tmp/outlook-desktop-main/profile",
+    downloadsPath: "/tmp/outlook-desktop-main/downloads",
+    artifactsPath: "/tmp/outlook-desktop-main/artifacts",
+    scratchPath: "/tmp/outlook-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: {
+      version: 1,
+      surface: "desktop",
+      workspaceId: "workspace-outlook-ocr-only",
+      appContext: {
+        appName: "Microsoft Outlook",
+        windows: [{ title: "Inbox - Microsoft Outlook" }]
+      },
+      capture: null,
+      ocrBlocks: [],
+      interactionCandidates: [
+        {
+          id: "ocr-thread",
+          surface: "desktop",
+          kind: "text",
+          text: "Project update",
+          role: "row",
+          bounds: { x: 10, y: 10, width: 220, height: 28, centerX: 120, centerY: 24 },
+          confidence: 0.84,
+          sourceHints: { source: "ocr" },
+          isInteractive: true
+        }
+      ],
+      visibleText: "Outlook\nProject update",
+      recentActions: [],
+      summary: "Microsoft Outlook with 0 accessibility candidates and 1 OCR observations",
+      timestamp: new Date().toISOString()
+    } as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {} as never
+  });
+
+  assert.equal(detection, null);
+});
+
+test("outlook desktop pack skips reply context extraction when composer is missing", async () => {
+  let opened = false;
+  const initialWorldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-outlook-missing-composer",
+    appContext: {
+      appName: "Microsoft Outlook",
+      windows: [{ title: "Inbox - Microsoft Outlook" }]
+    },
+    capture: null,
+    ocrBlocks: [],
+    interactionCandidates: [
+      {
+        id: "thread-project-update",
+        surface: "desktop",
+        kind: "text",
+        text: "Project update",
+        role: "row",
+        bounds: { x: 10, y: 10, width: 220, height: 28, centerX: 120, centerY: 24 },
+        confidence: 0.98,
+        sourceHints: { source: "accessibility", ariaLabel: "Unread email Project update", actions: ["AXPress"] },
+        isInteractive: true
+      }
+    ],
+    visibleText: "Outlook\nUnread\nProject update",
+    recentActions: [],
+    summary: "Microsoft Outlook unread list",
+    timestamp: new Date().toISOString()
+  };
+  const threadWorldState = {
+    ...initialWorldState,
+    interactionCandidates: [
+      {
+        id: "thread-project-update-open",
+        surface: "desktop",
+        kind: "text",
+        text: "Project update",
+        role: "row",
+        bounds: { x: 10, y: 10, width: 220, height: 28, centerX: 120, centerY: 24 },
+        confidence: 0.98,
+        sourceHints: { source: "accessibility", ariaLabel: "Project update", actions: ["AXPress"] },
+        isInteractive: true
+      }
+    ],
+    visibleText: "Outlook\nProject update\nCustomer: Any update?"
+  };
+  const fakeSurface = {
+    async observe() {
+      return opened ? threadWorldState : initialWorldState;
+    },
+    async act({ step }) {
+      if (step.action === "clickTarget") {
+        opened = true;
+      }
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("outlook-desktop");
+  const rule: WatchRule = {
+    id: "watch-outlook-missing-composer",
+    goal: "Always watch Outlook and prefill replies for unread mail",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "outlook-desktop-main",
+    skillName: null,
+    appTarget: "Microsoft Outlook",
+    livePack: "outlook-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-outlook-missing-composer",
+    name: "outlook-desktop-main",
+    rootPath: "/tmp/outlook-desktop-main",
+    profilePath: "/tmp/outlook-desktop-main/profile",
+    downloadsPath: "/tmp/outlook-desktop-main/downloads",
+    artifactsPath: "/tmp/outlook-desktop-main/artifacts",
+    scratchPath: "/tmp/outlook-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: initialWorldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {} as never
+  });
+  const context = await pack?.extractContext?.({
+    rule,
+    worldState: initialWorldState as never,
+    detection: detection as never,
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: { isConfigured: () => false }
+    } as never
+  });
+
+  assert.equal(context, null);
 });
 
 test("boss browser pack can extract candidate thread context and build approval-first reply steps", async () => {
