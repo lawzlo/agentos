@@ -2224,7 +2224,9 @@ test("outlook desktop pack can detect unread mail and build reply steps from a d
   assert.equal(context?.metadata?.sender, "Customer");
   assert.equal(Array.isArray(context?.taskSpec?.steps), true);
   assert.equal(context?.taskSpec?.steps?.[0]?.action, "clickTarget");
-  assert.equal(context?.taskSpec?.steps?.[2]?.params?.text, "{{typeText}}");
+  assert.equal(context?.taskSpec?.steps?.[1]?.action, "pressKey");
+  assert.deepEqual(context?.taskSpec?.steps?.[1]?.params, { key: "r", modifiers: ["meta"] });
+  assert.equal(context?.taskSpec?.steps?.[3]?.params?.text, "{{typeText}}");
 });
 
 test("outlook desktop pack ignores detections when Outlook is not the foreground app", async () => {
@@ -2498,6 +2500,163 @@ test("outlook desktop pack skips reply context extraction when composer is missi
   });
 
   assert.equal(context, null);
+});
+
+test("outlook desktop pack can open the reply composer with a keyboard shortcut fallback", async () => {
+  let opened = false;
+  let replyShortcutUsed = false;
+  const initialWorldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-outlook-shortcut",
+    appContext: {
+      appName: "Microsoft Outlook",
+      windows: [{ title: "Inbox - Microsoft Outlook" }]
+    },
+    capture: null,
+    ocrBlocks: [],
+    interactionCandidates: [
+      {
+        id: "thread-project-update",
+        surface: "desktop",
+        kind: "text",
+        text: "Project update",
+        role: "row",
+        bounds: { x: 10, y: 10, width: 220, height: 28, centerX: 120, centerY: 24 },
+        confidence: 0.98,
+        sourceHints: { source: "accessibility", ariaLabel: "Unread email Project update", actions: ["AXPress"] },
+        isInteractive: true
+      }
+    ],
+    visibleText: "Outlook\nUnread\nProject update",
+    recentActions: [],
+    summary: "Microsoft Outlook unread list",
+    timestamp: new Date().toISOString()
+  };
+  const threadWithoutComposer = {
+    ...initialWorldState,
+    interactionCandidates: [
+      {
+        id: "thread-project-update-open",
+        surface: "desktop",
+        kind: "text",
+        text: "Project update",
+        role: "row",
+        bounds: { x: 10, y: 10, width: 220, height: 28, centerX: 120, centerY: 24 },
+        confidence: 0.98,
+        sourceHints: { source: "accessibility", ariaLabel: "Project update", actions: ["AXPress"] },
+        isInteractive: true
+      }
+    ],
+    visibleText: "Outlook\nProject update\nCustomer: Any update?"
+  };
+  const threadWithComposer = {
+    ...threadWithoutComposer,
+    interactionCandidates: [
+      ...threadWithoutComposer.interactionCandidates,
+      {
+        id: "reply-field",
+        surface: "desktop",
+        kind: "element",
+        text: "Reply",
+        role: "textbox",
+        bounds: { x: 20, y: 220, width: 260, height: 42, centerX: 150, centerY: 241 },
+        confidence: 0.98,
+        sourceHints: { source: "accessibility", placeholder: "Reply", focused: true, actions: ["AXPress"] },
+        isInteractive: true
+      },
+      {
+        id: "send-reply",
+        surface: "desktop",
+        kind: "element",
+        text: "Send",
+        role: "button",
+        bounds: { x: 300, y: 220, width: 80, height: 32, centerX: 340, centerY: 236 },
+        confidence: 0.98,
+        sourceHints: { source: "accessibility", ariaLabel: "Send", actions: ["AXPress"] },
+        isInteractive: true
+      }
+    ],
+    visibleText: "Outlook\nProject update\nCustomer: Any update?\nReply\nSend"
+  };
+  const fakeSurface = {
+    async observe() {
+      if (!opened) {
+        return initialWorldState;
+      }
+      return replyShortcutUsed ? threadWithComposer : threadWithoutComposer;
+    },
+    async act({ step }) {
+      if (step.action === "clickTarget") {
+        opened = true;
+      }
+      if (step.action === "pressKey" && step.params?.key === "r") {
+        replyShortcutUsed = true;
+      }
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("outlook-desktop");
+  const rule: WatchRule = {
+    id: "watch-outlook-shortcut",
+    goal: "Always watch Outlook and prefill replies for unread mail",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "outlook-desktop-main",
+    skillName: null,
+    appTarget: "Microsoft Outlook",
+    livePack: "outlook-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-outlook-shortcut",
+    name: "outlook-desktop-main",
+    rootPath: "/tmp/outlook-desktop-main",
+    profilePath: "/tmp/outlook-desktop-main/profile",
+    downloadsPath: "/tmp/outlook-desktop-main/downloads",
+    artifactsPath: "/tmp/outlook-desktop-main/artifacts",
+    scratchPath: "/tmp/outlook-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: initialWorldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {} as never
+  });
+  const context = await pack?.extractContext?.({
+    rule,
+    worldState: initialWorldState as never,
+    detection: detection as never,
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: { isConfigured: () => false }
+    } as never
+  });
+
+  assert.equal(replyShortcutUsed, true);
+  assert.equal(context?.inputs?.typeTarget, "Reply");
+  assert.equal(context?.inputs?.sendTarget, "Send");
 });
 
 test("boss browser pack can extract candidate thread context and build approval-first reply steps", async () => {

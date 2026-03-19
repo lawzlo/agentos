@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import path from "node:path";
 import type { ControlPlane } from "./control-plane.js";
 import { packDefaultReplyPolicy } from "./reply-policy.js";
 import type { SurfaceRegistry } from "./surface-registry.js";
@@ -107,11 +108,18 @@ function createWatchTask(rule: WatchRule): TaskRecord {
 }
 
 function profileAsWorkspace(rule: WatchRule, profile: WorkspaceProfile): WorkspaceRecord {
+  const browserProfilePath = String(
+    rule.taskInputs?.browserProfilePath ?? profile.metadata?.browserProfilePath ?? process.env.AGENTOS_BROWSER_PROFILE_PATH ?? ""
+  ).trim();
   return {
     id: profile.id,
     taskId: `watch-${rule.id}`,
     rootPath: profile.rootPath,
-    profilePath: profile.profilePath,
+    profilePath: browserProfilePath
+      ? path.isAbsolute(browserProfilePath)
+        ? browserProfilePath
+        : path.resolve(profile.rootPath, browserProfilePath)
+      : profile.profilePath,
     downloadsPath: profile.downloadsPath,
     artifactsPath: profile.artifactsPath,
     scratchPath: profile.scratchPath,
@@ -1659,6 +1667,46 @@ function buildMailReplySteps(surface: LivePackSurface): RuntimeStep[] {
   ];
 }
 
+function buildOutlookReplySteps(): RuntimeStep[] {
+  return [
+    {
+      label: "Open unread Outlook thread",
+      surface: "desktop",
+      action: "clickTarget",
+      params: { targetQuery: "{{openTarget}}" },
+      checkpoint: false
+    },
+    {
+      label: "Open Outlook reply composer",
+      surface: "desktop",
+      action: "pressKey",
+      params: { key: "r", modifiers: ["meta"] },
+      checkpoint: false
+    },
+    {
+      label: "Wait for Outlook composer",
+      surface: "desktop",
+      action: "waitForTarget",
+      params: { targetQuery: "{{typeTarget}}", timeoutMs: 5000 },
+      checkpoint: false
+    },
+    {
+      label: "Type Outlook reply",
+      surface: "desktop",
+      action: "typeIntoTarget",
+      params: { targetQuery: "{{typeTarget}}", text: "{{typeText}}", clear: false },
+      checkpoint: false
+    },
+    {
+      label: "Send Outlook reply",
+      surface: "desktop",
+      action: "clickTarget",
+      params: { targetQuery: "{{sendTarget}}" },
+      checkpoint: false
+    }
+  ];
+}
+
 function buildSlackReplySteps(surface: LivePackSurface): RuntimeStep[] {
   return [
     {
@@ -2338,8 +2386,12 @@ async function openMailThreadForContext({
   workspace,
   surfaceRegistry,
   surface,
-  detection
-}: LivePackExtractContextArgs & { surface: LivePackSurface }): Promise<WorldState | null> {
+  detection,
+  desktopReplyShortcut = null
+}: LivePackExtractContextArgs & {
+  surface: LivePackSurface;
+  desktopReplyShortcut?: { key: string; modifiers?: string[] } | null;
+}): Promise<WorldState | null> {
   const adapter = surfaceRegistry.get(surface);
   if (!adapter) {
     return null;
@@ -2384,13 +2436,46 @@ async function openMailThreadForContext({
     });
   }
 
-  return observeWatchSurface({
+  let threadState = await observeWatchSurface({
     rule,
     workspace,
     surfaceRegistry,
     controlPlane: {} as LivePackControlPlane,
     surface
   });
+
+  if (
+    surface === "desktop" &&
+    desktopReplyShortcut &&
+    !findOutlookComposeCandidate(threadState)
+  ) {
+    await adapter.act({
+      task: createWatchTask(rule),
+      step: {
+        id: `mail-reply-shortcut-${rule.id}`,
+        label: "Open mail reply composer",
+        surface,
+        action: "pressKey",
+        params: {
+          key: desktopReplyShortcut.key,
+          modifiers: desktopReplyShortcut.modifiers ?? []
+        }
+      },
+      workspace: profileAsWorkspace(rule, workspace),
+      traceId: null,
+      outputs: {}
+    });
+
+    threadState = await observeWatchSurface({
+      rule,
+      workspace,
+      surfaceRegistry,
+      controlPlane: {} as LivePackControlPlane,
+      surface
+    });
+  }
+
+  return threadState;
 }
 
 async function openBossCandidateForContext({
@@ -2729,7 +2814,11 @@ function createOutlookDesktopPack(): LivePack {
         controlPlane: {} as LivePackControlPlane,
         worldState: null,
         detection,
-        surface: "desktop"
+        surface: "desktop",
+        desktopReplyShortcut: {
+          key: "r",
+          modifiers: ["meta"]
+        }
       });
       if (!findOutlookComposeCandidate(threadState)) {
         return null;
@@ -2760,7 +2849,7 @@ function createOutlookDesktopPack(): LivePack {
         },
         taskSpec: {
           preferredSurface: "desktop",
-          steps: buildMailReplySteps("desktop")
+          steps: buildOutlookReplySteps()
         }
       };
     },

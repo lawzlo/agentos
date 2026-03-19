@@ -1113,6 +1113,83 @@ test("named workspace profiles are reusable across tasks", async () => {
   }
 });
 
+test("workspace profiles can reuse a user-managed browser profile path", async () => {
+  const dataDir = await createTempDir();
+  const externalProfilePath = path.join(dataDir, "shared-browser-profile");
+  const server = await startAgentServer({ dataDir });
+
+  try {
+    const createProfileResponse = await fetch(`${server.baseUrl}/workspace-profiles/main`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ metadata: { owner: "tester", browserProfilePath: externalProfilePath } })
+    });
+    const createProfilePayload = await createProfileResponse.json();
+    assert.equal(createProfilePayload.profile.profilePath, externalProfilePath);
+
+    const taskResponse = await fetch(`${server.baseUrl}/tasks`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        goal: "Use a reusable browser profile",
+        preferredSurface: "desktop",
+        workspaceName: "main",
+        steps: [
+          {
+            label: "Wait briefly",
+            surface: "desktop",
+            action: "wait",
+            params: { ms: 5 },
+            checkpoint: false
+          }
+        ]
+      })
+    });
+    const { task } = await taskResponse.json();
+    await waitForTask(server.baseUrl, task.id, (current) => current.status === "completed");
+
+    const workspace = server.app.controlPlane.store.getWorkspaceByTask(task.id);
+    assert.equal(workspace.profilePath, externalProfilePath);
+  } finally {
+    await server.close();
+  }
+});
+
+test("task inputs can override the managed browser profile path", async () => {
+  const dataDir = await createTempDir();
+  const server = await startAgentServer({ dataDir });
+
+  try {
+    const taskResponse = await fetch(`${server.baseUrl}/tasks`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        goal: "Use an explicit browser profile override",
+        preferredSurface: "desktop",
+        inputs: {
+          browserProfilePath: "shared-browser-profile"
+        },
+        steps: [
+          {
+            label: "Wait briefly",
+            surface: "desktop",
+            action: "wait",
+            params: { ms: 5 },
+            checkpoint: false
+          }
+        ]
+      })
+    });
+    const { task } = await taskResponse.json();
+    await waitForTask(server.baseUrl, task.id, (current) => current.status === "completed");
+
+    const workspace = server.app.controlPlane.store.getWorkspaceByTask(task.id);
+    assert.equal(workspace.profilePath, path.join(workspace.rootPath, "shared-browser-profile"));
+  } finally {
+    await server.close();
+  }
+});
+
 test("file inbox connector can ingest task files", async () => {
   const dataDir = await createTempDir();
   const server = await startAgentServer({ dataDir });

@@ -58,6 +58,11 @@ export class WorkspaceRepository {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(name)
       DO UPDATE SET
+        root_path = excluded.root_path,
+        profile_path = excluded.profile_path,
+        downloads_path = excluded.downloads_path,
+        artifacts_path = excluded.artifacts_path,
+        scratch_path = excluded.scratch_path,
         metadata = excluded.metadata,
         updated_at = excluded.updated_at
     `).run(
