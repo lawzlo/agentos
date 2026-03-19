@@ -57,6 +57,10 @@ function uniqueStrings(values: unknown[]) {
   return result;
 }
 
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
 function normalizeAppKey(value: unknown) {
   return String(value ?? "")
     .trim()
@@ -266,9 +270,18 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
   async observe({ task, workspace, traceId, label = "desktop-observe", recentActions = [] }) {
     const bridge = this.#requireBridge();
     const capture = await this.capture({ task, workspace, traceId, label });
-    const [frontmostApp, ocr, windows, permissions] = await Promise.all([
+    const [frontmostApp, ocrResult, windows, permissions] = await Promise.all([
       bridge.getFrontmostApp(),
-      bridge.ocrImage(capture.path),
+      bridge
+        .ocrImage(capture.path)
+        .then((result) => ({
+          observations: Array.isArray(result?.observations) ? result.observations : [],
+          error: null
+        }))
+        .catch((error) => ({
+          observations: [],
+          error: errorMessage(error)
+        })),
       typeof bridge.listWindows === "function"
         ? bridge.listWindows().catch(() => ({ windows: [] }))
         : { windows: [] },
@@ -280,8 +293,9 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
       typeof bridge.getAccessibilitySnapshot === "function" && frontmostApp?.appName
         ? await bridge.getAccessibilitySnapshot(String(frontmostApp.appName)).catch(() => null)
         : null;
+    const ocrError = typeof ocrResult?.error === "string" && ocrResult.error.trim() ? ocrResult.error.trim() : null;
     const ocrBlocks = filterOcrBlocksToFrontmostWindows({
-      ocrBlocks: normalizeOcrBlocks(ocr.observations ?? [], "desktop"),
+      ocrBlocks: normalizeOcrBlocks(ocrResult.observations ?? [], "desktop"),
       frontmostApp: (frontmostApp ?? null) as Record<string, unknown> | null,
       windows: Array.isArray(windows.windows) ? (windows.windows as Array<Record<string, unknown>>) : []
     });
@@ -299,14 +313,16 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
         ...frontmostApp,
         windows: windows.windows ?? [],
         permissions,
-        accessibility
+        accessibility,
+        ocrAvailable: !ocrError,
+        ocrError
       },
       capture,
       ocrBlocks,
       interactionCandidates,
       visibleText,
       recentActions: summarizeRecentActions(recentActions),
-      summary: `${frontmostApp.appName} with ${accessibilityCandidates.length} accessibility candidates and ${ocrBlocks.length} OCR observations across ${(windows.windows ?? []).length} windows`
+      summary: `${frontmostApp.appName} with ${accessibilityCandidates.length} accessibility candidates and ${ocrBlocks.length} OCR observations across ${(windows.windows ?? []).length} windows${ocrError ? ` (OCR unavailable: ${ocrError})` : ""}`
     });
   }
 

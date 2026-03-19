@@ -205,3 +205,28 @@ test("desktop observe filters OCR blocks to the frontmost app window", async () 
   assert.equal(worldState.visibleText.includes("Message"), true);
   assert.equal(worldState.visibleText.includes("# duration ms 49970"), false);
 });
+
+test("desktop observe falls back to accessibility when OCR fails", async () => {
+  const { adapter } = createObserveAdapter();
+  adapter.bridge.ocrImage = async () => {
+    throw new Error("ocr_image failed");
+  };
+
+  const worldState = (await adapter.observe({
+    task: { id: "task_test" },
+    workspace: {
+      id: "workspace_test",
+      artifactsPath: "/tmp",
+      rootPath: "/tmp"
+    },
+    traceId: "trace_test"
+  })) as WorldState;
+
+  assert.equal(worldState.appContext?.appName, "Slack");
+  assert.equal(worldState.appContext?.ocrAvailable, false);
+  assert.equal(worldState.appContext?.ocrError, "ocr_image failed");
+  assert.equal(worldState.ocrBlocks.length, 0);
+  assert.equal(worldState.interactionCandidates.some((candidate) => candidate.sourceHints?.source === "accessibility"), true);
+  assert.equal(worldState.visibleText.includes("Unread: Acme renewal"), true);
+  assert.equal(worldState.summary.includes("OCR unavailable: ocr_image failed"), true);
+});
