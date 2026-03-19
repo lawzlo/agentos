@@ -659,6 +659,23 @@ function isSlackDesktopForeground(worldState: WorldState | null): boolean {
   );
 }
 
+function isWeChatDesktopForeground(worldState: WorldState | null): boolean {
+  if (!worldState || worldState.surface !== "desktop") {
+    return true;
+  }
+
+  const appContext = (worldState.appContext ?? {}) as Record<string, unknown>;
+  const appName = String(appContext.appName ?? "").trim().toLowerCase();
+  if (appName.includes("wechat") || appName.includes("微信")) {
+    return true;
+  }
+
+  const windows = Array.isArray(appContext.windows) ? (appContext.windows as Array<Record<string, unknown>>) : [];
+  return windows.some((windowInfo) =>
+    String(windowInfo?.title ?? windowInfo?.windowName ?? "").toLowerCase().match(/wechat|微信/u)
+  );
+}
+
 function preferAccessibilityCandidates(worldState: WorldState | null): InteractionCandidate[] {
   const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
   const accessibilityCandidates = candidates.filter(
@@ -818,6 +835,12 @@ function scoreWeChatCandidate({
   if (candidate.role === "button" || candidate.role === "link" || candidate.role === "text") {
     score += 3;
   }
+  if (candidate.role === "row") {
+    score += 6;
+  }
+  if (String((candidate.sourceHints ?? {}).source ?? "").toLowerCase() === "accessibility") {
+    score += 12;
+  }
   if (UNREAD_PATTERN.test(hintText)) {
     score += 28;
   }
@@ -847,7 +870,7 @@ function scoreWeChatCandidate({
 }
 
 function findWeChatUnreadCandidate(worldState: WorldState | null): InteractionCandidate | null {
-  const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
+  const candidates = preferAccessibilityCandidates(worldState);
   const ranked = candidates
     .map((candidate) => ({ candidate, score: scoreWeChatCandidate({ candidate, worldState }) }))
     .filter((entry): entry is { candidate: InteractionCandidate; score: number } => Number.isFinite(entry.score))
@@ -856,7 +879,7 @@ function findWeChatUnreadCandidate(worldState: WorldState | null): InteractionCa
 }
 
 function pickWeChatComposeQuery(worldState: WorldState | null): string {
-  const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
+  const candidates = preferAccessibilityCandidates(worldState);
   const composeCandidate =
     candidates.find((candidate) => {
       const hintText = candidateHintText(candidate);
@@ -879,7 +902,7 @@ function pickWeChatComposeQuery(worldState: WorldState | null): string {
 }
 
 function pickWeChatSendQuery(worldState: WorldState | null): string {
-  const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
+  const candidates = preferAccessibilityCandidates(worldState);
   const sendCandidate =
     candidates.find((candidate) => {
       const hintText = candidateHintText(candidate);
@@ -1946,6 +1969,10 @@ function createWeChatPack(): LivePack {
       return observeWatchSurface({ ...args, surface: "desktop" });
     },
     async detectNewItems({ rule, worldState, dedupeState = {} }) {
+      if (!isWeChatDesktopForeground(worldState)) {
+        return null;
+      }
+
       const candidate = findWeChatUnreadCandidate(worldState);
       if (!candidate) {
         return null;

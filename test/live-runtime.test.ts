@@ -1635,10 +1635,10 @@ test("wechat desktop pack can detect unread conversations and build reply steps 
         surface: "desktop",
         kind: "text",
         text: "未读: 张三",
-        role: "text",
+        role: "button",
         bounds: { x: 10, y: 10, width: 160, height: 24, centerX: 90, centerY: 22 },
-        confidence: 0.88,
-        sourceHints: { source: "ocr" },
+        confidence: 0.98,
+        sourceHints: { source: "accessibility", ariaLabel: "未读会话 张三", actions: ["AXPress"] },
         isInteractive: true
       }
     ],
@@ -1655,10 +1655,10 @@ test("wechat desktop pack can detect unread conversations and build reply steps 
         surface: "desktop",
         kind: "text",
         text: "张三",
-        role: "text",
+        role: "button",
         bounds: { x: 10, y: 10, width: 160, height: 24, centerX: 90, centerY: 22 },
-        confidence: 0.88,
-        sourceHints: { source: "ocr" },
+        confidence: 0.98,
+        sourceHints: { source: "accessibility", ariaLabel: "张三", actions: ["AXPress"] },
         isInteractive: true
       },
       {
@@ -1668,8 +1668,8 @@ test("wechat desktop pack can detect unread conversations and build reply steps 
         text: "输入消息",
         role: "textbox",
         bounds: { x: 10, y: 210, width: 240, height: 32, centerX: 130, centerY: 226 },
-        confidence: 0.84,
-        sourceHints: { source: "ocr", placeholder: "输入消息" },
+        confidence: 0.98,
+        sourceHints: { source: "accessibility", placeholder: "输入消息", actions: ["AXPress"] },
         isInteractive: true
       },
       {
@@ -1679,8 +1679,8 @@ test("wechat desktop pack can detect unread conversations and build reply steps 
         text: "发送",
         role: "button",
         bounds: { x: 260, y: 210, width: 60, height: 32, centerX: 290, centerY: 226 },
-        confidence: 0.84,
-        sourceHints: { source: "ocr" },
+        confidence: 0.98,
+        sourceHints: { source: "accessibility", actions: ["AXPress"] },
         isInteractive: true
       }
     ],
@@ -1746,6 +1746,8 @@ test("wechat desktop pack can detect unread conversations and build reply steps 
   });
   assert.equal(detection?.summary, "张三");
   assert.equal(detection?.metadata?.threadKey, "张三");
+  const openCandidate = detection?.metadata?.openCandidate as { sourceHints?: { source?: string } } | undefined;
+  assert.equal(openCandidate?.sourceHints?.source, "accessibility");
 
   const context = await pack?.extractContext?.({
     rule,
@@ -1765,6 +1767,83 @@ test("wechat desktop pack can detect unread conversations and build reply steps 
   assert.equal(Array.isArray(context?.taskSpec?.steps), true);
   assert.equal(context?.taskSpec?.steps?.[0]?.action, "clickTarget");
   assert.equal(context?.taskSpec?.steps?.[2]?.params?.text, "{{typeText}}");
+});
+
+test("wechat desktop pack ignores detections when WeChat is not the foreground app", async () => {
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({})
+  });
+  const pack = registry.get("wechat-desktop");
+  const rule: WatchRule = {
+    id: "watch-wechat-background",
+    goal: "Always watch WeChat and reply to unread conversations",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "wechat-desktop-main",
+    skillName: null,
+    appTarget: "WeChat",
+    livePack: "wechat-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-wechat-background",
+    name: "wechat-desktop-main",
+    rootPath: "/tmp/wechat-desktop-main",
+    profilePath: "/tmp/wechat-desktop-main/profile",
+    downloadsPath: "/tmp/wechat-desktop-main/downloads",
+    artifactsPath: "/tmp/wechat-desktop-main/artifacts",
+    scratchPath: "/tmp/wechat-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: {
+      version: 1,
+      surface: "desktop",
+      workspaceId: "workspace-terminal",
+      appContext: {
+        appName: "Terminal",
+        windows: [{ title: "Terminal" }]
+      },
+      capture: null,
+      ocrBlocks: [],
+      interactionCandidates: [
+        {
+          id: "thread-zhangsan",
+          surface: "desktop",
+          kind: "text",
+          text: "未读: 张三",
+          role: "button",
+          bounds: { x: 10, y: 10, width: 160, height: 24, centerX: 90, centerY: 22 },
+          confidence: 0.98,
+          sourceHints: { source: "accessibility", ariaLabel: "未读会话 张三", actions: ["AXPress"] },
+          isInteractive: true
+        }
+      ],
+      visibleText: "Terminal\nnpm test\n未读: 张三",
+      recentActions: [],
+      summary: "Terminal",
+      timestamp: new Date().toISOString()
+    } as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {} as never
+  });
+
+  assert.equal(detection, null);
 });
 
 test("boss browser pack can extract candidate thread context and build approval-first reply steps", async () => {
