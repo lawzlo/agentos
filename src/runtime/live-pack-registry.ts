@@ -32,6 +32,21 @@ interface DesktopSurfaceReadinessProbe {
   }) => Promise<{ ready: boolean }>;
 }
 
+function defaultDesktopAppTargetForLivePack(livePack: string | null | undefined): string | null {
+  switch (String(livePack ?? "")) {
+    case "slack-desktop":
+      return "Slack";
+    case "wechat-desktop":
+      return "WeChat";
+    case "outlook-desktop":
+      return "Microsoft Outlook";
+    case "generic-mail-desktop":
+      return "Mail";
+    default:
+      return null;
+  }
+}
+
 interface LivePackActivationArgs {
   rule: WatchRule;
   workspace: WorkspaceProfile;
@@ -1951,14 +1966,17 @@ async function observeWatchSurface({
     return null;
   }
 
-  if (surface === "desktop" && rule.appTarget) {
+  const effectiveDesktopAppTarget =
+    surface === "desktop" ? (rule.appTarget ?? defaultDesktopAppTargetForLivePack(rule.livePack)) : null;
+
+  if (surface === "desktop" && effectiveDesktopAppTarget) {
     const watchTask = createWatchTask(rule);
     const watchWorkspace = profileAsWorkspace(rule, workspace);
     const focusStep = {
       id: `watch-refocus-${rule.id}`,
       action: "focusApp",
       surface,
-      params: { name: rule.appTarget }
+      params: { name: effectiveDesktopAppTarget }
     };
     if (typeof (adapter as { focus?: unknown }).focus === "function") {
       await (adapter as { focus: (args: unknown) => Promise<unknown> })
@@ -1983,7 +2001,7 @@ async function observeWatchSurface({
 
     if (typeof (adapter as DesktopSurfaceReadinessProbe).waitForAppReady === "function") {
       const readiness = await (adapter as DesktopSurfaceReadinessProbe).waitForAppReady?.({
-        appName: rule.appTarget,
+        appName: effectiveDesktopAppTarget,
         timeoutMs: desktopRequireAccessibility ? 1800 : 1200,
         pollMs: 150,
         stablePolls: 2,

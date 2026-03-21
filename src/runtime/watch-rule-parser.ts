@@ -47,6 +47,29 @@ export interface NormalizedWatchRule {
   lastError: string | null;
 }
 
+function defaultAppTargetForLivePack(livePack: string, preferredSurface: "browser" | "desktop", appTarget: string | null | undefined): string | null {
+  if (preferredSurface !== "desktop") {
+    return appTarget ?? null;
+  }
+
+  if (appTarget) {
+    return appTarget;
+  }
+
+  switch (livePack) {
+    case "slack-desktop":
+      return "Slack";
+    case "wechat-desktop":
+      return "WeChat";
+    case "outlook-desktop":
+      return "Microsoft Outlook";
+    case "generic-mail-desktop":
+      return "Mail";
+    default:
+      return null;
+  }
+}
+
 function clampPollInterval(value?: number | string): number {
   const interval = Number(value ?? 15000);
   if (!Number.isFinite(interval)) {
@@ -141,13 +164,13 @@ function inferPack(
         ? "browser"
         : input.livePack.endsWith("-browser")
           ? "browser"
-        : input.livePack.endsWith("-desktop")
+          : input.livePack.endsWith("-desktop")
           ? "desktop"
           : (input.preferredSurface ?? "desktop");
     return {
       livePack: input.livePack,
       preferredSurface: inferredSurface,
-      appTarget: input.appTarget ?? null,
+      appTarget: defaultAppTargetForLivePack(input.livePack, inferredSurface, input.appTarget),
       triggerTexts: input.watchProfile?.triggerTexts ?? []
     };
   }

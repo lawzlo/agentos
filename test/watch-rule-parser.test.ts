@@ -80,6 +80,26 @@ test("normalizeWatchRule keeps explicit livePack and clamps poll interval", asyn
   assert.equal(watch.id, undefined);
 });
 
+test("normalizeWatchRule assigns default desktop app targets for explicit desktop live packs", async () => {
+  const wechat = normalizeWatchRule({
+    goal: "Keep an eye on WeChat",
+    livePack: "wechat-desktop"
+  });
+  const slack = normalizeWatchRule({
+    goal: "Keep an eye on Slack",
+    livePack: "slack-desktop"
+  });
+  const outlook = normalizeWatchRule({
+    goal: "Keep an eye on Outlook",
+    livePack: "outlook-desktop"
+  });
+
+  assert.equal(wechat.preferredSurface, "desktop");
+  assert.equal(wechat.appTarget, "WeChat");
+  assert.equal(slack.appTarget, "Slack");
+  assert.equal(outlook.appTarget, "Microsoft Outlook");
+});
+
 test("normalizeWatchRule uses model capability to infer autonomous execution mode", async () => {
   const watch = normalizeWatchRule(
     {

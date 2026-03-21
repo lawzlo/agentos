@@ -2221,6 +2221,74 @@ test("wechat desktop pack skips inbox observation until accessibility candidates
   assert.equal(observeCalls, 0);
 });
 
+test("wechat desktop pack derives the default app target when a saved rule omits it", async () => {
+  let readinessAppName: string | null = null;
+  const fakeSurface = {
+    async waitForAppReady({ appName }: { appName: string }) {
+      readinessAppName = appName;
+      return {
+        ready: false,
+        frontmostApp: appName,
+        accessibilityCandidateCount: 0
+      };
+    },
+    async observe() {
+      throw new Error("observe should not run when readiness fails");
+    },
+    async act() {
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("wechat-desktop");
+  const rule: WatchRule = {
+    id: "watch-wechat-implicit-target",
+    goal: "Always watch WeChat and reply to unread conversations",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "wechat-desktop-main",
+    skillName: null,
+    appTarget: null,
+    livePack: "wechat-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-wechat-implicit-target",
+    name: "wechat-desktop-main",
+    rootPath: "/tmp/wechat-desktop-main",
+    profilePath: "/tmp/wechat-desktop-main/profile",
+    downloadsPath: "/tmp/wechat-desktop-main/downloads",
+    artifactsPath: "/tmp/wechat-desktop-main/artifacts",
+    scratchPath: "/tmp/wechat-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const worldState = await pack?.observeInbox?.({
+    rule,
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {} as never
+  });
+
+  assert.equal(worldState, null);
+  assert.equal(readinessAppName, "WeChat");
+});
+
 test("outlook desktop pack can detect unread mail and build reply steps from a desktop world state", async () => {
   let opened = false;
   const initialWorldState = {
