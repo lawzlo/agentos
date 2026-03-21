@@ -832,10 +832,19 @@ export async function startAgentServer({ dataDir, ...overrides }) {
 export async function waitForTask(baseUrl, taskId, matcher, timeoutMs = DEFAULT_TASK_WAIT_TIMEOUT_MS) {
   const started = Date.now();
   let lastTask = null;
+  let lastError: unknown = null;
 
   while (Date.now() - started < timeoutMs) {
-    const response = await fetch(`${baseUrl}/tasks/${taskId}`);
-    const payload = await response.json();
+    let payload = null;
+    try {
+      const response = await fetch(`${baseUrl}/tasks/${taskId}`);
+      payload = await response.json();
+      lastError = null;
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, TASK_WAIT_INTERVAL_MS));
+      continue;
+    }
     if (!payload || !payload.task) {
       await new Promise((resolve) => setTimeout(resolve, TASK_WAIT_INTERVAL_MS));
       continue;
@@ -848,7 +857,7 @@ export async function waitForTask(baseUrl, taskId, matcher, timeoutMs = DEFAULT_
   }
 
   throw new Error(
-    `Timed out waiting for task ${taskId} after ${timeoutMs}ms (lastStatus=${lastTask?.status ?? "unknown"})`
+    `Timed out waiting for task ${taskId} after ${timeoutMs}ms (lastStatus=${lastTask?.status ?? "unknown"}, lastError=${lastError instanceof Error ? lastError.message : "none"})`
   );
 }
 

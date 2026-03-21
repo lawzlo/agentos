@@ -287,3 +287,81 @@ test("collectDesktopProbe can analyze a target app even when the current frontmo
   assert.equal(report.packAnalysis?.unreadCandidate?.text, "未读: 李四");
   assert.equal(report.packAnalysis?.composeCandidate?.text, "输入消息");
 });
+
+test("collectDesktopProbe falls back to OCR world state when target app inspection has no usable signals", async () => {
+  const rootPath = await createTempDir("agentos-desktop-probe-");
+  const workspace = createWorkspace(rootPath);
+  const report = await collectDesktopProbe(
+    {
+      appName: "WeChat",
+      packName: "wechat-desktop",
+      workspaceName: workspace.name,
+      sampleLimit: 4,
+      timeoutMs: 800,
+      requireAccessibility: true,
+      waitReady: false
+    },
+    {
+      workspace,
+      adapter: {
+        async focus() {
+          return { focused: "WeChat" };
+        },
+        async observe() {
+          return {
+            version: 1,
+            surface: "desktop",
+            workspaceId: workspace.id,
+            appContext: {
+              appName: "WeChat",
+              windows: [
+                {
+                  ownerName: "WeChat",
+                  windowName: "WeChat",
+                  bounds: { x: 0, y: 0, width: 900, height: 700, centerX: 450, centerY: 350 }
+                }
+              ],
+              accessibilityCandidateCount: 0,
+              ocrAvailable: true,
+              ocrError: null
+            },
+            capture: null,
+            ocrBlocks: [],
+            interactionCandidates: [
+              {
+                id: "wechat-thread-ocr",
+                surface: "desktop",
+                kind: "text",
+                text: "Official Accounts",
+                role: "text",
+                bounds: { x: 120, y: 140, width: 180, height: 28, centerX: 210, centerY: 154 },
+                confidence: 0.97,
+                sourceHints: { source: "ocr" },
+                isInteractive: true
+              }
+            ],
+            visibleText: "Official Accounts\n03/11\nhttps://apps.apple.co..\n",
+            recentActions: [],
+            summary: "WeChat OCR capture",
+            timestamp: new Date().toISOString()
+          };
+        },
+        async inspectApp() {
+          return {
+            targetAppName: "WeChat",
+            frontmostApp: "WeChat",
+            accessibility: { elements: [] },
+            accessibilityCandidateCount: 0,
+            interactionCandidates: [],
+            visibleText: ""
+          };
+        },
+        async shutdown() {}
+      }
+    }
+  );
+
+  assert.equal(report.packAnalysis?.foreground, true);
+  assert.equal(report.packAnalysis?.unreadCandidate?.text, "Official Accounts");
+  assert.equal(report.packAnalysis?.topUnreadCandidates[0]?.text, "Official Accounts");
+});

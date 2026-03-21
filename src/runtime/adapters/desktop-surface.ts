@@ -172,6 +172,36 @@ function filterOcrBlocksToFrontmostWindows({
   return filtered.length ? filtered : ocrBlocks;
 }
 
+function matchingDesktopWindowsForApp(windows: Array<Record<string, unknown>>, appName: unknown) {
+  const aliases = desktopAppAliases(appName);
+  if (!aliases.length) {
+    return [];
+  }
+
+  return windows.filter((windowInfo) => {
+    const ownerName = normalizeAppKey(windowInfo.ownerName);
+    const windowName = normalizeAppKey(windowInfo.windowName);
+    return aliases.some((alias) => ownerName.includes(alias) || windowName.includes(alias));
+  });
+}
+
+function pickPrimaryWindowNumber(windows: Array<Record<string, unknown>>, appName: unknown) {
+  const matching = matchingDesktopWindowsForApp(windows, appName);
+  const ranked = matching
+    .map((windowInfo) => {
+      const bounds = (windowInfo.bounds ?? {}) as Record<string, unknown>;
+      const width = Number(bounds.width ?? 0);
+      const height = Number(bounds.height ?? 0);
+      return {
+        windowInfo,
+        area: Math.max(0, width) * Math.max(0, height)
+      };
+    })
+    .sort((left, right) => right.area - left.area);
+  const windowNumber = Number(ranked[0]?.windowInfo?.windowNumber ?? NaN);
+  return Number.isFinite(windowNumber) && windowNumber > 0 ? windowNumber : null;
+}
+
 function normalizeAccessibilityRole(role: unknown, subrole: unknown) {
   const roleKey = String(role ?? "").trim().toLowerCase();
   const subroleKey = String(subrole ?? "").trim().toLowerCase();
@@ -474,39 +504,12 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
 
   async observe({ task, workspace, traceId, label = "desktop-observe", recentActions = [] }) {
     const bridge = this.#requireBridge();
-    let captureError: string | null = null;
-    const capture = await this.capture({ task, workspace, traceId, label }).catch((error: unknown) => {
-      captureError = errorMessage(error);
-      return null;
-    });
-    const [frontmostApp, ocrResult, windows, permissions] = await Promise.all([
+    const [frontmostApp, windows, permissions] = await Promise.all([
       this.#withTimeout(
         bridge.getFrontmostApp(),
         this.timeouts.frontmostMs,
         () => ({ appName: "" })
       ),
-      capture?.path
-        ? this.#withTimeout(
-        bridge
-        .ocrImage(capture.path)
-        .then((result) => ({
-          observations: Array.isArray(result?.observations) ? result.observations : [],
-          error: null
-        }))
-        .catch((error) => ({
-          observations: [],
-          error: errorMessage(error)
-        })),
-        this.timeouts.ocrMs,
-        () => ({
-          observations: [],
-          error: `ocr_image timed out after ${this.timeouts.ocrMs}ms`
-        })
-      )
-        : Promise.resolve({
-            observations: [],
-            error: captureError ? `capture unavailable: ${captureError}` : "capture unavailable"
-          }),
       this.#withTimeout(
       typeof bridge.listWindows === "function"
         ? bridge.listWindows().catch(() => ({ windows: [] }))
@@ -522,6 +525,35 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
         () => null
       )
     ]);
+    const windowsList = Array.isArray(windows.windows) ? (windows.windows as Array<Record<string, unknown>>) : [];
+    const windowNumber = pickPrimaryWindowNumber(windowsList, frontmostApp?.appName);
+    let captureError: string | null = null;
+    const capture = await this.capture({ task, workspace, traceId, label, windowNumber }).catch((error: unknown) => {
+      captureError = errorMessage(error);
+      return null;
+    });
+    const ocrResult = capture?.path
+      ? await this.#withTimeout(
+          bridge
+            .ocrImage(capture.path)
+            .then((result) => ({
+              observations: Array.isArray(result?.observations) ? result.observations : [],
+              error: null
+            }))
+            .catch((error) => ({
+              observations: [],
+              error: errorMessage(error)
+            })),
+          this.timeouts.ocrMs,
+          () => ({
+            observations: [],
+            error: `ocr_image timed out after ${this.timeouts.ocrMs}ms`
+          })
+        )
+      : {
+          observations: [],
+          error: captureError ? `capture unavailable: ${captureError}` : "capture unavailable"
+        };
     const accessibility =
       typeof bridge.getAccessibilitySnapshot === "function" && frontmostApp?.appName
         ? await this.#withTimeout(
@@ -534,7 +566,7 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
     const ocrBlocks = filterOcrBlocksToFrontmostWindows({
       ocrBlocks: normalizeOcrBlocks(ocrResult.observations ?? [], "desktop"),
       frontmostApp: (frontmostApp ?? null) as Record<string, unknown> | null,
-      windows: Array.isArray(windows.windows) ? (windows.windows as Array<Record<string, unknown>>) : []
+      windows: windowsList
     });
     const accessibilityCandidates = createAccessibilityCandidates(accessibility, "desktop");
     const interactionCandidates = dedupeInteractionCandidates([
@@ -548,7 +580,8 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
       workspaceId: workspace.id,
       appContext: {
         ...frontmostApp,
-        windows: windows.windows ?? [],
+        windows: windowsList,
+        captureWindowNumber: windowNumber,
         permissions,
         accessibility,
         accessibilityCandidateCount: accessibilityCandidates.length,
@@ -566,17 +599,17 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
     });
   }
 
-  async capture({ task, workspace, traceId, label = "desktop-capture" }) {
+  async capture({ task, workspace, traceId, label = "desktop-capture", windowNumber = null }) {
     const bridge = this.#requireBridge();
     const filePath = path.join(workspace.artifactsPath, `${Date.now()}-${label.replaceAll(/\s+/g, "-")}.png`);
-    await this.#withTimeout(bridge.captureScreen(filePath), this.timeouts.captureMs, null);
+    await this.#withTimeout(bridge.captureScreen(filePath, windowNumber), this.timeouts.captureMs, null);
     return this.artifactStore.registerExistingFile({
       taskId: task.id,
       traceId,
       kind: "screenshot",
       label,
       filePath,
-      metadata: { surface: "desktop" }
+      metadata: { surface: "desktop", ...(windowNumber ? { windowNumber } : {}) }
     });
   }
 

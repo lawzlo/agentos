@@ -2061,6 +2061,276 @@ test("wechat desktop pack can detect unread conversations and build reply steps 
   assert.equal(context?.taskSpec?.steps?.[2]?.params?.text, "{{typeText}}");
 });
 
+test("wechat desktop pack can fall back to OCR-only detections when accessibility candidates are unavailable", async () => {
+  let opened = false;
+  const initialWorldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-wechat-ocr",
+    appContext: {
+      appName: "WeChat",
+      windows: [
+        {
+          ownerName: "WeChat",
+          windowName: "WeChat",
+          bounds: { x: 0, y: 0, width: 900, height: 700, centerX: 450, centerY: 350 }
+        }
+      ],
+      accessibilityCandidateCount: 0
+    },
+    capture: null,
+    ocrBlocks: [],
+    interactionCandidates: [
+      {
+        id: "ocr-thread-lisi",
+        surface: "desktop",
+        kind: "text",
+        text: "李四",
+        role: "text",
+        bounds: { x: 80, y: 140, width: 120, height: 30, centerX: 140, centerY: 155 },
+        confidence: 0.94,
+        sourceHints: { source: "ocr" },
+        isInteractive: true
+      }
+    ],
+    visibleText: "微信\n最近聊天\n未读\n李四\n客户: 方便的话回个电话\n",
+    recentActions: [],
+    summary: "WeChat OCR unread list",
+    timestamp: new Date().toISOString()
+  };
+  const threadWorldState = {
+    ...initialWorldState,
+    interactionCandidates: [
+      {
+        id: "ocr-thread-lisi",
+        surface: "desktop",
+        kind: "text",
+        text: "李四",
+        role: "text",
+        bounds: { x: 80, y: 140, width: 120, height: 30, centerX: 140, centerY: 155 },
+        confidence: 0.94,
+        sourceHints: { source: "ocr" },
+        isInteractive: true
+      },
+      {
+        id: "ocr-compose",
+        surface: "desktop",
+        kind: "text",
+        text: "输入",
+        role: "text",
+        bounds: { x: 280, y: 630, width: 100, height: 24, centerX: 330, centerY: 642 },
+        confidence: 0.92,
+        sourceHints: { source: "ocr" },
+        isInteractive: true
+      },
+      {
+        id: "ocr-send",
+        surface: "desktop",
+        kind: "text",
+        text: "发送",
+        role: "text",
+        bounds: { x: 760, y: 632, width: 70, height: 24, centerX: 795, centerY: 644 },
+        confidence: 0.95,
+        sourceHints: { source: "ocr" },
+        isInteractive: true
+      }
+    ],
+    visibleText: "微信\n李四\n客户: 方便的话回个电话\n我: 我晚点给你回电。\n输入\n发送"
+  };
+  const fakeSurface = {
+    async observe() {
+      return opened ? threadWorldState : initialWorldState;
+    },
+    async act({ step }) {
+      if (step.action === "clickTarget") {
+        opened = true;
+      }
+      return { ok: true };
+    },
+    async waitForAppReady() {
+      return {
+        ready: true,
+        frontmostApp: "WeChat",
+        accessibilityCandidateCount: 0
+      };
+    },
+    async focus() {
+      return { focused: "WeChat" };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("wechat-desktop");
+  const rule: WatchRule = {
+    id: "watch-wechat-desktop-ocr",
+    goal: "Always watch WeChat and reply to unread conversations",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "wechat-desktop-main",
+    skillName: null,
+    appTarget: "WeChat",
+    livePack: "wechat-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-wechat-ocr",
+    name: "wechat-desktop-main",
+    rootPath: "/tmp/wechat-desktop-main",
+    profilePath: "/tmp/wechat-desktop-main/profile",
+    downloadsPath: "/tmp/wechat-desktop-main/downloads",
+    artifactsPath: "/tmp/wechat-desktop-main/artifacts",
+    scratchPath: "/tmp/wechat-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: initialWorldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {} as never
+  });
+  assert.equal(detection?.summary, "李四");
+
+  const context = await pack?.extractContext?.({
+    rule,
+    worldState: initialWorldState as never,
+    detection: detection as never,
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: { isConfigured: () => false }
+    } as never
+  });
+  assert.equal(context?.inputs?.typeTarget, "输入");
+  assert.equal(context?.inputs?.sendTarget, "发送");
+  assert.equal(context?.metadata?.threadKey, "李四");
+});
+
+test("wechat desktop OCR scoring downranks dates and URL snippets in the conversation list", async () => {
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: {} as never
+    })
+  });
+  const pack = registry.get("wechat-desktop");
+  const rule: WatchRule = {
+    id: "watch-wechat-desktop-ocr-ranking",
+    goal: "Always watch WeChat and reply to unread conversations",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "wechat-desktop-main",
+    skillName: null,
+    appTarget: "WeChat",
+    livePack: "wechat-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-wechat-ocr-ranking",
+    name: "wechat-desktop-main",
+    rootPath: "/tmp/wechat-desktop-main",
+    profilePath: "/tmp/wechat-desktop-main/profile",
+    downloadsPath: "/tmp/wechat-desktop-main/downloads",
+    artifactsPath: "/tmp/wechat-desktop-main/artifacts",
+    scratchPath: "/tmp/wechat-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const worldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-wechat-ocr-ranking",
+    appContext: {
+      appName: "WeChat",
+      windows: [
+        {
+          ownerName: "WeChat",
+          windowName: "WeChat",
+          bounds: { x: 0, y: 0, width: 900, height: 700, centerX: 450, centerY: 350 }
+        }
+      ],
+      accessibilityCandidateCount: 0
+    },
+    capture: null,
+    ocrBlocks: [],
+    interactionCandidates: [
+      {
+        id: "ocr-thread-official-accounts",
+        surface: "desktop",
+        kind: "text",
+        text: "Official Accounts",
+        role: "text",
+        bounds: { x: 120, y: 120, width: 180, height: 28, centerX: 210, centerY: 134 },
+        confidence: 0.95,
+        sourceHints: { source: "ocr" },
+        isInteractive: true
+      },
+      {
+        id: "ocr-date",
+        surface: "desktop",
+        kind: "text",
+        text: "03/11",
+        role: "text",
+        bounds: { x: 360, y: 120, width: 60, height: 24, centerX: 390, centerY: 132 },
+        confidence: 0.98,
+        sourceHints: { source: "ocr" },
+        isInteractive: true
+      },
+      {
+        id: "ocr-url",
+        surface: "desktop",
+        kind: "text",
+        text: "https://apps.apple.co..",
+        role: "text",
+        bounds: { x: 140, y: 160, width: 240, height: 24, centerX: 260, centerY: 172 },
+        confidence: 0.95,
+        sourceHints: { source: "ocr" },
+        isInteractive: true
+      }
+    ],
+    visibleText: "Official Accounts\n03/11\nhttps://apps.apple.co..\n",
+    recentActions: [],
+    summary: "WeChat OCR capture",
+    timestamp: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: worldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {} as never
+  });
+
+  assert.equal(detection?.summary, "Official Accounts");
+});
+
 test("wechat desktop pack ignores detections when WeChat is not the foreground app", async () => {
   const registry = new LivePackRegistry({
     surfaceRegistry: new SurfaceRegistry({})
@@ -2138,7 +2408,7 @@ test("wechat desktop pack ignores detections when WeChat is not the foreground a
   assert.equal(detection, null);
 });
 
-test("wechat desktop pack skips inbox observation until accessibility candidates are ready", async () => {
+test("wechat desktop pack can continue observing even when accessibility candidates are missing", async () => {
   let observeCalls = 0;
   const fakeSurface = {
     async waitForAppReady() {
@@ -2217,8 +2487,8 @@ test("wechat desktop pack skips inbox observation until accessibility candidates
     controlPlane: {} as never
   });
 
-  assert.equal(worldState, null);
-  assert.equal(observeCalls, 0);
+  assert.equal(worldState?.appContext?.appName, "WeChat");
+  assert.equal(observeCalls, 1);
 });
 
 test("wechat desktop pack derives the default app target when a saved rule omits it", async () => {
@@ -2233,7 +2503,23 @@ test("wechat desktop pack derives the default app target when a saved rule omits
       };
     },
     async observe() {
-      throw new Error("observe should not run when readiness fails");
+      return {
+        version: 1,
+        surface: "desktop",
+        workspaceId: "workspace-wechat-implicit-target",
+        appContext: {
+          appName: "WeChat",
+          windows: [{ title: "WeChat" }],
+          accessibilityCandidateCount: 0
+        },
+        capture: null,
+        ocrBlocks: [],
+        interactionCandidates: [],
+        visibleText: "微信",
+        recentActions: [],
+        summary: "WeChat",
+        timestamp: new Date().toISOString()
+      };
     },
     async act() {
       return { ok: true };
@@ -2285,7 +2571,7 @@ test("wechat desktop pack derives the default app target when a saved rule omits
     controlPlane: {} as never
   });
 
-  assert.equal(worldState, null);
+  assert.equal(worldState?.appContext?.appName, "WeChat");
   assert.equal(readinessAppName, "WeChat");
 });
 

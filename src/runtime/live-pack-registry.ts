@@ -956,6 +956,42 @@ function isWeChatUiChrome(text: string): boolean {
   return WECHAT_UI_CHROME_PATTERN.test(String(text ?? "").trim());
 }
 
+function looksLikeDateOrTimeToken(value: string): boolean {
+  const normalized = String(value ?? "").trim();
+  if (!normalized) {
+    return false;
+  }
+
+  return (
+    /^\d{1,4}[/:.-]\d{1,2}(?:[/:.-]\d{1,4})?$/u.test(normalized)
+    || /^\d{1,2}:\d{2}(?::\d{2})?$/u.test(normalized)
+  );
+}
+
+function looksLikeUrlOrDomainToken(value: string): boolean {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+
+  return (
+    normalized.includes("http://")
+    || normalized.includes("https://")
+    || normalized.includes("www.")
+    || /\b[a-z0-9-]+\.(?:com|cn|net|org|io|co|app)\b/u.test(normalized)
+  );
+}
+
+function symbolNoiseRatio(value: string): number {
+  const normalized = String(value ?? "").trim();
+  if (!normalized) {
+    return 1;
+  }
+
+  const signalCount = (normalized.match(/[\p{L}\p{N}\u4e00-\u9fff]/gu) ?? []).length;
+  return Math.max(0, normalized.length - signalCount) / normalized.length;
+}
+
 function scoreWeChatCandidate({
   candidate,
   worldState
@@ -969,6 +1005,7 @@ function scoreWeChatCandidate({
     return null;
   }
 
+  const source = String((candidate.sourceHints ?? {}).source ?? "").toLowerCase();
   let score = candidate.isInteractive ? 12 : 4;
   if (candidate.role === "button" || candidate.role === "link" || candidate.role === "text") {
     score += 3;
@@ -976,8 +1013,11 @@ function scoreWeChatCandidate({
   if (candidate.role === "row") {
     score += 6;
   }
-  if (String((candidate.sourceHints ?? {}).source ?? "").toLowerCase() === "accessibility") {
+  if (source === "accessibility") {
     score += 12;
+  }
+  if (source === "ocr") {
+    score += 6;
   }
   if (UNREAD_PATTERN.test(hintText)) {
     score += 28;
@@ -1003,14 +1043,50 @@ function scoreWeChatCandidate({
   if (summary.length >= 2 && summary.length <= 48) {
     score += 3;
   }
+  if (looksLikeDateOrTimeToken(summary)) {
+    score -= 16;
+  }
+  if (looksLikeUrlOrDomainToken(summary)) {
+    score -= 18;
+  }
+  if (symbolNoiseRatio(summary) >= 0.35) {
+    score -= 10;
+  }
+  if (/[\p{L}\u4e00-\u9fff]/u.test(summary) && !looksLikeUrlOrDomainToken(summary) && !looksLikeDateOrTimeToken(summary)) {
+    score += 6;
+  }
+  if (source === "ocr") {
+    const windows = Array.isArray((worldState?.appContext as Record<string, unknown> | null)?.windows)
+      ? (((worldState?.appContext as Record<string, unknown>).windows as Array<Record<string, unknown>>).filter((entry) => {
+          const owner = String(entry?.ownerName ?? "").toLowerCase();
+          return owner.includes("wechat") || owner.includes("微信");
+        }))
+      : [];
+    const primaryWindow = windows[0] ?? null;
+    const bounds = candidate.bounds ?? null;
+    const windowBounds = (primaryWindow?.bounds ?? null) as InteractionCandidate["bounds"] | null;
+    if (bounds && windowBounds) {
+      const relativeX = Number(bounds.centerX ?? 0) - Number(windowBounds.x ?? 0);
+      const relativeY = Number(bounds.centerY ?? 0) - Number(windowBounds.y ?? 0);
+      const windowWidth = Math.max(1, Number(windowBounds.width ?? 1));
+      const windowHeight = Math.max(1, Number(windowBounds.height ?? 1));
+      if (relativeX >= 0 && relativeX <= windowWidth * 0.45) {
+        score += 12;
+      }
+      if (relativeY >= 0 && relativeY <= windowHeight * 0.82) {
+        score += 4;
+      }
+      if (relativeY >= windowHeight * 0.86) {
+        score -= 10;
+      }
+    }
+  }
 
   return score;
 }
 
 function findWeChatUnreadCandidate(worldState: WorldState | null): InteractionCandidate | null {
-  const candidates = conversationCandidates(worldState, {
-    desktopRequiresAccessibility: worldState?.surface === "desktop"
-  });
+  const candidates = conversationCandidates(worldState);
   const ranked = candidates
     .map((candidate) => ({ candidate, score: scoreWeChatCandidate({ candidate, worldState }) }))
     .filter((entry): entry is { candidate: InteractionCandidate; score: number } => Number.isFinite(entry.score))
@@ -1019,9 +1095,7 @@ function findWeChatUnreadCandidate(worldState: WorldState | null): InteractionCa
 }
 
 function findWeChatComposeCandidate(worldState: WorldState | null): InteractionCandidate | null {
-  const candidates = conversationCandidates(worldState, {
-    desktopRequiresAccessibility: worldState?.surface === "desktop"
-  });
+  const candidates = conversationCandidates(worldState);
   return (
     candidates.find((candidate) => {
       const hintText = candidateHintText(candidate);
@@ -1049,13 +1123,14 @@ function pickWeChatComposeQuery(worldState: WorldState | null): string {
 }
 
 function findWeChatSendCandidate(worldState: WorldState | null): InteractionCandidate | null {
-  const candidates = conversationCandidates(worldState, {
-    desktopRequiresAccessibility: worldState?.surface === "desktop"
-  });
+  const candidates = conversationCandidates(worldState);
   return (
     candidates.find((candidate) => {
       const hintText = candidateHintText(candidate);
-      return candidate.role === "button" && (SEND_PATTERN.test(hintText) || SEND_PATTERN.test(candidate.text));
+      return (
+        (candidate.role === "button" || String((candidate.sourceHints ?? {}).source ?? "").toLowerCase() === "ocr") &&
+        (SEND_PATTERN.test(hintText) || SEND_PATTERN.test(candidate.text))
+      );
     }) ?? null
   );
 }
@@ -1865,7 +1940,7 @@ export function analyzeDesktopConversationPack(
   }
 
   if (normalizedPackName === "wechat-desktop") {
-    const candidates = conversationCandidates(worldState, { desktopRequiresAccessibility: true });
+    const candidates = conversationCandidates(worldState);
     return {
       packName: normalizedPackName,
       foreground: isWeChatDesktopForeground(worldState),
@@ -2408,7 +2483,7 @@ function createWeChatPack(): LivePack {
       return observeWatchSurface({
         ...args,
         surface: "desktop",
-        desktopRequireAccessibility: true
+        desktopRequireAccessibility: false
       });
     },
     async detectNewItems({ rule, worldState, dedupeState = {} }) {
@@ -2488,7 +2563,7 @@ function createWeChatPack(): LivePack {
         surfaceRegistry,
         controlPlane: {} as LivePackControlPlane,
         surface: "desktop",
-        desktopRequireAccessibility: true
+        desktopRequireAccessibility: false
       });
       if (!findWeChatComposeCandidate(threadState)) {
         return null;

@@ -126,10 +126,15 @@ export class MacOSHostBridge {
     });
   }
 
-  async captureScreen(filePath: string): Promise<unknown> {
-    return this.#requestSidecar("capture_screen", { filePath }, async () => {
-      await execFileAsync("screencapture", ["-x", filePath]);
-      return { filePath };
+  async captureScreen(filePath: string, windowNumber?: number | null): Promise<unknown> {
+    return this.#requestSidecar("capture_screen", { filePath, ...(windowNumber ? { windowNumber } : {}) }, async () => {
+      const args = ["-x"];
+      if (windowNumber) {
+        args.push("-o", "-l", String(windowNumber));
+      }
+      args.push(filePath);
+      await execFileAsync("screencapture", args);
+      return { filePath, windowNumber: windowNumber ?? null };
     });
   }
 
@@ -142,9 +147,14 @@ export class MacOSHostBridge {
 
   async focusApp(name: string): Promise<unknown> {
     return this.#requestSidecar("focus_app", { name }, async () => {
+      await execFileAsync("open", ["-a", name]);
       await execFileAsync("osascript", [
         "-e",
         `tell application "${escapeAppleScript(name)}" to activate`
+      ]);
+      await execFileAsync("osascript", [
+        "-e",
+        `tell application "System Events" to set frontmost of process "${escapeAppleScript(name)}" to true`
       ]);
       return { focused: name };
     });

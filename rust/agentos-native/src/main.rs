@@ -126,7 +126,14 @@ fn handle_request(request: &Request) -> Result<Value, String> {
                 "scroll"
             ]
         })),
-        "capture_screen" => capture_screen(param_string(&request.params, "filePath")?),
+        "capture_screen" => capture_screen(
+            param_string(&request.params, "filePath")?,
+            request
+                .params
+                .get("windowNumber")
+                .and_then(|value| value.as_u64())
+                .map(|value| value as u32),
+        ),
         "launch_app" => launch_app(param_string(&request.params, "name")?),
         "focus_app" => focus_app(param_string(&request.params, "name")?),
         "frontmost_app" => frontmost_app(),
@@ -208,11 +215,20 @@ fn param_number(params: &Value, key: &str) -> Result<f64, String> {
         .ok_or_else(|| format!("{key} is required"))
 }
 
-fn capture_screen(file_path: String) -> Result<Value, String> {
+fn capture_screen(file_path: String, window_number: Option<u32>) -> Result<Value, String> {
     match env::consts::OS {
         "macos" => {
-            run_command("screencapture", &["-x", file_path.as_str()])?;
-            Ok(json!({ "filePath": file_path }))
+            let mut args = vec!["-x"];
+            let window_number_string;
+            if let Some(window_number) = window_number {
+                args.push("-o");
+                args.push("-l");
+                window_number_string = window_number.to_string();
+                args.push(window_number_string.as_str());
+            }
+            args.push(file_path.as_str());
+            run_command("screencapture", &args)?;
+            Ok(json!({ "filePath": file_path, "windowNumber": window_number }))
         }
         "windows" => windows_capture_screen(file_path),
         other => Err(format!("capture_screen is not available on {other}")),
@@ -233,9 +249,20 @@ fn launch_app(name: String) -> Result<Value, String> {
 fn focus_app(name: String) -> Result<Value, String> {
     match env::consts::OS {
         "macos" => {
+            run_command("open", &["-a", name.as_str()])?;
             run_command(
                 "osascript",
                 &["-e", &format!("tell application \"{}\" to activate", escape_applescript(&name))],
+            )?;
+            run_command(
+                "osascript",
+                &[
+                    "-e",
+                    &format!(
+                        "tell application \"System Events\" to set frontmost of process \"{}\" to true",
+                        escape_applescript(&name)
+                    ),
+                ],
             )?;
             Ok(json!({ "focused": name }))
         }

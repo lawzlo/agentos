@@ -329,8 +329,16 @@ export async function collectDesktopProbe(request: DesktopProbeRequest, deps: De
       .map((line) => line.trim())
       .filter(Boolean)
       .slice(0, Math.max(3, request.sampleLimit));
-    const targetWorldState =
-      targetInspection && request.packName
+    const targetInspectionHasSignals = Boolean(
+      targetInspection
+      && (
+        Number(targetInspection.accessibilityCandidateCount ?? 0) > 0
+        || (Array.isArray(targetInspection.interactionCandidates) && targetInspection.interactionCandidates.length > 0)
+        || String(targetInspection.visibleText ?? "").trim()
+      )
+    );
+    const packAnalysisWorldState =
+      targetInspection && request.packName && targetInspectionHasSignals
         ? ({
             ...worldState,
             appContext: {
@@ -340,14 +348,17 @@ export async function collectDesktopProbe(request: DesktopProbeRequest, deps: De
               accessibility: targetInspection.accessibility,
               accessibilityCandidateCount: targetInspection.accessibilityCandidateCount
             },
-            interactionCandidates: targetInspection.interactionCandidates,
-            visibleText: targetInspection.visibleText,
-            ocrBlocks: [],
-            capture: null
+            interactionCandidates:
+              Array.isArray(targetInspection.interactionCandidates) && targetInspection.interactionCandidates.length
+                ? targetInspection.interactionCandidates
+                : worldState.interactionCandidates,
+            visibleText: String(targetInspection.visibleText ?? "").trim() || String(worldState.visibleText ?? ""),
+            ocrBlocks: Array.isArray(worldState.ocrBlocks) ? worldState.ocrBlocks : [],
+            capture: worldState.capture
           } as WorldState)
-        : null;
+        : worldState;
     const packAnalysis = request.packName
-      ? analyzeDesktopConversationPack(request.packName, targetWorldState ?? worldState)
+      ? analyzeDesktopConversationPack(request.packName, packAnalysisWorldState)
       : null;
     const appContext = (worldState.appContext ?? {}) as Record<string, unknown>;
     const accessibility = (appContext.accessibility ?? null) as { elements?: unknown[] } | null;
