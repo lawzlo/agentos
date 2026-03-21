@@ -8,6 +8,26 @@ import { createInteractionCandidate, createWorldState, normalizeBounds, normaliz
 import type { BoundsLike } from "../world-state.js";
 import type { SidecarAccessibilityElementInfo, SidecarAccessibilitySnapshotResult } from "../../types/native-sidecar.js";
 
+export interface DesktopSurfaceTimeoutConfig {
+  focusMs: number;
+  frontmostMs: number;
+  captureMs: number;
+  ocrMs: number;
+  windowsMs: number;
+  permissionsMs: number;
+  accessibilityMs: number;
+}
+
+const DEFAULT_DESKTOP_SURFACE_TIMEOUTS: DesktopSurfaceTimeoutConfig = {
+  focusMs: 1500,
+  frontmostMs: 800,
+  captureMs: 2500,
+  ocrMs: 2500,
+  windowsMs: 1200,
+  permissionsMs: 1200,
+  accessibilityMs: 1200
+};
+
 function pickBridge(options) {
   if (process.platform === "darwin") {
     return new MacOSHostBridge(options);
@@ -259,10 +279,15 @@ function dedupeInteractionCandidates(candidates: Array<Record<string, unknown>>)
 export class DesktopSurfaceAdapter extends SurfaceAdapter {
   artifactStore: any;
   bridge: any;
-  constructor({ artifactStore, dataDir }) {
+  timeouts: DesktopSurfaceTimeoutConfig;
+  constructor({ artifactStore, dataDir, timeouts = {} }) {
     super("desktop");
     this.artifactStore = artifactStore;
     this.bridge = pickBridge({ dataDir });
+    this.timeouts = {
+      ...DEFAULT_DESKTOP_SURFACE_TIMEOUTS,
+      ...(timeouts ?? {})
+    };
   }
 
   #requireBridge() {
@@ -301,8 +326,61 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
       .slice(0, 4000);
   }
 
+  async #withTimeout(promise, timeoutMs, fallbackFactory) {
+    let timeoutHandle: NodeJS.Timeout | null = null;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise((resolve, reject) => {
+          timeoutHandle = setTimeout(() => {
+            if (typeof fallbackFactory === "function") {
+              resolve(fallbackFactory());
+              return;
+            }
+            reject(new Error(`Desktop bridge timed out after ${timeoutMs}ms.`));
+          }, Math.max(1, timeoutMs));
+        })
+      ]);
+    } finally {
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+      }
+    }
+  }
+
   async discover() {
-    return this.#requireBridge().getFrontmostApp();
+    return this.#withTimeout(
+      this.#requireBridge().getFrontmostApp(),
+      this.timeouts.frontmostMs,
+      () => ({ appName: "" })
+    );
+  }
+
+  async inspectApp({ appName }: { appName: string }) {
+    const bridge = this.#requireBridge();
+    const targetAppName = String(appName ?? "").trim();
+    const frontmostApp = await this.#withTimeout(
+      bridge.getFrontmostApp().catch(() => ({ appName: "" })),
+      this.timeouts.frontmostMs,
+      () => ({ appName: "" })
+    );
+    const accessibility =
+      targetAppName && typeof bridge.getAccessibilitySnapshot === "function"
+        ? await this.#withTimeout(
+            bridge.getAccessibilitySnapshot(targetAppName).catch(() => null),
+            this.timeouts.accessibilityMs,
+            () => null
+          )
+        : null;
+    const accessibilityCandidates = createAccessibilityCandidates(accessibility, "desktop");
+    return {
+      targetAppName,
+      frontmostApp: String(frontmostApp?.appName ?? "").trim() || null,
+      accessibility,
+      accessibilityCandidateCount: accessibilityCandidates.length,
+      interactionCandidates: accessibilityCandidates,
+      visibleText: this.#visibleText(accessibilityCandidates, [])
+    };
   }
 
   async waitForAppReady({
@@ -331,19 +409,30 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
 
     while (Date.now() <= deadline) {
       attempts += 1;
-      const frontmost = await bridge.getFrontmostApp().catch(() => ({ appName: "" }));
+      const frontmost = await this.#withTimeout(
+        bridge.getFrontmostApp().catch(() => ({ appName: "" })),
+        this.timeouts.frontmostMs,
+        () => ({ appName: "" })
+      );
       lastFrontmostApp = String(frontmost?.appName ?? "").trim() || null;
       const matchedFrontmostApp = appMatchesTargetName(lastFrontmostApp, targetAppName);
 
       let accessibilityCandidateCount = 0;
       let accessibilityError: string | null = null;
       if (matchedFrontmostApp && requireAccessibility && typeof bridge.getAccessibilitySnapshot === "function") {
-        const snapshot = await bridge
+        const snapshot = await this.#withTimeout(
+          bridge
           .getAccessibilitySnapshot(lastFrontmostApp ?? targetAppName)
           .catch((error: unknown) => {
             accessibilityError = errorMessage(error);
             return null;
-          });
+          }),
+          this.timeouts.accessibilityMs,
+          () => {
+            accessibilityError = `accessibility snapshot timed out after ${this.timeouts.accessibilityMs}ms`;
+            return null;
+          }
+        );
         accessibilityCandidateCount = createAccessibilityCandidates(snapshot, "desktop").length;
       }
 
@@ -385,10 +474,20 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
 
   async observe({ task, workspace, traceId, label = "desktop-observe", recentActions = [] }) {
     const bridge = this.#requireBridge();
-    const capture = await this.capture({ task, workspace, traceId, label });
+    let captureError: string | null = null;
+    const capture = await this.capture({ task, workspace, traceId, label }).catch((error: unknown) => {
+      captureError = errorMessage(error);
+      return null;
+    });
     const [frontmostApp, ocrResult, windows, permissions] = await Promise.all([
-      bridge.getFrontmostApp(),
-      bridge
+      this.#withTimeout(
+        bridge.getFrontmostApp(),
+        this.timeouts.frontmostMs,
+        () => ({ appName: "" })
+      ),
+      capture?.path
+        ? this.#withTimeout(
+        bridge
         .ocrImage(capture.path)
         .then((result) => ({
           observations: Array.isArray(result?.observations) ? result.observations : [],
@@ -398,16 +497,38 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
           observations: [],
           error: errorMessage(error)
         })),
+        this.timeouts.ocrMs,
+        () => ({
+          observations: [],
+          error: `ocr_image timed out after ${this.timeouts.ocrMs}ms`
+        })
+      )
+        : Promise.resolve({
+            observations: [],
+            error: captureError ? `capture unavailable: ${captureError}` : "capture unavailable"
+          }),
+      this.#withTimeout(
       typeof bridge.listWindows === "function"
         ? bridge.listWindows().catch(() => ({ windows: [] }))
-        : { windows: [] },
+        : Promise.resolve({ windows: [] }),
+        this.timeouts.windowsMs,
+        () => ({ windows: [] })
+      ),
+      this.#withTimeout(
       typeof bridge.getPermissionsStatus === "function"
         ? bridge.getPermissionsStatus().catch(() => null)
-        : null
+        : Promise.resolve(null),
+        this.timeouts.permissionsMs,
+        () => null
+      )
     ]);
     const accessibility =
       typeof bridge.getAccessibilitySnapshot === "function" && frontmostApp?.appName
-        ? await bridge.getAccessibilitySnapshot(String(frontmostApp.appName)).catch(() => null)
+        ? await this.#withTimeout(
+            bridge.getAccessibilitySnapshot(String(frontmostApp.appName)).catch(() => null),
+            this.timeouts.accessibilityMs,
+            () => null
+          )
         : null;
     const ocrError = typeof ocrResult?.error === "string" && ocrResult.error.trim() ? ocrResult.error.trim() : null;
     const ocrBlocks = filterOcrBlocksToFrontmostWindows({
@@ -431,6 +552,8 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
         permissions,
         accessibility,
         accessibilityCandidateCount: accessibilityCandidates.length,
+        captureAvailable: Boolean(capture),
+        captureError,
         ocrAvailable: !ocrError,
         ocrError
       },
@@ -446,7 +569,7 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
   async capture({ task, workspace, traceId, label = "desktop-capture" }) {
     const bridge = this.#requireBridge();
     const filePath = path.join(workspace.artifactsPath, `${Date.now()}-${label.replaceAll(/\s+/g, "-")}.png`);
-    await bridge.captureScreen(filePath);
+    await this.#withTimeout(bridge.captureScreen(filePath), this.timeouts.captureMs, null);
     return this.artifactStore.registerExistingFile({
       taskId: task.id,
       traceId,
@@ -462,7 +585,7 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
     const step = args.step;
     const appName = step?.params ? resolveAppName(step.params) : null;
     if (appName) {
-      return bridge.focusApp(appName);
+      return this.#withTimeout(bridge.focusApp(appName), this.timeouts.focusMs, () => ({ focused: false, timedOut: true }));
     }
 
     return { focused: false };

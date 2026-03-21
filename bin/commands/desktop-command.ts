@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 import { boolOption, config, print, type CliOptions } from "../cli-utils.js";
-import { DesktopSurfaceAdapter } from "../../src/runtime/adapters/desktop-surface.js";
+import { DesktopSurfaceAdapter, type DesktopSurfaceTimeoutConfig } from "../../src/runtime/adapters/desktop-surface.js";
 import {
   analyzeDesktopConversationPack,
   type DesktopConversationPackAnalysis,
@@ -27,6 +27,14 @@ interface DesktopProbeAdapter {
     label?: string;
     recentActions?: unknown[];
   }): Promise<WorldState>;
+  inspectApp?: (args: { appName: string }) => Promise<{
+    targetAppName: string;
+    frontmostApp: string | null;
+    accessibility: { elements?: unknown[] } | null;
+    accessibilityCandidateCount: number;
+    interactionCandidates: InteractionCandidate[];
+    visibleText: string;
+  }>;
   shutdown(): Promise<void>;
 }
 
@@ -53,6 +61,13 @@ export interface DesktopProbeReport {
   capturePath: string | null;
   visibleTextPreview: string[];
   topCandidates: DesktopProbeCandidateSummary[];
+  targetAppInspection: {
+    frontmostApp: string | null;
+    accessibilityElementCount: number;
+    accessibilityCandidateCount: number;
+    visibleTextPreview: string[];
+    topCandidates: DesktopProbeCandidateSummary[];
+  } | null;
   packAnalysis: DesktopConversationPackAnalysis | null;
 }
 
@@ -154,9 +169,23 @@ async function createProbeWorkspace(appName: string, workspaceName: string, nowI
   };
 }
 
-function createProbeAdapter(): DesktopProbeAdapter {
+function createProbeTimeouts(request: DesktopProbeRequest): Partial<DesktopSurfaceTimeoutConfig> {
+  const baseTimeoutMs = Math.max(250, Number(request.timeoutMs ?? 1800));
+  return {
+    focusMs: Math.min(1500, baseTimeoutMs),
+    frontmostMs: Math.min(1200, baseTimeoutMs),
+    captureMs: Math.max(500, Math.min(2500, baseTimeoutMs)),
+    ocrMs: Math.max(500, Math.min(2500, baseTimeoutMs)),
+    windowsMs: Math.min(1200, baseTimeoutMs),
+    permissionsMs: Math.min(1200, baseTimeoutMs),
+    accessibilityMs: Math.min(1200, baseTimeoutMs)
+  };
+}
+
+function createProbeAdapter(request: DesktopProbeRequest): DesktopProbeAdapter {
   return new DesktopSurfaceAdapter({
     dataDir: config.dataDir,
+    timeouts: createProbeTimeouts(request),
     artifactStore: {
       async registerExistingFile({
         taskId,
@@ -227,6 +256,20 @@ function renderDesktopProbe(report: DesktopProbeReport) {
       );
     }
   }
+  if (report.targetAppInspection) {
+    lines.push("");
+    lines.push(`Target app AX frontmost: ${report.targetAppInspection.frontmostApp ?? "(unknown)"}`);
+    lines.push(
+      `Target app AX: elements=${report.targetAppInspection.accessibilityElementCount},`
+        + ` candidates=${report.targetAppInspection.accessibilityCandidateCount}`
+    );
+    if (report.targetAppInspection.visibleTextPreview.length) {
+      lines.push("Target app visible text preview:");
+      for (const line of report.targetAppInspection.visibleTextPreview) {
+        lines.push(`- ${line}`);
+      }
+    }
+  }
   if (report.packAnalysis) {
     lines.push("");
     lines.push(`Pack foreground: ${report.packAnalysis.foreground ? "yes" : "no"}`);
@@ -245,7 +288,7 @@ function renderDesktopProbe(report: DesktopProbeReport) {
 
 export async function collectDesktopProbe(request: DesktopProbeRequest, deps: DesktopProbeDeps = {}): Promise<DesktopProbeReport> {
   const nowIso = deps.nowIso ?? (() => new Date().toISOString());
-  const adapter = deps.adapter ?? createProbeAdapter();
+  const adapter = deps.adapter ?? createProbeAdapter(request);
   const workspace = deps.workspace ?? (await createProbeWorkspace(request.appName, request.workspaceName, nowIso));
   const task = buildProbeTask(request.appName, nowIso);
 
@@ -278,6 +321,7 @@ export async function collectDesktopProbe(request: DesktopProbeRequest, deps: De
       traceId: null,
       label: `desktop-probe-${safeName(request.appName)}`
     });
+    const targetInspection = typeof adapter.inspectApp === "function" ? await adapter.inspectApp({ appName: request.appName }) : null;
 
     const interactionCandidates = Array.isArray(worldState.interactionCandidates) ? worldState.interactionCandidates : [];
     const visibleTextPreview = String(worldState.visibleText ?? "")
@@ -285,12 +329,39 @@ export async function collectDesktopProbe(request: DesktopProbeRequest, deps: De
       .map((line) => line.trim())
       .filter(Boolean)
       .slice(0, Math.max(3, request.sampleLimit));
-    const packAnalysis = request.packName ? analyzeDesktopConversationPack(request.packName, worldState) : null;
+    const targetWorldState =
+      targetInspection && request.packName
+        ? ({
+            ...worldState,
+            appContext: {
+              ...(worldState.appContext ?? {}),
+              appName: targetInspection.frontmostApp ?? null,
+              targetAppName: request.appName,
+              accessibility: targetInspection.accessibility,
+              accessibilityCandidateCount: targetInspection.accessibilityCandidateCount
+            },
+            interactionCandidates: targetInspection.interactionCandidates,
+            visibleText: targetInspection.visibleText,
+            ocrBlocks: [],
+            capture: null
+          } as WorldState)
+        : null;
+    const packAnalysis = request.packName
+      ? analyzeDesktopConversationPack(request.packName, targetWorldState ?? worldState)
+      : null;
     const appContext = (worldState.appContext ?? {}) as Record<string, unknown>;
     const accessibility = (appContext.accessibility ?? null) as { elements?: unknown[] } | null;
     const topCandidates = interactionCandidates
       .slice(0, Math.max(1, request.sampleLimit))
       .map((candidate) => summarizeCandidate(candidate));
+    const targetVisibleTextPreview = String(targetInspection?.visibleText ?? "")
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .slice(0, Math.max(3, request.sampleLimit));
+    const targetTopCandidates = Array.isArray(targetInspection?.interactionCandidates)
+      ? targetInspection.interactionCandidates.slice(0, Math.max(1, request.sampleLimit)).map((candidate) => summarizeCandidate(candidate))
+      : [];
 
     return {
       request,
@@ -305,6 +376,17 @@ export async function collectDesktopProbe(request: DesktopProbeRequest, deps: De
       capturePath: typeof worldState.capture?.path === "string" ? worldState.capture.path : null,
       visibleTextPreview,
       topCandidates,
+      targetAppInspection: targetInspection
+        ? {
+            frontmostApp: targetInspection.frontmostApp,
+            accessibilityElementCount: Array.isArray(targetInspection.accessibility?.elements)
+              ? targetInspection.accessibility.elements.length
+              : 0,
+            accessibilityCandidateCount: Number(targetInspection.accessibilityCandidateCount ?? 0),
+            visibleTextPreview: targetVisibleTextPreview,
+            topCandidates: targetTopCandidates
+          }
+        : null,
       packAnalysis
     };
   } finally {

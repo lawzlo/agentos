@@ -29,7 +29,7 @@ function createAdapter() {
   return { adapter, calls };
 }
 
-function createObserveAdapter() {
+function createObserveAdapter(timeouts?: Record<string, number>) {
   const registeredArtifacts: Array<Record<string, unknown>> = [];
   const adapter = new DesktopSurfaceAdapter({
     artifactStore: {
@@ -47,7 +47,8 @@ function createObserveAdapter() {
         };
       }
     },
-    dataDir: "/tmp/agentos-test"
+    dataDir: "/tmp/agentos-test",
+    timeouts
   }) as DesktopSurfaceAdapter & { bridge: Record<string, unknown> };
 
   adapter.bridge = {
@@ -274,5 +275,89 @@ test("desktop waitForAppReady reports not ready when accessibility candidates ne
 
   assert.equal(readiness.ready, false);
   assert.equal(readiness.frontmostApp, "WeChat");
+  assert.equal(readiness.accessibilityCandidateCount, 0);
+});
+
+test("desktop observe times out slow helper calls instead of hanging", async () => {
+  const { adapter } = createObserveAdapter({
+    captureMs: 20,
+    frontmostMs: 20,
+    ocrMs: 20,
+    windowsMs: 20,
+    permissionsMs: 20,
+    accessibilityMs: 20
+  });
+
+  adapter.bridge.captureScreen = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    return { ok: true };
+  };
+  adapter.bridge.getFrontmostApp = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    return { appName: "WeChat" };
+  };
+  adapter.bridge.ocrImage = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    return { observations: [{ text: "slow" }] };
+  };
+  adapter.bridge.listWindows = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    return { windows: [] };
+  };
+  adapter.bridge.getPermissionsStatus = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    return { accessibility: true, screenRecording: true };
+  };
+  adapter.bridge.getAccessibilitySnapshot = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    return {
+      appName: "WeChat",
+      windows: [],
+      elements: []
+    };
+  };
+
+  const started = Date.now();
+  const worldState = (await adapter.observe({
+    task: { id: "task_test" },
+    workspace: {
+      id: "workspace_test",
+      artifactsPath: "/tmp",
+      rootPath: "/tmp"
+    },
+    traceId: "trace_test"
+  })) as WorldState;
+
+  assert.equal(Date.now() - started < 250, true);
+  assert.equal(worldState.appContext?.appName, "");
+  assert.equal(worldState.capture, null);
+  assert.equal(worldState.appContext?.captureAvailable, false);
+  assert.match(String(worldState.appContext?.captureError ?? ""), /timed out after 20ms/i);
+  assert.equal(worldState.ocrBlocks.length, 0);
+  assert.equal(worldState.appContext?.ocrAvailable, false);
+  assert.match(String(worldState.appContext?.ocrError ?? ""), /capture unavailable/i);
+});
+
+test("desktop waitForAppReady reports timeout-backed readiness details", async () => {
+  const { adapter } = createObserveAdapter({
+    frontmostMs: 20,
+    accessibilityMs: 20
+  });
+  adapter.bridge.getFrontmostApp = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    return { appName: "WeChat" };
+  };
+
+  const readiness = await adapter.waitForAppReady({
+    appName: "WeChat",
+    timeoutMs: 25,
+    pollMs: 1,
+    stablePolls: 1,
+    requireAccessibility: true
+  });
+
+  assert.equal(readiness.ready, false);
+  assert.equal(readiness.frontmostApp, null);
+  assert.equal(readiness.matchedFrontmostApp, false);
   assert.equal(readiness.accessibilityCandidateCount, 0);
 });

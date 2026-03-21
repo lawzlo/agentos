@@ -199,3 +199,91 @@ test("collectDesktopProbe can inspect raw desktop state without a pack analysis"
   assert.equal(report.ocrAvailable, false);
   assert.equal(report.visibleTextPreview[0], "Terminal");
 });
+
+test("collectDesktopProbe can analyze a target app even when the current frontmost app is different", async () => {
+  const rootPath = await createTempDir("agentos-desktop-probe-");
+  const workspace = createWorkspace(rootPath);
+  const report = await collectDesktopProbe(
+    {
+      appName: "WeChat",
+      packName: "wechat-desktop",
+      workspaceName: workspace.name,
+      sampleLimit: 4,
+      timeoutMs: 800,
+      requireAccessibility: true,
+      waitReady: false
+    },
+    {
+      workspace,
+      adapter: {
+        async focus() {
+          return { focused: "WeChat" };
+        },
+        async observe() {
+          return {
+            version: 1,
+            surface: "desktop",
+            workspaceId: workspace.id,
+            appContext: {
+              appName: "Terminal",
+              windows: [{ title: "Terminal" }],
+              accessibilityCandidateCount: 0,
+              ocrAvailable: true,
+              ocrError: null
+            },
+            capture: null,
+            ocrBlocks: [],
+            interactionCandidates: [],
+            visibleText: "Terminal\nagentos desktop probe",
+            recentActions: [],
+            summary: "Terminal",
+            timestamp: new Date().toISOString()
+          };
+        },
+        async inspectApp() {
+          return {
+            targetAppName: "WeChat",
+            frontmostApp: "Terminal",
+            accessibility: {
+              elements: [{ id: "ax-1" }, { id: "ax-2" }]
+            },
+            accessibilityCandidateCount: 2,
+            interactionCandidates: [
+              {
+                id: "wechat-thread",
+                surface: "desktop",
+                kind: "text",
+                text: "未读: 李四",
+                role: "button",
+                bounds: { x: 10, y: 10, width: 150, height: 24, centerX: 85, centerY: 22 },
+                confidence: 0.98,
+                sourceHints: { source: "accessibility", ariaLabel: "未读会话 李四" },
+                isInteractive: true
+              },
+              {
+                id: "wechat-compose",
+                surface: "desktop",
+                kind: "text",
+                text: "输入消息",
+                role: "textbox",
+                bounds: { x: 10, y: 220, width: 200, height: 30, centerX: 110, centerY: 235 },
+                confidence: 0.98,
+                sourceHints: { source: "accessibility", placeholder: "输入消息" },
+                isInteractive: true
+              }
+            ],
+            visibleText: "未读: 李四\n输入消息"
+          };
+        },
+        async shutdown() {}
+      }
+    }
+  );
+
+  assert.equal(report.frontmostApp, "Terminal");
+  assert.equal(report.targetAppInspection?.frontmostApp, "Terminal");
+  assert.equal(report.targetAppInspection?.accessibilityCandidateCount, 2);
+  assert.equal(report.packAnalysis?.foreground, false);
+  assert.equal(report.packAnalysis?.unreadCandidate?.text, "未读: 李四");
+  assert.equal(report.packAnalysis?.composeCandidate?.text, "输入消息");
+});

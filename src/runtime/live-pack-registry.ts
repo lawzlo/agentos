@@ -744,14 +744,7 @@ function isSlackDesktopForeground(worldState: WorldState | null): boolean {
 
   const appContext = (worldState.appContext ?? {}) as Record<string, unknown>;
   const appName = String(appContext.appName ?? "").trim().toLowerCase();
-  if (appName.includes("slack")) {
-    return true;
-  }
-
-  const windows = Array.isArray(appContext.windows) ? (appContext.windows as Array<Record<string, unknown>>) : [];
-  return windows.some((windowInfo) =>
-    String(windowInfo?.title ?? windowInfo?.windowName ?? "").toLowerCase().includes("slack")
-  );
+  return appName.includes("slack");
 }
 
 function isWeChatDesktopForeground(worldState: WorldState | null): boolean {
@@ -761,14 +754,7 @@ function isWeChatDesktopForeground(worldState: WorldState | null): boolean {
 
   const appContext = (worldState.appContext ?? {}) as Record<string, unknown>;
   const appName = String(appContext.appName ?? "").trim().toLowerCase();
-  if (appName.includes("wechat") || appName.includes("微信")) {
-    return true;
-  }
-
-  const windows = Array.isArray(appContext.windows) ? (appContext.windows as Array<Record<string, unknown>>) : [];
-  return windows.some((windowInfo) =>
-    String(windowInfo?.title ?? windowInfo?.windowName ?? "").toLowerCase().match(/wechat|微信/u)
-  );
+  return appName.includes("wechat") || appName.includes("微信");
 }
 
 function isOutlookDesktopForeground(worldState: WorldState | null): boolean {
@@ -778,14 +764,7 @@ function isOutlookDesktopForeground(worldState: WorldState | null): boolean {
 
   const appContext = (worldState.appContext ?? {}) as Record<string, unknown>;
   const appName = String(appContext.appName ?? "").trim().toLowerCase();
-  if (appName.includes("outlook")) {
-    return true;
-  }
-
-  const windows = Array.isArray(appContext.windows) ? (appContext.windows as Array<Record<string, unknown>>) : [];
-  return windows.some((windowInfo) =>
-    String(windowInfo?.title ?? windowInfo?.windowName ?? "").toLowerCase().includes("outlook")
-  );
+  return appName.includes("outlook");
 }
 
 function isAccessibilityCandidate(candidate: InteractionCandidate | null | undefined): boolean {
