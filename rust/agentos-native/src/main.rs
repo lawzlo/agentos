@@ -13,6 +13,14 @@ unsafe extern "C" {
     fn agentos_macos_permissions_status_json() -> *mut c_char;
     fn agentos_macos_list_windows_json() -> *mut c_char;
     fn agentos_macos_ocr_image_json(path: *const c_char) -> *mut c_char;
+    fn agentos_macos_ocr_image_region_json(
+        path: *const c_char,
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+        scale: f64,
+    ) -> *mut c_char;
     fn agentos_macos_find_text_json(path: *const c_char, query: *const c_char) -> *mut c_char;
     fn agentos_macos_type_text_json(text: *const c_char) -> *mut c_char;
     fn agentos_macos_key_press_json(key: *const c_char, modifiers_csv: *const c_char) -> *mut c_char;
@@ -38,6 +46,14 @@ struct Response {
     result: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+struct NormalizedRegion {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
 }
 
 fn main() {
@@ -139,7 +155,15 @@ fn handle_request(request: &Request) -> Result<Value, String> {
         "frontmost_app" => frontmost_app(),
         "permissions_status" => permissions_status(),
         "list_windows" => list_windows(),
-        "ocr_image" => ocr_image(param_string(&request.params, "filePath")?),
+        "ocr_image" => ocr_image(
+            param_string(&request.params, "filePath")?,
+            optional_normalized_region(&request.params, "region")?,
+            request
+                .params
+                .get("scale")
+                .and_then(|value| value.as_f64())
+                .filter(|value| value.is_finite() && *value > 0.0),
+        ),
         "find_text" => find_text(
             param_string(&request.params, "filePath")?,
             param_string(&request.params, "query")?,
@@ -213,6 +237,43 @@ fn param_number(params: &Value, key: &str) -> Result<f64, String> {
         .get(key)
         .and_then(|value| value.as_f64())
         .ok_or_else(|| format!("{key} is required"))
+}
+
+fn optional_normalized_region(params: &Value, key: &str) -> Result<Option<NormalizedRegion>, String> {
+    let Some(value) = params.get(key) else {
+        return Ok(None);
+    };
+    let Some(region) = value.as_object() else {
+        return Err(format!("{key} must be an object"));
+    };
+    let x = region
+        .get("x")
+        .and_then(|entry| entry.as_f64())
+        .ok_or_else(|| format!("{key}.x is required"))?;
+    let y = region
+        .get("y")
+        .and_then(|entry| entry.as_f64())
+        .ok_or_else(|| format!("{key}.y is required"))?;
+    let width = region
+        .get("width")
+        .and_then(|entry| entry.as_f64())
+        .ok_or_else(|| format!("{key}.width is required"))?;
+    let height = region
+        .get("height")
+        .and_then(|entry| entry.as_f64())
+        .ok_or_else(|| format!("{key}.height is required"))?;
+    if ![x, y, width, height].iter().all(|value| value.is_finite()) {
+        return Err(format!("{key} must contain finite numbers"));
+    }
+    if width <= 0.0 || height <= 0.0 {
+        return Err(format!("{key}.width and {key}.height must be greater than 0"));
+    }
+    Ok(Some(NormalizedRegion {
+        x,
+        y,
+        width,
+        height,
+    }))
 }
 
 fn capture_screen(file_path: String, window_number: Option<u32>) -> Result<Value, String> {
@@ -308,9 +369,13 @@ fn list_windows() -> Result<Value, String> {
     }
 }
 
-fn ocr_image(file_path: String) -> Result<Value, String> {
+fn ocr_image(
+    file_path: String,
+    region: Option<NormalizedRegion>,
+    scale: Option<f64>,
+) -> Result<Value, String> {
     match env::consts::OS {
-        "macos" => macos_ocr_image(file_path),
+        "macos" => macos_ocr_image(file_path, region, scale),
         "windows" => windows_ocr_image(file_path),
         other => Err(format!("ocr_image is not available on {other}")),
     }
@@ -369,13 +434,34 @@ fn macos_list_windows() -> Result<Value, String> {
 }
 
 #[cfg(target_os = "macos")]
-fn macos_ocr_image(file_path: String) -> Result<Value, String> {
+fn macos_ocr_image(
+    file_path: String,
+    region: Option<NormalizedRegion>,
+    scale: Option<f64>,
+) -> Result<Value, String> {
     let file_path = macos_string_arg(&file_path)?;
-    macos_json_from_ptr(unsafe { agentos_macos_ocr_image_json(file_path.as_ptr()) })
+    if let Some(region) = region {
+        macos_json_from_ptr(unsafe {
+            agentos_macos_ocr_image_region_json(
+                file_path.as_ptr(),
+                region.x,
+                region.y,
+                region.width,
+                region.height,
+                scale.unwrap_or(1.0),
+            )
+        })
+    } else {
+        macos_json_from_ptr(unsafe { agentos_macos_ocr_image_json(file_path.as_ptr()) })
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
-fn macos_ocr_image(_file_path: String) -> Result<Value, String> {
+fn macos_ocr_image(
+    _file_path: String,
+    _region: Option<NormalizedRegion>,
+    _scale: Option<f64>,
+) -> Result<Value, String> {
     Err(format!("ocr_image is not available on {}", env::consts::OS))
 }
 

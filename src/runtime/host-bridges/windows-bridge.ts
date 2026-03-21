@@ -4,7 +4,7 @@ import { promisify } from "node:util";
 
 import { NativeSidecarClient } from "../native-sidecar.js";
 import { defaultDataDir } from "../../config.js";
-import type { SidecarFindTextResult, SidecarListWindowsResult, SidecarOcrResult, SidecarPermissionsResult } from "../../types/native-sidecar.js";
+import type { SidecarFindTextResult, SidecarListWindowsResult, SidecarOcrOptions, SidecarOcrResult, SidecarPermissionsResult } from "../../types/native-sidecar.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -442,7 +442,7 @@ public static class AgentOSMouse {
     );
   }
 
-  async ocrImage(filePath: string): Promise<SidecarOcrResult> {
+  async ocrImage(filePath: string, _options: SidecarOcrOptions = {}): Promise<SidecarOcrResult> {
     this.#assertSupported();
     return this.#requestSidecar<SidecarOcrResult>("ocr_image", { filePath }, () =>
       this.#runJson(createWindowsOcrScript(filePath))

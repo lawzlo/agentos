@@ -232,6 +232,134 @@ test("desktop observe falls back to accessibility when OCR fails", async () => {
   assert.equal(worldState.summary.includes("OCR unavailable: ocr_image failed"), true);
 });
 
+test("desktop observe augments WeChat window captures with supplemental OCR regions", async () => {
+  const { adapter } = createObserveAdapter();
+  const ocrCalls: Array<Record<string, unknown>> = [];
+  adapter.bridge.captureScreen = async (_filePath: string, windowNumber?: number | null) => ({
+    ok: true,
+    windowNumber: windowNumber ?? null
+  });
+  adapter.bridge.getFrontmostApp = async () => ({ appName: "WeChat" });
+  adapter.bridge.listWindows = async () => ({
+    windows: [
+      {
+        ownerName: "WeChat",
+        windowName: "WeChat",
+        windowNumber: 11,
+        bounds: { x: 0, y: 0, width: 900, height: 700, centerX: 450, centerY: 350 }
+      }
+    ]
+  });
+  adapter.bridge.getAccessibilitySnapshot = async () => ({
+    appName: "WeChat",
+    windows: [],
+    elements: []
+  });
+  adapter.bridge.ocrImage = async (_filePath: string, options?: { region?: Record<string, number>; scale?: number }) => {
+    ocrCalls.push({
+      region: options?.region ?? null,
+      scale: options?.scale ?? null
+    });
+    if (!options?.region) {
+      return {
+        observations: [
+          {
+            text: "03/11",
+            confidence: 0.8,
+            box: { x: 350, y: 120, width: 60, height: 24, centerX: 380, centerY: 132 }
+          }
+        ]
+      };
+    }
+    if (Number(options.region.x) < 0.2) {
+      return {
+        observations: [
+          {
+            text: "Official Accounts",
+            confidence: 0.95,
+            box: { x: 120, y: 120, width: 180, height: 28, centerX: 210, centerY: 134 }
+          }
+        ]
+      };
+    }
+    return {
+      observations: [
+        {
+          text: "输入",
+          confidence: 0.9,
+          box: { x: 420, y: 610, width: 120, height: 32, centerX: 480, centerY: 626 }
+        }
+      ]
+    };
+  };
+
+  const worldState = (await adapter.observe({
+    task: { id: "task_test" },
+    workspace: {
+      id: "workspace_test",
+      artifactsPath: "/tmp",
+      rootPath: "/tmp"
+    },
+    traceId: "trace_test"
+  })) as WorldState;
+
+  assert.equal(ocrCalls.length, 3);
+  assert.deepEqual(ocrCalls[1]?.region, { x: 0.1, y: 0.09, width: 0.34, height: 0.78 });
+  assert.deepEqual(ocrCalls[2]?.region, { x: 0.34, y: 0.78, width: 0.6, height: 0.18 });
+  assert.equal(worldState.appContext?.supplementalOcrBlockCount, 2);
+  assert.equal(worldState.ocrBlocks.some((block) => block.text === "Official Accounts"), true);
+  assert.equal(worldState.ocrBlocks.some((block) => block.text === "输入"), true);
+  assert.equal(
+    worldState.interactionCandidates.some((candidate) => candidate.text === "Official Accounts" && candidate.sourceHints?.source === "ocr-wechat-list"),
+    true
+  );
+  assert.equal(
+    worldState.interactionCandidates.some((candidate) => candidate.text === "输入" && candidate.sourceHints?.source === "ocr-wechat-compose"),
+    true
+  );
+});
+
+test("desktop capture falls back to a full-screen capture when window capture fails", async () => {
+  const { adapter, registeredArtifacts } = createObserveAdapter({
+    captureMs: 50
+  });
+  const captureCalls: Array<number | null | undefined> = [];
+  adapter.bridge.listWindows = async () => {
+    return {
+      windows: [
+        {
+          ownerName: "Slack",
+          windowName: "Slack",
+          windowNumber: 7,
+          bounds: { x: 0, y: 0, width: 400, height: 400, centerX: 200, centerY: 200 }
+        }
+      ]
+    };
+  };
+  adapter.bridge.captureScreen = async (_filePath: string, windowNumber?: number | null) => {
+    captureCalls.push(windowNumber);
+    if (windowNumber) {
+      throw new Error("window capture failed");
+    }
+    return { ok: true };
+  };
+
+  const worldState = (await adapter.observe({
+    task: { id: "task_test" },
+    workspace: {
+      id: "workspace_test",
+      artifactsPath: "/tmp",
+      rootPath: "/tmp"
+    },
+    traceId: "trace_test"
+  })) as WorldState;
+
+  assert.deepEqual(captureCalls, [7, null]);
+  assert.equal(registeredArtifacts.length, 1);
+  assert.equal(worldState.appContext?.captureAvailable, true);
+  assert.equal(worldState.appContext?.captureWindowNumber ?? null, null);
+});
+
 test("desktop waitForAppReady waits for a stable frontmost app with accessibility candidates", async () => {
   const { adapter } = createObserveAdapter();
   let frontmostReads = 0;

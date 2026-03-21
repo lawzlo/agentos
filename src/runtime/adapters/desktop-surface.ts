@@ -19,13 +19,13 @@ export interface DesktopSurfaceTimeoutConfig {
 }
 
 const DEFAULT_DESKTOP_SURFACE_TIMEOUTS: DesktopSurfaceTimeoutConfig = {
-  focusMs: 1500,
-  frontmostMs: 800,
-  captureMs: 2500,
-  ocrMs: 2500,
-  windowsMs: 1200,
-  permissionsMs: 1200,
-  accessibilityMs: 1200
+  focusMs: 1800,
+  frontmostMs: 1400,
+  captureMs: 4500,
+  ocrMs: 3500,
+  windowsMs: 1500,
+  permissionsMs: 1500,
+  accessibilityMs: 1800
 };
 
 function pickBridge(options) {
@@ -132,11 +132,13 @@ function pointWithinBounds(x: number, y: number, bounds: { x: number; y: number;
 function filterOcrBlocksToFrontmostWindows({
   ocrBlocks,
   frontmostApp,
-  windows
+  windows,
+  captureWindowNumber = null
 }: {
   ocrBlocks: Array<{ text?: string; bounds?: { centerX?: number; centerY?: number } }>;
   frontmostApp: Record<string, unknown> | null;
   windows: Array<Record<string, unknown>>;
+  captureWindowNumber?: number | null;
 }) {
   const appKey = normalizeAppKey(frontmostApp?.appName);
   if (!appKey) {
@@ -151,6 +153,32 @@ function filterOcrBlocksToFrontmostWindows({
 
   if (!matchingWindows.length) {
     return ocrBlocks;
+  }
+
+  const capturedWindow = Number.isFinite(Number(captureWindowNumber))
+    ? matchingWindows.find((windowInfo) => Number(windowInfo.windowNumber ?? NaN) === Number(captureWindowNumber))
+    : null;
+  if (capturedWindow) {
+    const bounds = capturedWindow.bounds as { width?: number; height?: number } | undefined;
+    const width = Number(bounds?.width ?? 0);
+    const height = Number(bounds?.height ?? 0);
+    if (width > 0 && height > 0) {
+      const locallyFiltered = ocrBlocks.filter((block) => {
+        const centerX = Number(block?.bounds?.centerX);
+        const centerY = Number(block?.bounds?.centerY);
+        return (
+          Number.isFinite(centerX) &&
+          Number.isFinite(centerY) &&
+          centerX >= 0 &&
+          centerX <= width &&
+          centerY >= 0 &&
+          centerY <= height
+        );
+      });
+      if (locallyFiltered.length) {
+        return locallyFiltered;
+      }
+    }
   }
 
   const filtered = ocrBlocks.filter((block) => {
@@ -183,6 +211,51 @@ function matchingDesktopWindowsForApp(windows: Array<Record<string, unknown>>, a
     const windowName = normalizeAppKey(windowInfo.windowName);
     return aliases.some((alias) => ownerName.includes(alias) || windowName.includes(alias));
   });
+}
+
+function isWeChatDesktopApp(value: unknown) {
+  return appMatchesTargetName(value, "WeChat");
+}
+
+const WECHAT_SUPPLEMENTAL_OCR_REGIONS = [
+  {
+    source: "ocr-wechat-list",
+    region: { x: 0.1, y: 0.09, width: 0.34, height: 0.78 },
+    scale: 2.4
+  },
+  {
+    source: "ocr-wechat-compose",
+    region: { x: 0.34, y: 0.78, width: 0.6, height: 0.18 },
+    scale: 2.2
+  }
+] as const;
+
+function mergeOcrBlocks(blocks: Array<{ id?: string; text?: string; confidence?: number; bounds?: BoundsLike; source?: string }>) {
+  const seen = new Set<string>();
+  const merged: Array<{ id?: string; text?: string; confidence?: number; bounds?: BoundsLike; source?: string }> = [];
+  for (const block of blocks) {
+    const text = String(block?.text ?? "").trim();
+    if (!text) {
+      continue;
+    }
+    const bounds = normalizeBounds(block?.bounds ?? {});
+    const key = [
+      text.toLowerCase(),
+      Math.round(Number(bounds.centerX ?? 0)),
+      Math.round(Number(bounds.centerY ?? 0)),
+      String(block?.source ?? "ocr")
+    ].join("|");
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    merged.push({
+      ...block,
+      text,
+      bounds
+    });
+  }
+  return merged;
 }
 
 function pickPrimaryWindowNumber(windows: Array<Record<string, unknown>>, appName: unknown) {
@@ -338,13 +411,60 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
           role: "text",
           bounds: block.bounds,
           confidence: block.confidence ?? 0.65,
-          sourceHints: { source: "ocr" },
+          sourceHints: { source: block.source ?? "ocr" },
           isInteractive: true
         },
         index,
         "desktop"
       )
     );
+  }
+
+  async #collectSupplementalOcr({
+    bridge,
+    capturePath,
+    frontmostAppName,
+    windowNumber
+  }: {
+    bridge: Record<string, unknown>;
+    capturePath: string;
+    frontmostAppName: unknown;
+    windowNumber: number | null;
+  }) {
+    if (!capturePath || !windowNumber || !isWeChatDesktopApp(frontmostAppName) || typeof bridge.ocrImage !== "function") {
+      return [];
+    }
+    const ocrImage = bridge.ocrImage as (
+      filePath: string,
+      options?: { region?: { x: number; y: number; width: number; height: number }; scale?: number }
+    ) => Promise<{ observations?: unknown[] }>;
+
+    const regionResults = await Promise.all(
+      WECHAT_SUPPLEMENTAL_OCR_REGIONS.map(async (entry) => {
+        const result = await this.#withTimeout(
+          ocrImage(capturePath, {
+            region: entry.region,
+            scale: entry.scale
+          })
+            .then((value) => ({
+              observations: Array.isArray(value?.observations) ? value.observations : []
+            }))
+            .catch(() => ({ observations: [] })),
+          this.timeouts.ocrMs,
+          () => ({ observations: [] })
+        );
+        return normalizeOcrBlocks(
+          result.observations.map((observation, index) => ({
+            ...observation,
+            id: `${entry.source}-${index + 1}`,
+            source: entry.source
+          })),
+          "desktop"
+        );
+      })
+    );
+
+    return mergeOcrBlocks(regionResults.flat());
   }
 
   #visibleText(accessibilityCandidates, ocrBlocks) {
@@ -532,6 +652,7 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
       captureError = errorMessage(error);
       return null;
     });
+    const actualCaptureWindowNumber = Number((capture?.metadata ?? null)?.windowNumber ?? NaN);
     const ocrResult = capture?.path
       ? await this.#withTimeout(
           bridge
@@ -563,10 +684,22 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
           )
         : null;
     const ocrError = typeof ocrResult?.error === "string" && ocrResult.error.trim() ? ocrResult.error.trim() : null;
+    const supplementalOcrBlocks = capture?.path
+      ? await this.#collectSupplementalOcr({
+          bridge,
+          capturePath: capture.path,
+          frontmostAppName: frontmostApp?.appName,
+          windowNumber: Number.isFinite(actualCaptureWindowNumber) && actualCaptureWindowNumber > 0 ? actualCaptureWindowNumber : null
+        })
+      : [];
     const ocrBlocks = filterOcrBlocksToFrontmostWindows({
-      ocrBlocks: normalizeOcrBlocks(ocrResult.observations ?? [], "desktop"),
+      ocrBlocks: mergeOcrBlocks([
+        ...normalizeOcrBlocks(ocrResult.observations ?? [], "desktop"),
+        ...supplementalOcrBlocks
+      ]),
       frontmostApp: (frontmostApp ?? null) as Record<string, unknown> | null,
-      windows: windowsList
+      windows: windowsList,
+      captureWindowNumber: Number.isFinite(actualCaptureWindowNumber) && actualCaptureWindowNumber > 0 ? actualCaptureWindowNumber : null
     });
     const accessibilityCandidates = createAccessibilityCandidates(accessibility, "desktop");
     const interactionCandidates = dedupeInteractionCandidates([
@@ -581,12 +714,13 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
       appContext: {
         ...frontmostApp,
         windows: windowsList,
-        captureWindowNumber: windowNumber,
+        captureWindowNumber: Number.isFinite(actualCaptureWindowNumber) && actualCaptureWindowNumber > 0 ? actualCaptureWindowNumber : null,
         permissions,
         accessibility,
         accessibilityCandidateCount: accessibilityCandidates.length,
         captureAvailable: Boolean(capture),
         captureError,
+        supplementalOcrBlockCount: supplementalOcrBlocks.length,
         ocrAvailable: !ocrError,
         ocrError
       },
@@ -602,14 +736,26 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
   async capture({ task, workspace, traceId, label = "desktop-capture", windowNumber = null }) {
     const bridge = this.#requireBridge();
     const filePath = path.join(workspace.artifactsPath, `${Date.now()}-${label.replaceAll(/\s+/g, "-")}.png`);
-    await this.#withTimeout(bridge.captureScreen(filePath, windowNumber), this.timeouts.captureMs, null);
+    let captureResult: Record<string, unknown> | null = null;
+    try {
+      captureResult = await this.#withTimeout(bridge.captureScreen(filePath, windowNumber), this.timeouts.captureMs, null);
+    } catch (error) {
+      if (!windowNumber) {
+        throw error;
+      }
+      captureResult = await this.#withTimeout(bridge.captureScreen(filePath, null), this.timeouts.captureMs, null);
+    }
+    const actualWindowNumber = Number(captureResult?.windowNumber ?? NaN);
     return this.artifactStore.registerExistingFile({
       taskId: task.id,
       traceId,
       kind: "screenshot",
       label,
       filePath,
-      metadata: { surface: "desktop", ...(windowNumber ? { windowNumber } : {}) }
+      metadata: {
+        surface: "desktop",
+        ...(Number.isFinite(actualWindowNumber) && actualWindowNumber > 0 ? { windowNumber: actualWindowNumber } : {})
+      }
     });
   }
 

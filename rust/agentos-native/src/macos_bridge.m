@@ -17,12 +17,13 @@ static char *agentos_json_string(id object) {
     return strdup((json ?: @"{}").UTF8String);
 }
 
-static NSDictionary *agentos_box_dictionary(CGRect box, CGFloat width, CGFloat height) {
+static NSDictionary *agentos_box_dictionary(CGRect box, CGFloat width, CGFloat height, CGFloat offsetX, CGFloat offsetY, CGFloat scale) {
+    CGFloat effectiveScale = scale > 0 ? scale : 1;
     CGRect rect = CGRectMake(
-        box.origin.x * width,
-        (1 - box.origin.y - box.size.height) * height,
-        box.size.width * width,
-        box.size.height * height
+        offsetX + ((box.origin.x * width) / effectiveScale),
+        offsetY + (((1 - box.origin.y - box.size.height) * height) / effectiveScale),
+        (box.size.width * width) / effectiveScale,
+        (box.size.height * height) / effectiveScale
     );
 
     return @{
@@ -35,7 +36,7 @@ static NSDictionary *agentos_box_dictionary(CGRect box, CGFloat width, CGFloat h
     };
 }
 
-static NSArray *agentos_recognize_text(CGImageRef image) {
+static NSArray *agentos_recognize_text(CGImageRef image, CGFloat offsetX, CGFloat offsetY, CGFloat scale) {
     if (!image) {
         return @[];
     }
@@ -63,7 +64,7 @@ static NSArray *agentos_recognize_text(CGImageRef image) {
         [observations addObject:@{
             @"text": candidate.string ?: @"",
             @"confidence": @(candidate.confidence),
-            @"box": agentos_box_dictionary(observation.boundingBox, width, height)
+            @"box": agentos_box_dictionary(observation.boundingBox, width, height, offsetX, offsetY, scale)
         }];
     }
 
@@ -84,6 +85,53 @@ static CGImageRef agentos_create_image_from_path(const char *path) {
     CGImageRef image = CGImageSourceCreateImageAtIndex(source, 0, NULL);
     CFRelease(source);
     return image;
+}
+
+static CGImageRef agentos_crop_image(CGImageRef image, CGRect region) {
+    if (!image) {
+        return nil;
+    }
+
+    CGFloat width = (CGFloat)CGImageGetWidth(image);
+    CGFloat height = (CGFloat)CGImageGetHeight(image);
+    CGRect cropRect = CGRectMake(
+        MAX(0, MIN(width - 1, region.origin.x * width)),
+        MAX(0, MIN(height - 1, region.origin.y * height)),
+        MAX(1, MIN(width, region.size.width * width)),
+        MAX(1, MIN(height, region.size.height * height))
+    );
+    cropRect.origin.x = MIN(cropRect.origin.x, width - cropRect.size.width);
+    cropRect.origin.y = MIN(cropRect.origin.y, height - cropRect.size.height);
+    return CGImageCreateWithImageInRect(image, cropRect);
+}
+
+static CGImageRef agentos_scale_image(CGImageRef image, CGFloat scale) {
+    if (!image || scale <= 1.01) {
+        return image ? CGImageRetain(image) : nil;
+    }
+
+    size_t width = (size_t)MAX(1, CGImageGetWidth(image) * scale);
+    size_t height = (size_t)MAX(1, CGImageGetHeight(image) * scale);
+    CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+    CGContextRef context = CGBitmapContextCreate(
+        NULL,
+        width,
+        height,
+        8,
+        0,
+        colorSpace,
+        kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big
+    );
+    CGColorSpaceRelease(colorSpace);
+    if (!context) {
+        return CGImageRetain(image);
+    }
+
+    CGContextSetInterpolationQuality(context, kCGInterpolationHigh);
+    CGContextDrawImage(context, CGRectMake(0, 0, width, height), image);
+    CGImageRef scaled = CGBitmapContextCreateImage(context);
+    CGContextRelease(context);
+    return scaled ?: CGImageRetain(image);
 }
 
 static CGEventFlags agentos_modifier_flags(NSString *modifiersCSV) {
@@ -203,7 +251,7 @@ char *agentos_macos_list_windows_json(void) {
 char *agentos_macos_ocr_image_json(const char *path) {
     @autoreleasepool {
         CGImageRef image = agentos_create_image_from_path(path);
-        NSArray *observations = agentos_recognize_text(image);
+        NSArray *observations = agentos_recognize_text(image, 0, 0, 1);
         if (image) {
             CGImageRelease(image);
         }
@@ -211,10 +259,49 @@ char *agentos_macos_ocr_image_json(const char *path) {
     }
 }
 
+char *agentos_macos_ocr_image_region_json(const char *path, double x, double y, double width, double height, double scale) {
+    @autoreleasepool {
+        CGImageRef image = agentos_create_image_from_path(path);
+        if (!image) {
+            return agentos_json_string(@{ @"observations": @[] });
+        }
+
+        CGRect normalizedRegion = CGRectMake(
+            MAX(0, MIN(1, x)),
+            MAX(0, MIN(1, y)),
+            MAX(0.01, MIN(1, width)),
+            MAX(0.01, MIN(1, height))
+        );
+        if (normalizedRegion.origin.x + normalizedRegion.size.width > 1) {
+            normalizedRegion.size.width = MAX(0.01, 1 - normalizedRegion.origin.x);
+        }
+        if (normalizedRegion.origin.y + normalizedRegion.size.height > 1) {
+            normalizedRegion.size.height = MAX(0.01, 1 - normalizedRegion.origin.y);
+        }
+
+        CGFloat imageWidth = (CGFloat)CGImageGetWidth(image);
+        CGFloat imageHeight = (CGFloat)CGImageGetHeight(image);
+        CGFloat offsetX = normalizedRegion.origin.x * imageWidth;
+        CGFloat offsetY = normalizedRegion.origin.y * imageHeight;
+        CGImageRef cropped = agentos_crop_image(image, normalizedRegion);
+        CGImageRef scaled = agentos_scale_image(cropped, MAX(1, scale));
+        NSArray *observations = agentos_recognize_text(scaled, offsetX, offsetY, MAX(1, scale));
+
+        if (scaled) {
+            CGImageRelease(scaled);
+        }
+        if (cropped) {
+            CGImageRelease(cropped);
+        }
+        CGImageRelease(image);
+        return agentos_json_string(@{ @"observations": observations ?: @[] });
+    }
+}
+
 char *agentos_macos_find_text_json(const char *path, const char *query) {
     @autoreleasepool {
         CGImageRef image = agentos_create_image_from_path(path);
-        NSArray *observations = agentos_recognize_text(image);
+        NSArray *observations = agentos_recognize_text(image, 0, 0, 1);
         if (image) {
             CGImageRelease(image);
         }

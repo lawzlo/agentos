@@ -8,6 +8,7 @@ import type {
   SidecarFindTextResult,
   SidecarHealthResult,
   SidecarListWindowsResult,
+  SidecarOcrOptions,
   SidecarOcrResult,
   SidecarPermissionsResult
 } from "../../types/native-sidecar.js";
@@ -114,6 +115,11 @@ export interface MacOSHostBridgeOptions {
   sidecarArgs?: string[];
 }
 
+interface SidecarRequestOptions {
+  timeoutMs?: number;
+  resetSidecarOnFailure?: boolean;
+}
+
 export class MacOSHostBridge {
   sidecar: NativeSidecarClient;
 
@@ -135,14 +141,14 @@ export class MacOSHostBridge {
       args.push(filePath);
       await execFileAsync("screencapture", args);
       return { filePath, windowNumber: windowNumber ?? null };
-    });
+    }, { timeoutMs: 1200 });
   }
 
   async launchApp(name: string): Promise<unknown> {
     return this.#requestSidecar("launch_app", { name }, async () => {
       await execFileAsync("open", ["-a", name]);
       return { launched: name };
-    });
+    }, { timeoutMs: 1200 });
   }
 
   async focusApp(name: string): Promise<unknown> {
@@ -157,7 +163,7 @@ export class MacOSHostBridge {
         `tell application "System Events" to set frontmost of process "${escapeAppleScript(name)}" to true`
       ]);
       return { focused: name };
-    });
+    }, { timeoutMs: 900 });
   }
 
   async getFrontmostApp(): Promise<unknown> {
@@ -167,15 +173,15 @@ export class MacOSHostBridge {
         'tell application "System Events" to get name of first application process whose frontmost is true'
       ]);
       return { appName: stdout.trim() };
-    });
+    }, { timeoutMs: 700 });
   }
 
   async getPermissionsStatus(): Promise<SidecarPermissionsResult> {
-    return this.#requestSidecar<SidecarPermissionsResult>("permissions_status", {}, null);
+    return this.#requestSidecar<SidecarPermissionsResult>("permissions_status", {}, null, { timeoutMs: 1500 });
   }
 
   async listWindows(): Promise<SidecarListWindowsResult> {
-    return this.#requestSidecar<SidecarListWindowsResult>("list_windows", {}, null);
+    return this.#requestSidecar<SidecarListWindowsResult>("list_windows", {}, null, { timeoutMs: 1500 });
   }
 
   async getAccessibilitySnapshot(appName: string): Promise<SidecarAccessibilitySnapshotResult> {
@@ -205,7 +211,8 @@ export class MacOSHostBridge {
           windows: Array.isArray(payload.windows) ? payload.windows : [],
           elements: Array.isArray(payload.elements) ? payload.elements : []
         };
-      }
+      },
+      { timeoutMs: 1800 }
     );
   }
 
@@ -229,12 +236,23 @@ export class MacOSHostBridge {
     return this.#requestSidecar("scroll", { dx, dy }, null);
   }
 
-  async ocrImage(filePath: string): Promise<SidecarOcrResult> {
-    return this.#requestSidecar<SidecarOcrResult>("ocr_image", { filePath }, null);
+  async ocrImage(filePath: string, options: SidecarOcrOptions = {}): Promise<SidecarOcrResult> {
+    const region = options.region ?? null;
+    const scale = Number(options.scale ?? 0);
+    return this.#requestSidecar<SidecarOcrResult>(
+      "ocr_image",
+      {
+        filePath,
+        ...(region ? { region } : {}),
+        ...(Number.isFinite(scale) && scale > 0 ? { scale } : {})
+      },
+      null,
+      { timeoutMs: 3500 }
+    );
   }
 
   async findText(filePath: string, query: string): Promise<SidecarFindTextResult> {
-    return this.#requestSidecar<SidecarFindTextResult>("find_text", { filePath, query }, null);
+    return this.#requestSidecar<SidecarFindTextResult>("find_text", { filePath, query }, null, { timeoutMs: 2500 });
   }
 
   async sidecarHealth(): Promise<SidecarHealthResult> {
@@ -255,12 +273,16 @@ export class MacOSHostBridge {
   async #requestSidecar<TResult>(
     method: string,
     params: Record<string, unknown>,
-    fallback: (() => Promise<TResult>) | null
+    fallback: (() => Promise<TResult>) | null,
+    { timeoutMs = 15000, resetSidecarOnFailure = true }: SidecarRequestOptions = {}
   ): Promise<TResult> {
     if (await this.sidecar.isAvailable()) {
       try {
-        return await this.sidecar.request<TResult>(method, params);
+        return await this.sidecar.request<TResult>(method, params, { timeoutMs });
       } catch {
+        if (resetSidecarOnFailure) {
+          await this.sidecar.shutdown().catch(() => null);
+        }
         if (fallback) {
           return fallback();
         }

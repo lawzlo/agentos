@@ -172,13 +172,13 @@ async function createProbeWorkspace(appName: string, workspaceName: string, nowI
 function createProbeTimeouts(request: DesktopProbeRequest): Partial<DesktopSurfaceTimeoutConfig> {
   const baseTimeoutMs = Math.max(250, Number(request.timeoutMs ?? 1800));
   return {
-    focusMs: Math.min(1500, baseTimeoutMs),
-    frontmostMs: Math.min(1200, baseTimeoutMs),
-    captureMs: Math.max(500, Math.min(2500, baseTimeoutMs)),
-    ocrMs: Math.max(500, Math.min(2500, baseTimeoutMs)),
-    windowsMs: Math.min(1200, baseTimeoutMs),
-    permissionsMs: Math.min(1200, baseTimeoutMs),
-    accessibilityMs: Math.min(1200, baseTimeoutMs)
+    focusMs: Math.min(2000, baseTimeoutMs),
+    frontmostMs: Math.min(1800, baseTimeoutMs),
+    captureMs: Math.max(1200, Math.min(5000, baseTimeoutMs)),
+    ocrMs: Math.max(1200, Math.min(5000, baseTimeoutMs)),
+    windowsMs: Math.min(1800, baseTimeoutMs),
+    permissionsMs: Math.min(1500, baseTimeoutMs),
+    accessibilityMs: Math.min(2200, baseTimeoutMs)
   };
 }
 

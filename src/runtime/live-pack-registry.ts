@@ -992,6 +992,10 @@ function symbolNoiseRatio(value: string): number {
   return Math.max(0, normalized.length - signalCount) / normalized.length;
 }
 
+function isOcrSource(value: unknown) {
+  return String(value ?? "").trim().toLowerCase().startsWith("ocr");
+}
+
 function scoreWeChatCandidate({
   candidate,
   worldState
@@ -1016,8 +1020,14 @@ function scoreWeChatCandidate({
   if (source === "accessibility") {
     score += 12;
   }
-  if (source === "ocr") {
+  if (isOcrSource(source)) {
     score += 6;
+  }
+  if (source.includes("ocr-wechat-list")) {
+    score += 18;
+  }
+  if (source.includes("ocr-wechat-compose")) {
+    score -= 32;
   }
   if (UNREAD_PATTERN.test(hintText)) {
     score += 28;
@@ -1055,23 +1065,41 @@ function scoreWeChatCandidate({
   if (/[\p{L}\u4e00-\u9fff]/u.test(summary) && !looksLikeUrlOrDomainToken(summary) && !looksLikeDateOrTimeToken(summary)) {
     score += 6;
   }
-  if (source === "ocr") {
-    const windows = Array.isArray((worldState?.appContext as Record<string, unknown> | null)?.windows)
-      ? (((worldState?.appContext as Record<string, unknown>).windows as Array<Record<string, unknown>>).filter((entry) => {
+  if (isOcrSource(source)) {
+    const appContext = (worldState?.appContext ?? null) as Record<string, unknown> | null;
+    const windows = Array.isArray(appContext?.windows)
+      ? (appContext.windows as Array<Record<string, unknown>>).filter((entry) => {
           const owner = String(entry?.ownerName ?? "").toLowerCase();
           return owner.includes("wechat") || owner.includes("微信");
-        }))
+        })
       : [];
     const primaryWindow = windows[0] ?? null;
+    const captureWindowNumber = Number(appContext?.captureWindowNumber ?? NaN);
     const bounds = candidate.bounds ?? null;
     const windowBounds = (primaryWindow?.bounds ?? null) as InteractionCandidate["bounds"] | null;
     if (bounds && windowBounds) {
-      const relativeX = Number(bounds.centerX ?? 0) - Number(windowBounds.x ?? 0);
-      const relativeY = Number(bounds.centerY ?? 0) - Number(windowBounds.y ?? 0);
+      const windowNumber = Number((primaryWindow as Record<string, unknown> | null)?.windowNumber ?? NaN);
       const windowWidth = Math.max(1, Number(windowBounds.width ?? 1));
       const windowHeight = Math.max(1, Number(windowBounds.height ?? 1));
+      const usingWindowLocalCoordinates =
+        Number.isFinite(captureWindowNumber)
+        && captureWindowNumber > 0
+        && Number.isFinite(windowNumber)
+        && captureWindowNumber === windowNumber;
+      const relativeX = usingWindowLocalCoordinates
+        ? Number(bounds.centerX ?? 0)
+        : Number(bounds.centerX ?? 0) - Number(windowBounds.x ?? 0);
+      const relativeY = usingWindowLocalCoordinates
+        ? Number(bounds.centerY ?? 0)
+        : Number(bounds.centerY ?? 0) - Number(windowBounds.y ?? 0);
       if (relativeX >= 0 && relativeX <= windowWidth * 0.45) {
         score += 12;
+      }
+      if (relativeX > windowWidth * 0.5) {
+        score -= 10;
+      }
+      if (relativeY >= 0 && relativeY <= windowHeight * 0.12) {
+        score -= 18;
       }
       if (relativeY >= 0 && relativeY <= windowHeight * 0.82) {
         score += 4;
@@ -1098,8 +1126,10 @@ function findWeChatComposeCandidate(worldState: WorldState | null): InteractionC
   const candidates = conversationCandidates(worldState);
   return (
     candidates.find((candidate) => {
+      const source = String((candidate.sourceHints ?? {}).source ?? "").toLowerCase();
       const hintText = candidateHintText(candidate);
       return (
+        source.includes("ocr-wechat-compose") ||
         candidate.role === "textbox" ||
         /(message|reply|input|chat|消息|回复|输入|请输入)/iu.test(hintText) ||
         /(message|reply|input|chat|消息|回复|输入|请输入)/iu.test(candidate.text)
@@ -1127,8 +1157,9 @@ function findWeChatSendCandidate(worldState: WorldState | null): InteractionCand
   return (
     candidates.find((candidate) => {
       const hintText = candidateHintText(candidate);
+      const source = String((candidate.sourceHints ?? {}).source ?? "").toLowerCase();
       return (
-        (candidate.role === "button" || String((candidate.sourceHints ?? {}).source ?? "").toLowerCase() === "ocr") &&
+        (candidate.role === "button" || isOcrSource(source)) &&
         (SEND_PATTERN.test(hintText) || SEND_PATTERN.test(candidate.text))
       );
     }) ?? null
@@ -1199,6 +1230,77 @@ function buildWeChatReplySteps(): RuntimeStep[] {
       checkpoint: false
     }
   ];
+}
+
+function buildWeChatReplyStepsWithComposerFallback({
+  includeSendStep = false
+}: {
+  includeSendStep?: boolean;
+} = {}): RuntimeStep[] {
+  const steps: RuntimeStep[] = [
+    {
+      label: "Open unread WeChat conversation",
+      surface: "desktop",
+      action: "clickTarget",
+      params: { targetQuery: "{{openTarget}}" },
+      checkpoint: false
+    },
+    {
+      label: "Focus WeChat composer area",
+      surface: "desktop",
+      action: "clickAt",
+      params: { x: "{{composeX}}", y: "{{composeY}}" },
+      checkpoint: false
+    },
+    {
+      label: "Type WeChat reply",
+      surface: "desktop",
+      action: "typeText",
+      params: { text: "{{typeText}}" },
+      checkpoint: false
+    }
+  ];
+  if (includeSendStep) {
+    steps.push({
+      label: "Send WeChat reply",
+      surface: "desktop",
+      action: "clickTarget",
+      params: { targetQuery: "{{sendTarget}}" },
+      checkpoint: false
+    });
+  }
+  return steps;
+}
+
+function findDesktopWindowBounds(worldState: WorldState | null, appName: string): InteractionCandidate["bounds"] | null {
+  const windows = Array.isArray((worldState?.appContext as { windows?: unknown[] } | null)?.windows)
+    ? (((worldState?.appContext as { windows?: unknown[] } | null)?.windows ?? []) as Array<Record<string, unknown>>)
+    : [];
+  const matched = windows.find((windowInfo) => {
+    const ownerName = String(windowInfo?.ownerName ?? "");
+    const windowName = String(windowInfo?.windowName ?? "");
+    return appName && (ownerName.includes(appName) || windowName.includes(appName));
+  });
+  return (matched?.bounds ?? null) as InteractionCandidate["bounds"] | null;
+}
+
+function deriveWeChatComposerFallback(worldState: WorldState | null): { x: number; y: number } | null {
+  const bounds = findDesktopWindowBounds(worldState, "WeChat");
+  if (!bounds) {
+    return null;
+  }
+  const x = Number(bounds.x ?? 0);
+  const y = Number(bounds.y ?? 0);
+  const width = Number(bounds.width ?? 0);
+  const height = Number(bounds.height ?? 0);
+  if (!(width > 0 && height > 0)) {
+    return null;
+  }
+
+  return {
+    x: x + width * 0.64,
+    y: y + height * 0.9
+  };
 }
 
 function normalizeMailSummary(value: string): string {
@@ -2565,7 +2667,10 @@ function createWeChatPack(): LivePack {
         surface: "desktop",
         desktopRequireAccessibility: false
       });
-      if (!findWeChatComposeCandidate(threadState)) {
+      const composeCandidate = findWeChatComposeCandidate(threadState);
+      const sendCandidate = findWeChatSendCandidate(threadState);
+      const composerFallback = composeCandidate ? null : deriveWeChatComposerFallback(threadState);
+      if (!composeCandidate && !composerFallback) {
         return null;
       }
       const summary = String(detection.summary ?? "").trim();
@@ -2578,8 +2683,14 @@ function createWeChatPack(): LivePack {
           ...(detection.inputs ?? {}),
           watchContext: context.join("\n"),
           openTarget,
-          typeTarget: pickWeChatComposeQuery(threadState),
-          sendTarget: pickWeChatSendQuery(threadState)
+          ...(composeCandidate ? { typeTarget: pickWeChatComposeQuery(threadState) } : {}),
+          ...(sendCandidate ? { sendTarget: pickWeChatSendQuery(threadState) } : {}),
+          ...(composerFallback
+            ? {
+                composeX: composerFallback.x,
+                composeY: composerFallback.y
+              }
+            : {})
         },
         metadata: {
           ...(detection.metadata ?? {}),
@@ -2594,7 +2705,11 @@ function createWeChatPack(): LivePack {
         },
         taskSpec: {
           preferredSurface: "desktop",
-          steps: buildWeChatReplySteps()
+          steps: composeCandidate
+            ? buildWeChatReplySteps()
+            : buildWeChatReplyStepsWithComposerFallback({
+                includeSendStep: Boolean(sendCandidate)
+              })
         }
       };
     },

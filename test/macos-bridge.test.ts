@@ -154,3 +154,112 @@ rl.on("line", (line) => {
     }
   }
 });
+
+test("macOS host bridge forwards OCR region options to the sidecar", async () => {
+  const tempDir = await createTempDir("agentos-sidecar-ocr-region-");
+  const sidecarPath = path.join(tempDir, "fake-sidecar.mjs");
+  const previousSidecar = process.env.AGENTOS_NATIVE_SIDECAR;
+  const previousDisable = process.env.AGENTOS_DISABLE_RUST_SIDECAR;
+
+  await fs.writeFile(
+    sidecarPath,
+    `#!/usr/bin/env node
+import readline from "node:readline";
+const rl = readline.createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+  const request = JSON.parse(line);
+  if (request.method !== "ocr_image") {
+    process.stdout.write(JSON.stringify({ id: request.id, ok: true, result: { ok: true } }) + "\\n");
+    return;
+  }
+  process.stdout.write(JSON.stringify({
+    id: request.id,
+    ok: true,
+    result: {
+      observations: [{
+        text: JSON.stringify({ region: request.params.region ?? null, scale: request.params.scale ?? null }),
+        confidence: 0.9,
+        box: { x: 1, y: 2, width: 3, height: 4, centerX: 2.5, centerY: 4 }
+      }]
+    }
+  }) + "\\n");
+});`,
+    "utf8"
+  );
+  await fs.chmod(sidecarPath, 0o755);
+
+  process.env.AGENTOS_NATIVE_SIDECAR = sidecarPath;
+  delete process.env.AGENTOS_DISABLE_RUST_SIDECAR;
+
+  try {
+    const bridge = new MacOSHostBridge({
+      dataDir: tempDir
+    });
+    const ocr = await bridge.ocrImage("dummy.png", {
+      region: { x: 0.1, y: 0.2, width: 0.3, height: 0.4 },
+      scale: 2.5
+    });
+    const forwarded = JSON.parse(String(ocr.observations[0]?.text ?? "{}"));
+    assert.deepEqual(forwarded.region, { x: 0.1, y: 0.2, width: 0.3, height: 0.4 });
+    assert.equal(forwarded.scale, 2.5);
+    await bridge.shutdown();
+  } finally {
+    if (previousSidecar === undefined) {
+      delete process.env.AGENTOS_NATIVE_SIDECAR;
+    } else {
+      process.env.AGENTOS_NATIVE_SIDECAR = previousSidecar;
+    }
+    if (previousDisable === undefined) {
+      delete process.env.AGENTOS_DISABLE_RUST_SIDECAR;
+    } else {
+      process.env.AGENTOS_DISABLE_RUST_SIDECAR = previousDisable;
+    }
+  }
+});
+
+test("macOS host bridge falls back and resets the sidecar after a frontmost timeout", { skip: !isMac }, async () => {
+  const tempDir = await createTempDir("agentos-sidecar-timeout-");
+  const sidecarPath = path.join(tempDir, "hanging-sidecar.mjs");
+  const previousSidecar = process.env.AGENTOS_NATIVE_SIDECAR;
+  const previousDisable = process.env.AGENTOS_DISABLE_RUST_SIDECAR;
+
+  await fs.writeFile(
+    sidecarPath,
+    `#!/usr/bin/env node
+import readline from "node:readline";
+const rl = readline.createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+  const request = JSON.parse(line);
+  if (request.method === "frontmost_app") {
+    return;
+  }
+  process.stdout.write(JSON.stringify({ id: request.id, ok: true, result: { ok: true } }) + "\\n");
+});`,
+    "utf8"
+  );
+  await fs.chmod(sidecarPath, 0o755);
+
+  process.env.AGENTOS_NATIVE_SIDECAR = sidecarPath;
+  delete process.env.AGENTOS_DISABLE_RUST_SIDECAR;
+
+  try {
+    const bridge = new MacOSHostBridge({
+      dataDir: tempDir
+    });
+    const frontmost = await bridge.getFrontmostApp() as Record<string, unknown>;
+    assert.equal(typeof frontmost.appName, "string");
+    assert.notEqual(String(frontmost.appName ?? "").trim(), "");
+    await bridge.shutdown();
+  } finally {
+    if (previousSidecar === undefined) {
+      delete process.env.AGENTOS_NATIVE_SIDECAR;
+    } else {
+      process.env.AGENTOS_NATIVE_SIDECAR = previousSidecar;
+    }
+    if (previousDisable === undefined) {
+      delete process.env.AGENTOS_DISABLE_RUST_SIDECAR;
+    } else {
+      process.env.AGENTOS_DISABLE_RUST_SIDECAR = previousDisable;
+    }
+  }
+});

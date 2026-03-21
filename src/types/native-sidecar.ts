@@ -41,6 +41,18 @@ export interface SidecarOcrObservation {
   box: SidecarBounds;
 }
 
+export interface SidecarNormalizedRegion {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface SidecarOcrOptions {
+  region?: SidecarNormalizedRegion | null;
+  scale?: number | null;
+}
+
 export interface SidecarOcrResult {
   observations: SidecarOcrObservation[];
 }
