@@ -32,6 +32,26 @@ interface DesktopSurfaceReadinessProbe {
   }) => Promise<{ ready: boolean }>;
 }
 
+export interface DesktopProbeCandidateSummary {
+  id: string;
+  text: string;
+  role: string | null;
+  interactive: boolean;
+  source: string;
+  score?: number | null;
+  bounds?: InteractionCandidate["bounds"];
+  hints?: string[];
+}
+
+export interface DesktopConversationPackAnalysis {
+  packName: string;
+  foreground: boolean;
+  unreadCandidate: DesktopProbeCandidateSummary | null;
+  composeCandidate: DesktopProbeCandidateSummary | null;
+  sendCandidate: DesktopProbeCandidateSummary | null;
+  topUnreadCandidates: DesktopProbeCandidateSummary[];
+}
+
 function defaultDesktopAppTargetForLivePack(livePack: string | null | undefined): string | null {
   switch (String(livePack ?? "")) {
     case "slack-desktop":
@@ -653,6 +673,41 @@ function candidateHintStrings(candidate: InteractionCandidate | null | undefined
 
 function candidateHintText(candidate: InteractionCandidate | null | undefined): string {
   return candidateHintStrings(candidate).join(" ").trim();
+}
+
+function summarizeProbeCandidate(
+  candidate: InteractionCandidate | null | undefined,
+  score: number | null = null
+): DesktopProbeCandidateSummary | null {
+  if (!candidate) {
+    return null;
+  }
+
+  return {
+    id: String(candidate.id ?? ""),
+    text: String(candidate.text ?? "").trim(),
+    role: candidate.role ?? null,
+    interactive: Boolean(candidate.isInteractive),
+    source: String((candidate.sourceHints ?? {}).source ?? "unknown"),
+    score,
+    bounds: candidate.bounds,
+    hints: candidateHintStrings(candidate).slice(0, 6)
+  };
+}
+
+function rankProbeCandidates(
+  worldState: WorldState | null,
+  scorer: (args: { candidate: InteractionCandidate; worldState: WorldState | null }) => number | null,
+  candidates: InteractionCandidate[],
+  limit = 5
+): DesktopProbeCandidateSummary[] {
+  return candidates
+    .map((candidate) => ({ candidate, score: scorer({ candidate, worldState }) }))
+    .filter((entry): entry is { candidate: InteractionCandidate; score: number } => Number.isFinite(entry.score))
+    .sort((left, right) => right.score - left.score)
+    .slice(0, limit)
+    .map((entry) => summarizeProbeCandidate(entry.candidate, entry.score))
+    .filter((entry): entry is DesktopProbeCandidateSummary => Boolean(entry));
 }
 
 function normalizeSlackSummary(value: string): string {
@@ -1432,16 +1487,7 @@ function findBossCandidate(worldState: WorldState | null): InteractionCandidate 
 }
 
 function pickMailComposeQuery(worldState: WorldState | null, surface: LivePackSurface): string {
-  const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
-  const composeCandidate =
-    candidates.find((candidate) => {
-      const hintText = candidateHintText(candidate);
-      return (
-        candidate.role === "textbox" ||
-        /(reply|message|compose|write|回复|撰写|输入)/iu.test(hintText) ||
-        /(reply|message|compose|write|回复|撰写|输入)/iu.test(candidate.text)
-      );
-    }) ?? null;
+  const composeCandidate = findMailComposeCandidate(worldState);
 
   if (!composeCandidate) {
     return /[\u4e00-\u9fff]/u.test(String(worldState?.visibleText ?? ""))
@@ -1462,13 +1508,22 @@ function pickMailComposeQuery(worldState: WorldState | null, surface: LivePackSu
   );
 }
 
-function pickMailSendQuery(worldState: WorldState | null, surface: LivePackSurface): string {
+function findMailComposeCandidate(worldState: WorldState | null): InteractionCandidate | null {
   const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
-  const sendCandidate =
+  return (
     candidates.find((candidate) => {
       const hintText = candidateHintText(candidate);
-      return candidate.role === "button" && (SEND_PATTERN.test(hintText) || SEND_PATTERN.test(candidate.text));
-    }) ?? null;
+      return (
+        candidate.role === "textbox" ||
+        /(reply|message|compose|write|回复|撰写|输入)/iu.test(hintText) ||
+        /(reply|message|compose|write|回复|撰写|输入)/iu.test(candidate.text)
+      );
+    }) ?? null
+  );
+}
+
+function pickMailSendQuery(worldState: WorldState | null, surface: LivePackSurface): string {
+  const sendCandidate = findMailSendCandidate(worldState);
 
   if (!sendCandidate) {
     return /[\u4e00-\u9fff]/u.test(String(worldState?.visibleText ?? "")) ? "发送" : surface === "browser" ? "Send reply" : "Send";
@@ -1478,6 +1533,16 @@ function pickMailSendQuery(worldState: WorldState | null, surface: LivePackSurfa
     String(sendCandidate.text ?? "").trim() ||
     String(((sendCandidate.sourceHints ?? {}) as Record<string, unknown>).ariaLabel ?? "").trim() ||
     (/[\u4e00-\u9fff]/u.test(String(worldState?.visibleText ?? "")) ? "发送" : surface === "browser" ? "Send reply" : "Send")
+  );
+}
+
+function findMailSendCandidate(worldState: WorldState | null): InteractionCandidate | null {
+  const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
+  return (
+    candidates.find((candidate) => {
+      const hintText = candidateHintText(candidate);
+      return candidate.role === "button" && (SEND_PATTERN.test(hintText) || SEND_PATTERN.test(candidate.text));
+    }) ?? null
   );
 }
 
@@ -1797,6 +1862,66 @@ function buildBossReplySteps(): RuntimeStep[] {
       checkpoint: false
     }
   ];
+}
+
+export function analyzeDesktopConversationPack(
+  packName: string,
+  worldState: WorldState | null
+): DesktopConversationPackAnalysis | null {
+  const normalizedPackName = String(packName ?? "").trim();
+  if (!normalizedPackName) {
+    return null;
+  }
+
+  if (normalizedPackName === "slack-desktop") {
+    const candidates = conversationCandidates(worldState, { desktopRequiresAccessibility: true });
+    return {
+      packName: normalizedPackName,
+      foreground: isSlackDesktopForeground(worldState),
+      unreadCandidate: summarizeProbeCandidate(findSlackUnreadCandidate(worldState)),
+      composeCandidate: summarizeProbeCandidate(findSlackComposeCandidate(worldState, "desktop")),
+      sendCandidate: summarizeProbeCandidate(findSlackSendCandidate(worldState, "desktop")),
+      topUnreadCandidates: rankProbeCandidates(worldState, scoreSlackCandidate, candidates)
+    };
+  }
+
+  if (normalizedPackName === "wechat-desktop") {
+    const candidates = conversationCandidates(worldState, { desktopRequiresAccessibility: true });
+    return {
+      packName: normalizedPackName,
+      foreground: isWeChatDesktopForeground(worldState),
+      unreadCandidate: summarizeProbeCandidate(findWeChatUnreadCandidate(worldState)),
+      composeCandidate: summarizeProbeCandidate(findWeChatComposeCandidate(worldState)),
+      sendCandidate: summarizeProbeCandidate(findWeChatSendCandidate(worldState)),
+      topUnreadCandidates: rankProbeCandidates(worldState, scoreWeChatCandidate, candidates)
+    };
+  }
+
+  if (normalizedPackName === "outlook-desktop") {
+    const candidates = conversationCandidates(worldState, { desktopRequiresAccessibility: true });
+    return {
+      packName: normalizedPackName,
+      foreground: isOutlookDesktopForeground(worldState),
+      unreadCandidate: summarizeProbeCandidate(findOutlookUnreadCandidate(worldState)),
+      composeCandidate: summarizeProbeCandidate(findOutlookComposeCandidate(worldState)),
+      sendCandidate: summarizeProbeCandidate(findOutlookSendCandidate(worldState)),
+      topUnreadCandidates: rankProbeCandidates(worldState, scoreOutlookCandidate, candidates)
+    };
+  }
+
+  if (normalizedPackName === "generic-mail-desktop") {
+    const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
+    return {
+      packName: normalizedPackName,
+      foreground: true,
+      unreadCandidate: summarizeProbeCandidate(findMailUnreadCandidate(worldState)),
+      composeCandidate: summarizeProbeCandidate(findMailComposeCandidate(worldState)),
+      sendCandidate: summarizeProbeCandidate(findMailSendCandidate(worldState)),
+      topUnreadCandidates: rankProbeCandidates(worldState, scoreMailCandidate, candidates)
+    };
+  }
+
+  return null;
 }
 
 function createDocumentPack({
