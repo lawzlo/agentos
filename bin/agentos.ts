@@ -25,6 +25,7 @@ import { commandSetup } from "./commands/setup-command.js";
 import { commandModel } from "./commands/model-command.js";
 import { commandUninstall } from "./commands/uninstall-command.js";
 import { commandDesktop } from "./commands/desktop-command.js";
+import { commandState } from "./commands/state-command.js";
 import { runInteractiveShell } from "./interactive-shell.js";
 import { boolOption, parseArgs, print, type CliOptions } from "./cli-utils.js";
 
@@ -34,6 +35,7 @@ agentos "<goal>" [--surface browser|desktop] [--workspace name] [--wait]
 agentos model setup|status|clear [--provider openai|anthropic|gemini|openai_compatible] [--tier fast|balanced|strong] [--api-key ...] [--model ...] [--base-url ...]
 agentos setup [--fix] [--dry-run]
 agentos uninstall [--purge] [--dry-run]
+agentos state [--surface browser|desktop] [--app WeChat] [--pack wechat-desktop|slack-browser|outlook-desktop|generic-mail-browser|boss-browser] [--url https://...] [--workspace name] [--limit 8] [--timeout-ms 1800] [--wait-ready false]
 agentos desktop probe --app WeChat [--pack wechat-desktop] [--workspace name] [--limit 8] [--timeout-ms 1800] [--wait-ready false]
 agentos daemon start|stop|status|logs|restart|install|uninstall
 agentos run "<goal>" [--surface browser|desktop] [--workspace name] [--skill name] [--input key=value] [--wait]
@@ -68,6 +70,7 @@ function isKnownCommand(command: string | undefined) {
     "setup",
     "model",
     "uninstall",
+    "state",
     "desktop",
     "doctor",
     "version",
@@ -161,6 +164,11 @@ async function main() {
 
   if (command === "uninstall") {
     await commandUninstall(sharedOptions);
+    return;
+  }
+
+  if (command === "state") {
+    await commandState(subcommand, positionals, sharedOptions);
     return;
   }
 

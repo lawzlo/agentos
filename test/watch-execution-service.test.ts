@@ -143,6 +143,42 @@ test("buildTaskSpecFromWatchRule keeps explicit send steps when autoSend is true
   assert.equal(taskSpec.steps?.some((step) => /send/i.test(String(step.label ?? ""))), true);
 });
 
+test("buildTaskSpecFromWatchRule forces explicit reply plans into planned mode and derives a preview for verification", () => {
+  const service = createService();
+  const watchRule = createWatchRule();
+
+  const taskSpec = service.buildTaskSpecFromWatchRule(
+    watchRule,
+    {
+      summary: "#general",
+      taskSpec: {
+        preferredSurface: "desktop",
+        steps: [
+          {
+            label: "Open thread",
+            surface: "desktop",
+            action: "clickTarget",
+            params: { targetQuery: "{{openTarget}}" }
+          },
+          {
+            label: "Type reply",
+            surface: "desktop",
+            action: "typeText",
+            params: { text: "{{typeText}}" }
+          }
+        ]
+      }
+    },
+    {
+      replyText: "This is a longer reply body that should still expose a stable preview snippet for verification."
+    }
+  );
+
+  assert.equal(taskSpec.executionMode, "planned");
+  assert.equal(typeof taskSpec.inputs?.typeTextPreview, "string");
+  assert.equal(String(taskSpec.inputs?.typeTextPreview).startsWith("This is a longer reply body"), true);
+});
+
 test("scan skips a watch trigger when extractContext cannot produce a stable reply context", async () => {
   const timestamp = new Date().toISOString();
   let storedRule = createWatchRule();

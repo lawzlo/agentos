@@ -226,6 +226,42 @@ export class BrowserSurfaceAdapter extends SurfaceAdapter {
     return null;
   }
 
+  async #hasVisibleOrEditableText(page: Page, text: string): Promise<{
+    textVisible: boolean;
+    inputValueVisible: boolean;
+  }> {
+    const textVisible = await page.getByText(text, { exact: false }).first().isVisible().catch(() => false);
+    if (textVisible) {
+      return {
+        textVisible: true,
+        inputValueVisible: false
+      };
+    }
+
+    const inputValueVisible = await page
+      .locator("input, textarea, [contenteditable='true']")
+      .evaluateAll((nodes, expected) => {
+        const needle = String(expected ?? "");
+        return nodes.some((node) => {
+          if (node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement) {
+            return node.value.includes(needle);
+          }
+
+          if (node instanceof HTMLElement && node.isContentEditable) {
+            return (node.innerText || node.textContent || "").includes(needle);
+          }
+
+          return false;
+        });
+      }, text)
+      .catch(() => false);
+
+    return {
+      textVisible: false,
+      inputValueVisible
+    };
+  }
+
   async discover({ workspace }) {
     const page = await this.#page(workspace);
     return {
@@ -504,9 +540,10 @@ export class BrowserSurfaceAdapter extends SurfaceAdapter {
     }
 
     if (typeof check.textVisible === "string" && check.textVisible) {
-      const visible = await page.getByText(check.textVisible, { exact: false }).first().isVisible().catch(() => false);
-      details.textVisible = visible;
-      if (!visible) {
+      const visible = await this.#hasVisibleOrEditableText(page, check.textVisible);
+      details.textVisible = visible.textVisible;
+      details.inputValueVisible = visible.inputValueVisible;
+      if (!visible.textVisible && !visible.inputValueVisible) {
         return { ok: false, details };
       }
     }

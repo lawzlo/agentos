@@ -3,7 +3,14 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 
-import { createTempDir, startAgentServer, startFixtureServer, startModelServer, waitForTask } from "./helpers.js";
+import {
+  createTempDir,
+  startAgentServer,
+  startFixtureServer,
+  startMailFixtureServer,
+  startModelServer,
+  waitForTask
+} from "./helpers.js";
 
 test("browser task runs, captures trace, and exposes outputs", async () => {
   const dataDir = await createTempDir();
@@ -269,6 +276,56 @@ test("planned tasks verify step expectations inline before later navigation", as
     assert.ok(completed.trace.events.some((event) => event.message.includes("Open demo page")));
   } finally {
     await fixture.close();
+    await server.close();
+  }
+});
+
+test("browser inline verification accepts reply text that is present in a textarea value", async () => {
+  const dataDir = await createTempDir();
+  const mail = await startMailFixtureServer();
+  const server = await startAgentServer({ dataDir });
+
+  try {
+    const replyText = "Thanks for your email. I received it and will follow up shortly.";
+    const createResponse = await fetch(`${server.baseUrl}/tasks`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        goal: "Open the mail thread and prefill a reply.",
+        preferredSurface: "browser",
+        steps: [
+          {
+            label: "Open unread mail thread",
+            surface: "browser",
+            action: "goto",
+            params: { url: `${mail.url}/mail?thread=mail-thread-1` }
+          },
+          {
+            label: "Type mail reply",
+            surface: "browser",
+            action: "typeIntoTarget",
+            params: {
+              targetQuery: "Reply to Project update",
+              text: replyText,
+              clear: false
+            },
+            expect: {
+              textVisible: replyText
+            }
+          }
+        ]
+      })
+    });
+    const { task } = await createResponse.json();
+
+    const completed = await waitForTask(server.baseUrl, task.id, (current) => current.status === "completed");
+    assert.equal(completed.status, "completed");
+    assert.ok(completed.trace.events.some((event) => event.type === "step.verified"));
+
+    const mailState = await mail.getState();
+    assert.equal(mailState.sentReplies.length, 0);
+  } finally {
+    await mail.close();
     await server.close();
   }
 });

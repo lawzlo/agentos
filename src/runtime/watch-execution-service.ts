@@ -212,6 +212,17 @@ function stripSendLikeSteps(steps: RuntimeStep[] | null | undefined, autoSend: u
   return steps.filter((step) => !isSendLikeStep(step));
 }
 
+function buildReplyPreview(value: unknown, maxLength = 48): string | null {
+  const normalized = String(value ?? "")
+    .replace(/\s+/gu, " ")
+    .trim();
+  if (!normalized) {
+    return null;
+  }
+
+  return normalized.slice(0, maxLength);
+}
+
 export class WatchExecutionService {
   controlPlane: WatchExecutionServiceOptions["controlPlane"];
   store: WatchExecutionServiceOptions["store"];
@@ -236,7 +247,7 @@ export class WatchExecutionService {
     overrides: Record<string, unknown> = {}
   ): TaskSpec {
     const detected = detection;
-    const runtimeInputs = {
+    const runtimeInputs: Record<string, unknown> = {
       ...(watchRule.taskInputs ?? {}),
       ...(detected.inputs ?? {}),
       watchRuleId: watchRule.id,
@@ -245,6 +256,10 @@ export class WatchExecutionService {
       ...(overrides.replyText && !detected.inputs?.typeText ? { typeText: overrides.replyText } : {}),
       ...(overrides.autoSend != null ? { autoSend: overrides.autoSend } : {})
     };
+    const replyPreview = buildReplyPreview(runtimeInputs.typeText);
+    if (replyPreview && runtimeInputs.typeTextPreview == null) {
+      runtimeInputs.typeTextPreview = replyPreview;
+    }
     const actionTemplate =
       !watchRule.skillName && watchRule.watchProfile?.actionTemplate?.length
         ? materializeWatchActionTemplate(
@@ -279,6 +294,9 @@ export class WatchExecutionService {
       ? materializeWatchActionTemplate(explicitTaskSpec.steps, runtimeInputs, templateInputs)
       : baseTaskSpec.steps;
     const filteredExplicitSteps = stripSendLikeSteps(explicitSteps, runtimeInputs.autoSend);
+    const resolvedExecutionMode =
+      explicitTaskSpec.executionMode ??
+      (filteredExplicitSteps?.length ? "planned" : baseTaskSpec.executionMode);
 
     return {
       ...baseTaskSpec,
@@ -287,7 +305,8 @@ export class WatchExecutionService {
         ...runtimeInputs,
         ...(explicitTaskSpec.inputs ?? {})
       },
-      steps: filteredExplicitSteps
+      steps: filteredExplicitSteps,
+      executionMode: resolvedExecutionMode
     };
   }
 

@@ -8,11 +8,13 @@ import { commandMemory } from "./commands/memory-command.js";
 import { commandProposals } from "./commands/proposals-command.js";
 import { commandJobs } from "./commands/jobs-command.js";
 import { commandModel } from "./commands/model-command.js";
+import { commandState } from "./commands/state-command.js";
 import { buildSetupReport, commandSetup, renderOnboardingNotice } from "./commands/setup-command.js";
 import {
   apiRequest,
   boolOption,
   daemonStatus,
+  parseArgs,
   type CliOptions,
   waitForTask
 } from "./cli-utils.js";
@@ -30,7 +32,7 @@ function banner() {
     "AgentOS interactive shell",
     "Type a task in plain language and press Enter.",
     "Start with /setup and /model setup, then a plain-language goal, then a watch or job when you want always-on behavior.",
-    "Slash commands: /help /setup [--fix] [--dry-run] /model [status|setup|clear] /status /doctor /ps /watch <goal> /watches /jobs /drafts /approve <draft-id> /reject <draft-id> [reason] /surface browser|desktop /workspace <name|clear> /wait on|off /exit"
+    "Slash commands: /help /setup [--fix] [--dry-run] /model [status|setup|clear] /state [--surface browser|desktop] [--app WeChat] [--pack ...] /status /doctor /ps /watch <goal> /watches /jobs /drafts /approve <draft-id> /reject <draft-id> [reason] /surface browser|desktop /workspace <name|clear> /wait on|off /exit"
   ].join("\n");
 }
 
@@ -146,6 +148,16 @@ async function handleSlashCommand(input: string, state: InteractiveSessionState)
   if (name === "model") {
     const next = firstWord(rest);
     await commandModel(next || "status", [], {});
+    return false;
+  }
+
+  if (name === "state") {
+    const { positionals, options } = parseArgs(rest ? rest.split(/\s+/u).filter(Boolean) : []);
+    await commandState(undefined, positionals, {
+      ...options,
+      surface: options.surface ?? state.surface,
+      workspace: options.workspace ?? state.workspace
+    });
     return false;
   }
 

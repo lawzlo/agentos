@@ -2567,6 +2567,112 @@ test("wechat desktop OCR scoring prefers list-region candidates over compose-reg
   assert.equal(detection?.summary, "Official Accounts");
 });
 
+test("wechat desktop pack can scroll the conversation list to find off-screen unread candidates", async () => {
+  let scrollCalls = 0;
+  const initialWorldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-wechat-scroll-search",
+    appContext: {
+      appName: "WeChat",
+      windows: [
+        {
+          ownerName: "WeChat",
+          windowName: "WeChat",
+          bounds: { x: 100, y: 40, width: 900, height: 700, centerX: 550, centerY: 390 }
+        }
+      ],
+      accessibilityCandidateCount: 0
+    },
+    capture: null,
+    ocrBlocks: [],
+    interactionCandidates: [],
+    visibleText: "微信\n最近聊天\n文件传输助手\n工作群\n",
+    recentActions: [],
+    summary: "WeChat conversation list",
+    timestamp: new Date().toISOString()
+  };
+  const scrolledWorldState = {
+    ...initialWorldState,
+    interactionCandidates: [
+      {
+        id: "ocr-thread-official-accounts",
+        surface: "desktop",
+        kind: "text",
+        text: "Official Accounts",
+        role: "text",
+        bounds: { x: 180, y: 210, width: 180, height: 28, centerX: 270, centerY: 224 },
+        confidence: 0.95,
+        sourceHints: { source: "ocr-wechat-list" },
+        isInteractive: true
+      }
+    ],
+    visibleText: "微信\nOfficial Accounts\n03/11\nhttps://apps.apple.co..\n"
+  };
+  const fakeSurface = {
+    async observe() {
+      return scrollCalls > 0 ? scrolledWorldState : initialWorldState;
+    },
+    async act({ step }) {
+      if (step.action === "scroll") {
+        scrollCalls += 1;
+      }
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("wechat-desktop");
+  const rule: WatchRule = {
+    id: "watch-wechat-scroll-search",
+    goal: "Always watch WeChat and reply to unread conversations",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "wechat-desktop-main",
+    skillName: null,
+    appTarget: "WeChat",
+    livePack: "wechat-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-wechat-scroll-search",
+    name: "wechat-desktop-main",
+    rootPath: "/tmp/wechat-desktop-main",
+    profilePath: "/tmp/wechat-desktop-main/profile",
+    downloadsPath: "/tmp/wechat-desktop-main/downloads",
+    artifactsPath: "/tmp/wechat-desktop-main/artifacts",
+    scratchPath: "/tmp/wechat-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: initialWorldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {} as never
+  });
+
+  assert.equal(scrollCalls > 0, true);
+  assert.equal(detection?.summary, "Official Accounts");
+  assert.equal(detection?.metadata?.observationPasses, 1);
+});
+
 test("wechat desktop pack ignores detections when WeChat is not the foreground app", async () => {
   const registry = new LivePackRegistry({
     surfaceRegistry: new SurfaceRegistry({})

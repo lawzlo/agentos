@@ -710,6 +710,17 @@ function rankProbeCandidates(
     .filter((entry): entry is DesktopProbeCandidateSummary => Boolean(entry));
 }
 
+function frontmostAppExpectation(appName: string): Record<string, unknown> {
+  return { frontmostApp: appName };
+}
+
+function prefillVerificationExpectation(appName: string): Record<string, unknown> {
+  return {
+    frontmostApp: appName,
+    textVisible: "{{typeTextPreview}}"
+  };
+}
+
 function normalizeSlackSummary(value: string): string {
   return String(value ?? "")
     .replace(/^[●•]\s*/u, "")
@@ -1113,13 +1124,19 @@ function scoreWeChatCandidate({
   return score;
 }
 
-function findWeChatUnreadCandidate(worldState: WorldState | null): InteractionCandidate | null {
+function rankWeChatUnreadCandidates(worldState: WorldState | null): Array<{
+  candidate: InteractionCandidate;
+  score: number;
+}> {
   const candidates = conversationCandidates(worldState);
-  const ranked = candidates
+  return candidates
     .map((candidate) => ({ candidate, score: scoreWeChatCandidate({ candidate, worldState }) }))
     .filter((entry): entry is { candidate: InteractionCandidate; score: number } => Number.isFinite(entry.score))
     .sort((left, right) => right.score - left.score);
-  return ranked[0]?.candidate ?? null;
+}
+
+function findWeChatUnreadCandidate(worldState: WorldState | null): InteractionCandidate | null {
+  return rankWeChatUnreadCandidates(worldState)[0]?.candidate ?? null;
 }
 
 function findWeChatComposeCandidate(worldState: WorldState | null): InteractionCandidate | null {
@@ -1180,6 +1197,141 @@ function pickWeChatSendQuery(worldState: WorldState | null): string {
   );
 }
 
+function buildWorldStateFingerprint(worldState: WorldState | null): string {
+  const candidateSignature = Array.isArray(worldState?.interactionCandidates)
+    ? worldState.interactionCandidates
+        .slice(0, 12)
+        .map((candidate) => `${candidate.id}:${String(candidate.text ?? "").trim()}`)
+        .join("|")
+    : "";
+  return fingerprint(`${String(worldState?.visibleText ?? "").trim()}|${candidateSignature}`);
+}
+
+function deriveWeChatConversationListPoint(worldState: WorldState | null): { x: number; y: number } | null {
+  const windowBounds = findDesktopWindowBounds(worldState, "WeChat");
+  if (windowBounds) {
+    return {
+      x: Math.round(Number(windowBounds.x ?? 0) + Number(windowBounds.width ?? 0) * 0.22),
+      y: Math.round(Number(windowBounds.y ?? 0) + Number(windowBounds.height ?? 0) * 0.3)
+    };
+  }
+
+  const candidate = findWeChatUnreadCandidate(worldState);
+  if (candidate?.bounds) {
+    return {
+      x: Math.round(Number(candidate.bounds.centerX ?? 0)),
+      y: Math.round(Number(candidate.bounds.centerY ?? 0))
+    };
+  }
+
+  return null;
+}
+
+async function scanWeChatUnreadConversation({
+  rule,
+  workspace,
+  surfaceRegistry,
+  initialWorldState
+}: LivePackDetectionArgs & { initialWorldState: WorldState | null }): Promise<{
+  candidate: InteractionCandidate | null;
+  worldState: WorldState | null;
+  scrollPasses: number;
+}> {
+  const initialCandidate = findWeChatUnreadCandidate(initialWorldState);
+  if (initialCandidate) {
+    return {
+      candidate: initialCandidate,
+      worldState: initialWorldState,
+      scrollPasses: 0
+    };
+  }
+
+  const adapter = surfaceRegistry.get("desktop");
+  if (
+    !adapter
+    || typeof (adapter as { act?: unknown }).act !== "function"
+    || typeof (adapter as { observe?: unknown }).observe !== "function"
+  ) {
+    return {
+      candidate: null,
+      worldState: initialWorldState,
+      scrollPasses: 0
+    };
+  }
+
+  const watchTask = createWatchTask(rule);
+  const watchWorkspace = profileAsWorkspace(rule, workspace);
+  const act = (adapter as { act: (args: unknown) => Promise<unknown> }).act.bind(adapter);
+  const observe = (adapter as { observe: (args: unknown) => Promise<WorldState> }).observe.bind(adapter);
+  const seenStates = new Set<string>();
+  let currentState = initialWorldState;
+
+  for (let pass = 1; pass <= 4; pass += 1) {
+    const signature = buildWorldStateFingerprint(currentState);
+    if (seenStates.has(signature)) {
+      break;
+    }
+    seenStates.add(signature);
+
+    const listPoint = deriveWeChatConversationListPoint(currentState);
+    if (!listPoint) {
+      break;
+    }
+
+    await act({
+      task: watchTask,
+      workspace: watchWorkspace,
+      traceId: null,
+      outputs: {},
+      step: {
+        id: `watch-wechat-list-focus-${rule.id}-${pass}`,
+        label: "Focus WeChat conversation list",
+        surface: "desktop",
+        action: "clickAt",
+        params: listPoint,
+        checkpoint: false
+      }
+    } as never).catch(() => null);
+
+    await act({
+      task: watchTask,
+      workspace: watchWorkspace,
+      traceId: null,
+      outputs: {},
+      step: {
+        id: `watch-wechat-list-scroll-${rule.id}-${pass}`,
+        label: "Scroll WeChat conversation list",
+        surface: "desktop",
+        action: "scroll",
+        params: { dx: 0, dy: -420 },
+        checkpoint: false
+      }
+    } as never).catch(() => null);
+
+    currentState = await observe({
+      task: watchTask,
+      workspace: watchWorkspace,
+      traceId: null,
+      label: `watch-${rule.id}-wechat-scroll-${pass}`
+    } as never).catch(() => currentState);
+
+    const candidate = findWeChatUnreadCandidate(currentState);
+    if (candidate) {
+      return {
+        candidate,
+        worldState: currentState,
+        scrollPasses: pass
+      };
+    }
+  }
+
+  return {
+    candidate: null,
+    worldState: currentState,
+    scrollPasses: seenStates.size
+  };
+}
+
 function extractWeChatThreadContext(worldState: WorldState | null, summary: string): string[] {
   const lines = visibleLines(worldState).filter((line) => !isWeChatUiChrome(line));
   const normalizedSummary = normalizeWeChatSummary(summary);
@@ -1206,6 +1358,7 @@ function buildWeChatReplySteps(): RuntimeStep[] {
       surface: "desktop",
       action: "clickTarget",
       params: { targetQuery: "{{openTarget}}" },
+      expect: frontmostAppExpectation("WeChat"),
       checkpoint: false
     },
     {
@@ -1220,6 +1373,7 @@ function buildWeChatReplySteps(): RuntimeStep[] {
       surface: "desktop",
       action: "typeIntoTarget",
       params: { targetQuery: "{{typeTarget}}", text: "{{typeText}}", clear: false },
+      expect: prefillVerificationExpectation("WeChat"),
       checkpoint: false
     },
     {
@@ -1243,6 +1397,7 @@ function buildWeChatReplyStepsWithComposerFallback({
       surface: "desktop",
       action: "clickTarget",
       params: { targetQuery: "{{openTarget}}" },
+      expect: frontmostAppExpectation("WeChat"),
       checkpoint: false
     },
     {
@@ -1250,6 +1405,7 @@ function buildWeChatReplyStepsWithComposerFallback({
       surface: "desktop",
       action: "clickAt",
       params: { x: "{{composeX}}", y: "{{composeY}}" },
+      expect: frontmostAppExpectation("WeChat"),
       checkpoint: false
     },
     {
@@ -1257,6 +1413,7 @@ function buildWeChatReplyStepsWithComposerFallback({
       surface: "desktop",
       action: "typeText",
       params: { text: "{{typeText}}" },
+      expect: prefillVerificationExpectation("WeChat"),
       checkpoint: false
     }
   ];
@@ -1888,6 +2045,7 @@ function buildMailReplySteps(surface: LivePackSurface): RuntimeStep[] {
       surface,
       action: "clickTarget",
       params: { targetQuery: "{{openTarget}}" },
+      ...(surface === "desktop" ? { expect: frontmostAppExpectation("Mail") } : {}),
       checkpoint: false
     },
     {
@@ -1902,6 +2060,7 @@ function buildMailReplySteps(surface: LivePackSurface): RuntimeStep[] {
       surface,
       action: "typeIntoTarget",
       params: { targetQuery: "{{typeTarget}}", text: "{{typeText}}", clear: false },
+      ...(surface === "desktop" ? { expect: prefillVerificationExpectation("Mail") } : { expect: { textVisible: "{{typeTextPreview}}" } }),
       checkpoint: false
     },
     {
@@ -1921,6 +2080,7 @@ function buildOutlookReplySteps(): RuntimeStep[] {
       surface: "desktop",
       action: "clickTarget",
       params: { targetQuery: "{{openTarget}}" },
+      expect: frontmostAppExpectation("Outlook"),
       checkpoint: false
     },
     {
@@ -1928,6 +2088,7 @@ function buildOutlookReplySteps(): RuntimeStep[] {
       surface: "desktop",
       action: "pressKey",
       params: { key: "r", modifiers: ["meta"] },
+      expect: frontmostAppExpectation("Outlook"),
       checkpoint: false
     },
     {
@@ -1942,6 +2103,7 @@ function buildOutlookReplySteps(): RuntimeStep[] {
       surface: "desktop",
       action: "typeIntoTarget",
       params: { targetQuery: "{{typeTarget}}", text: "{{typeText}}", clear: false },
+      expect: prefillVerificationExpectation("Outlook"),
       checkpoint: false
     },
     {
@@ -1961,6 +2123,7 @@ function buildSlackReplySteps(surface: LivePackSurface): RuntimeStep[] {
       surface,
       action: "clickTarget",
       params: { targetQuery: "{{openTarget}}" },
+      ...(surface === "desktop" ? { expect: frontmostAppExpectation("Slack") } : {}),
       checkpoint: false
     },
     {
@@ -1975,6 +2138,7 @@ function buildSlackReplySteps(surface: LivePackSurface): RuntimeStep[] {
       surface,
       action: "typeIntoTarget",
       params: { targetQuery: "{{typeTarget}}", text: "{{typeText}}", clear: false },
+      ...(surface === "desktop" ? { expect: prefillVerificationExpectation("Slack") } : { expect: { textVisible: "{{typeTextPreview}}" } }),
       checkpoint: false
     },
     {
@@ -2020,7 +2184,7 @@ function buildBossReplySteps(): RuntimeStep[] {
   ];
 }
 
-export function analyzeDesktopConversationPack(
+export function analyzeConversationPack(
   packName: string,
   worldState: WorldState | null
 ): DesktopConversationPackAnalysis | null {
@@ -2041,6 +2205,18 @@ export function analyzeDesktopConversationPack(
     };
   }
 
+  if (normalizedPackName === "slack-browser") {
+    const candidates = conversationCandidates(worldState);
+    return {
+      packName: normalizedPackName,
+      foreground: true,
+      unreadCandidate: summarizeProbeCandidate(findSlackUnreadCandidate(worldState)),
+      composeCandidate: summarizeProbeCandidate(findSlackComposeCandidate(worldState, "browser")),
+      sendCandidate: summarizeProbeCandidate(findSlackSendCandidate(worldState, "browser")),
+      topUnreadCandidates: rankProbeCandidates(worldState, scoreSlackCandidate, candidates)
+    };
+  }
+
   if (normalizedPackName === "wechat-desktop") {
     const candidates = conversationCandidates(worldState);
     return {
@@ -2049,7 +2225,10 @@ export function analyzeDesktopConversationPack(
       unreadCandidate: summarizeProbeCandidate(findWeChatUnreadCandidate(worldState)),
       composeCandidate: summarizeProbeCandidate(findWeChatComposeCandidate(worldState)),
       sendCandidate: summarizeProbeCandidate(findWeChatSendCandidate(worldState)),
-      topUnreadCandidates: rankProbeCandidates(worldState, scoreWeChatCandidate, candidates)
+      topUnreadCandidates: rankWeChatUnreadCandidates(worldState)
+        .slice(0, 5)
+        .map((entry) => summarizeProbeCandidate(entry.candidate, entry.score))
+        .filter((entry): entry is DesktopProbeCandidateSummary => Boolean(entry))
     };
   }
 
@@ -2077,7 +2256,42 @@ export function analyzeDesktopConversationPack(
     };
   }
 
+  if (normalizedPackName === "generic-mail-browser") {
+    const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
+    return {
+      packName: normalizedPackName,
+      foreground: true,
+      unreadCandidate: summarizeProbeCandidate(findMailUnreadCandidate(worldState)),
+      composeCandidate: summarizeProbeCandidate(findMailComposeCandidate(worldState)),
+      sendCandidate: summarizeProbeCandidate(findMailSendCandidate(worldState)),
+      topUnreadCandidates: rankProbeCandidates(worldState, scoreMailCandidate, candidates)
+    };
+  }
+
+  if (normalizedPackName === "boss-browser") {
+    const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
+    return {
+      packName: normalizedPackName,
+      foreground: true,
+      unreadCandidate: summarizeProbeCandidate(findBossCandidate(worldState)),
+      composeCandidate: null,
+      sendCandidate: null,
+      topUnreadCandidates: rankProbeCandidates(worldState, scoreBossCandidate, candidates)
+    };
+  }
+
   return null;
+}
+
+export function analyzeDesktopConversationPack(
+  packName: string,
+  worldState: WorldState | null
+): DesktopConversationPackAnalysis | null {
+  if (!String(packName ?? "").includes("-desktop")) {
+    return null;
+  }
+
+  return analyzeConversationPack(packName, worldState);
 }
 
 function createDocumentPack({
@@ -2475,6 +2689,15 @@ function createSlackPack({
         return null;
       }
 
+      const metadata = buildConversationMetadata({
+        packName: "wechat-desktop",
+        surface: "desktop",
+        summary,
+        context,
+        openTarget: String(candidate.text ?? summary).trim() || summary,
+        candidate
+      });
+
       return {
         fingerprint: itemFingerprint,
         summary,
@@ -2588,12 +2811,21 @@ function createWeChatPack(): LivePack {
         desktopRequireAccessibility: false
       });
     },
-    async detectNewItems({ rule, worldState, dedupeState = {} }) {
+    async detectNewItems({ rule, worldState, dedupeState = {}, workspace, surfaceRegistry, controlPlane }) {
       if (!isWeChatDesktopForeground(worldState)) {
         return null;
       }
 
-      const candidate = findWeChatUnreadCandidate(worldState);
+      const scanned = await scanWeChatUnreadConversation({
+        rule,
+        worldState,
+        dedupeState,
+        workspace,
+        surfaceRegistry,
+        controlPlane,
+        initialWorldState: worldState
+      });
+      const candidate = scanned.candidate;
       if (!candidate) {
         return null;
       }
@@ -2603,13 +2835,22 @@ function createWeChatPack(): LivePack {
         return null;
       }
 
-      const context = contextForSignal(worldState, { text: candidate.text || summary });
+      const context = contextForSignal(scanned.worldState, { text: candidate.text || summary });
       const itemFingerprint = fingerprint(
         `wechat-desktop:${rule.workspaceName ?? "default"}:${summary}:${context.join("|")}`
       );
       if (dedupeState.lastFingerprint === itemFingerprint) {
         return null;
       }
+
+      const metadata = buildConversationMetadata({
+        packName: "wechat-desktop",
+        surface: "desktop",
+        summary,
+        context,
+        openTarget: String(candidate.text ?? summary).trim() || summary,
+        candidate
+      });
 
       return {
         fingerprint: itemFingerprint,
@@ -2622,14 +2863,7 @@ function createWeChatPack(): LivePack {
           watchContext: context.join("\n"),
           openTarget: String(candidate.text ?? summary).trim() || summary
         },
-        metadata: buildConversationMetadata({
-          packName: "wechat-desktop",
-          surface: "desktop",
-          summary,
-          context,
-          openTarget: String(candidate.text ?? summary).trim() || summary,
-          candidate
-        })
+        metadata: scanned.scrollPasses > 0 ? { ...metadata, observationPasses: scanned.scrollPasses } : metadata
       };
     },
     async extractContext({ rule, workspace, surfaceRegistry, detection }) {
