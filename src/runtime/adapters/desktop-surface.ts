@@ -67,6 +67,44 @@ function normalizeAppKey(value: unknown) {
     .toLowerCase();
 }
 
+function desktopAppAliases(value: unknown) {
+  const normalized = normalizeAppKey(value);
+  if (!normalized) {
+    return [];
+  }
+
+  const aliases = new Set<string>([normalized]);
+  if (normalized.includes("wechat") || normalized.includes("微信")) {
+    aliases.add("wechat");
+    aliases.add("微信");
+  }
+  if (normalized.includes("outlook")) {
+    aliases.add("outlook");
+    aliases.add("microsoft outlook");
+  }
+  if (normalized.includes("slack")) {
+    aliases.add("slack");
+  }
+  if (normalized.includes("mail")) {
+    aliases.add("mail");
+    aliases.add("邮件");
+  }
+
+  return [...aliases];
+}
+
+function appMatchesTargetName(currentAppName: unknown, targetAppName: unknown) {
+  const currentAliases = desktopAppAliases(currentAppName);
+  const targetAliases = desktopAppAliases(targetAppName);
+  if (!currentAliases.length || !targetAliases.length) {
+    return false;
+  }
+
+  return currentAliases.some((current) =>
+    targetAliases.some((target) => current.includes(target) || target.includes(current))
+  );
+}
+
 function pointWithinBounds(x: number, y: number, bounds: { x: number; y: number; width: number; height: number }) {
   return x >= bounds.x && x <= bounds.x + bounds.width && y >= bounds.y && y <= bounds.y + bounds.height;
 }
@@ -267,6 +305,84 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
     return this.#requireBridge().getFrontmostApp();
   }
 
+  async waitForAppReady({
+    appName,
+    timeoutMs = 1500,
+    pollMs = 150,
+    stablePolls = 2,
+    requireAccessibility = false,
+    minAccessibilityCandidates = 1
+  }: {
+    appName: string;
+    timeoutMs?: number;
+    pollMs?: number;
+    stablePolls?: number;
+    requireAccessibility?: boolean;
+    minAccessibilityCandidates?: number;
+  }) {
+    const bridge = this.#requireBridge();
+    const targetAppName = String(appName ?? "").trim();
+    const deadline = Date.now() + Math.max(0, timeoutMs);
+    let attempts = 0;
+    let stableMatches = 0;
+    let lastFrontmostApp: string | null = null;
+    let lastAccessibilityCandidateCount = 0;
+    let lastAccessibilityError: string | null = null;
+
+    while (Date.now() <= deadline) {
+      attempts += 1;
+      const frontmost = await bridge.getFrontmostApp().catch(() => ({ appName: "" }));
+      lastFrontmostApp = String(frontmost?.appName ?? "").trim() || null;
+      const matchedFrontmostApp = appMatchesTargetName(lastFrontmostApp, targetAppName);
+
+      let accessibilityCandidateCount = 0;
+      let accessibilityError: string | null = null;
+      if (matchedFrontmostApp && requireAccessibility && typeof bridge.getAccessibilitySnapshot === "function") {
+        const snapshot = await bridge
+          .getAccessibilitySnapshot(lastFrontmostApp ?? targetAppName)
+          .catch((error: unknown) => {
+            accessibilityError = errorMessage(error);
+            return null;
+          });
+        accessibilityCandidateCount = createAccessibilityCandidates(snapshot, "desktop").length;
+      }
+
+      lastAccessibilityCandidateCount = accessibilityCandidateCount;
+      lastAccessibilityError = accessibilityError;
+      const ready =
+        matchedFrontmostApp &&
+        (!requireAccessibility || accessibilityCandidateCount >= Math.max(0, minAccessibilityCandidates));
+      stableMatches = ready ? stableMatches + 1 : 0;
+      if (stableMatches >= Math.max(1, stablePolls)) {
+        return {
+          ready: true,
+          attempts,
+          frontmostApp: lastFrontmostApp,
+          matchedFrontmostApp,
+          accessibilityCandidateCount,
+          accessibilityReady: !requireAccessibility || accessibilityCandidateCount >= Math.max(0, minAccessibilityCandidates),
+          accessibilityError
+        };
+      }
+
+      if (Date.now() + pollMs > deadline) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+    }
+
+    return {
+      ready: false,
+      attempts,
+      frontmostApp: lastFrontmostApp,
+      matchedFrontmostApp: appMatchesTargetName(lastFrontmostApp, targetAppName),
+      accessibilityCandidateCount: lastAccessibilityCandidateCount,
+      accessibilityReady:
+        !requireAccessibility || lastAccessibilityCandidateCount >= Math.max(0, minAccessibilityCandidates),
+      accessibilityError: lastAccessibilityError
+    };
+  }
+
   async observe({ task, workspace, traceId, label = "desktop-observe", recentActions = [] }) {
     const bridge = this.#requireBridge();
     const capture = await this.capture({ task, workspace, traceId, label });
@@ -314,6 +430,7 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
         windows: windows.windows ?? [],
         permissions,
         accessibility,
+        accessibilityCandidateCount: accessibilityCandidates.length,
         ocrAvailable: !ocrError,
         ocrError
       },

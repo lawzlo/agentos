@@ -21,6 +21,17 @@ import type {
 interface LivePackControlPlane
   extends Pick<ControlPlane, "modelClient" | "surfaceRegistry" | "listReplyStylePreferences"> {}
 
+interface DesktopSurfaceReadinessProbe {
+  waitForAppReady?: (args: {
+    appName: string;
+    timeoutMs?: number;
+    pollMs?: number;
+    stablePolls?: number;
+    requireAccessibility?: boolean;
+    minAccessibilityCandidates?: number;
+  }) => Promise<{ ready: boolean }>;
+}
+
 interface LivePackActivationArgs {
   rule: WatchRule;
   workspace: WorkspaceProfile;
@@ -1932,8 +1943,9 @@ async function observeWatchSurface({
   rule,
   workspace,
   surfaceRegistry,
-  surface
-}: LivePackObserveArgs & { surface: LivePackSurface }): Promise<WorldState | null> {
+  surface,
+  desktopRequireAccessibility = false
+}: LivePackObserveArgs & { surface: LivePackSurface; desktopRequireAccessibility?: boolean }): Promise<WorldState | null> {
   const adapter = surfaceRegistry.get(surface);
   if (!adapter) {
     return null;
@@ -1967,6 +1979,20 @@ async function observeWatchSurface({
           step: focusStep
         } as never)
         .catch(() => null);
+    }
+
+    if (typeof (adapter as DesktopSurfaceReadinessProbe).waitForAppReady === "function") {
+      const readiness = await (adapter as DesktopSurfaceReadinessProbe).waitForAppReady?.({
+        appName: rule.appTarget,
+        timeoutMs: desktopRequireAccessibility ? 1800 : 1200,
+        pollMs: 150,
+        stablePolls: 2,
+        requireAccessibility: desktopRequireAccessibility,
+        minAccessibilityCandidates: desktopRequireAccessibility ? 1 : 0
+      });
+      if (desktopRequireAccessibility && readiness && !readiness.ready) {
+        return null;
+      }
     }
   }
 
@@ -2034,7 +2060,8 @@ async function openSlackThreadForContext({
     workspace,
     surfaceRegistry,
     controlPlane: {} as LivePackControlPlane,
-    surface
+    surface,
+    desktopRequireAccessibility: surface === "desktop"
   });
 }
 
@@ -2108,7 +2135,11 @@ function createSlackPack({
       }
     },
     async observeInbox(args) {
-      return observeWatchSurface({ ...args, surface });
+      return observeWatchSurface({
+        ...args,
+        surface,
+        desktopRequireAccessibility: surface === "desktop"
+      });
     },
     async detectNewItems({ rule, worldState, dedupeState = {} }) {
       if (surface === "browser") {
@@ -2252,7 +2283,11 @@ function createWeChatPack(): LivePack {
         .catch(() => null);
     },
     async observeInbox(args) {
-      return observeWatchSurface({ ...args, surface: "desktop" });
+      return observeWatchSurface({
+        ...args,
+        surface: "desktop",
+        desktopRequireAccessibility: true
+      });
     },
     async detectNewItems({ rule, worldState, dedupeState = {} }) {
       if (!isWeChatDesktopForeground(worldState)) {
@@ -2330,7 +2365,8 @@ function createWeChatPack(): LivePack {
         workspace,
         surfaceRegistry,
         controlPlane: {} as LivePackControlPlane,
-        surface: "desktop"
+        surface: "desktop",
+        desktopRequireAccessibility: true
       });
       if (!findWeChatComposeCandidate(threadState)) {
         return null;
@@ -2441,7 +2477,8 @@ async function openMailThreadForContext({
     workspace,
     surfaceRegistry,
     controlPlane: {} as LivePackControlPlane,
-    surface
+    surface,
+    desktopRequireAccessibility: surface === "desktop"
   });
 
   if (
@@ -2471,7 +2508,8 @@ async function openMailThreadForContext({
       workspace,
       surfaceRegistry,
       controlPlane: {} as LivePackControlPlane,
-      surface
+      surface,
+      desktopRequireAccessibility: surface === "desktop"
     });
   }
 
@@ -2627,7 +2665,11 @@ function createMailPack({
       }
     },
     async observeInbox(args) {
-      return observeWatchSurface({ ...args, surface });
+      return observeWatchSurface({
+        ...args,
+        surface,
+        desktopRequireAccessibility: surface === "desktop"
+      });
     },
     async detectNewItems({ rule, worldState, dedupeState = {} }) {
       if (surface === "browser") {
@@ -2762,7 +2804,11 @@ function createOutlookDesktopPack(): LivePack {
         .catch(() => null);
     },
     async observeInbox(args) {
-      return observeWatchSurface({ ...args, surface: "desktop" });
+      return observeWatchSurface({
+        ...args,
+        surface: "desktop",
+        desktopRequireAccessibility: true
+      });
     },
     async detectNewItems({ rule, worldState, dedupeState = {} }) {
       if (!isOutlookDesktopForeground(worldState)) {

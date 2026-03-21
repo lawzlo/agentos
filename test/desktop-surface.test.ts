@@ -230,3 +230,49 @@ test("desktop observe falls back to accessibility when OCR fails", async () => {
   assert.equal(worldState.visibleText.includes("Unread: Acme renewal"), true);
   assert.equal(worldState.summary.includes("OCR unavailable: ocr_image failed"), true);
 });
+
+test("desktop waitForAppReady waits for a stable frontmost app with accessibility candidates", async () => {
+  const { adapter } = createObserveAdapter();
+  let frontmostReads = 0;
+  adapter.bridge.getFrontmostApp = async () => {
+    frontmostReads += 1;
+    return {
+      appName: frontmostReads === 1 ? "Terminal" : "Slack"
+    };
+  };
+
+  const readiness = await adapter.waitForAppReady({
+    appName: "Slack",
+    timeoutMs: 1000,
+    pollMs: 1,
+    stablePolls: 2,
+    requireAccessibility: true
+  });
+
+  assert.equal(readiness.ready, true);
+  assert.equal(readiness.frontmostApp, "Slack");
+  assert.equal(readiness.accessibilityCandidateCount >= 1, true);
+  assert.equal(readiness.attempts >= 3, true);
+});
+
+test("desktop waitForAppReady reports not ready when accessibility candidates never appear", async () => {
+  const { adapter } = createObserveAdapter();
+  adapter.bridge.getAccessibilitySnapshot = async () => ({
+    appName: "WeChat",
+    windows: [{ title: "WeChat", bounds: null }],
+    elements: []
+  });
+  adapter.bridge.getFrontmostApp = async () => ({ appName: "WeChat" });
+
+  const readiness = await adapter.waitForAppReady({
+    appName: "WeChat",
+    timeoutMs: 20,
+    pollMs: 1,
+    stablePolls: 2,
+    requireAccessibility: true
+  });
+
+  assert.equal(readiness.ready, false);
+  assert.equal(readiness.frontmostApp, "WeChat");
+  assert.equal(readiness.accessibilityCandidateCount, 0);
+});

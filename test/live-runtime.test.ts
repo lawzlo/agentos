@@ -1619,6 +1619,89 @@ test("slack desktop pack ignores detections when Slack is not the foreground app
   assert.equal(detection, null);
 });
 
+test("slack desktop pack skips inbox observation until the app is accessibility-ready", async () => {
+  let observeCalls = 0;
+  const fakeSurface = {
+    async waitForAppReady() {
+      return {
+        ready: false,
+        frontmostApp: "Slack",
+        accessibilityCandidateCount: 0
+      };
+    },
+    async observe() {
+      observeCalls += 1;
+      return {
+        version: 1,
+        surface: "desktop",
+        workspaceId: "workspace-slack-ready",
+        appContext: {
+          appName: "Slack",
+          windows: [{ title: "Slack" }]
+        },
+        capture: null,
+        ocrBlocks: [],
+        interactionCandidates: [],
+        visibleText: "Slack",
+        recentActions: [],
+        summary: "Slack",
+        timestamp: new Date().toISOString()
+      };
+    },
+    async act() {
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("slack-desktop");
+  const rule: WatchRule = {
+    id: "watch-slack-ready",
+    goal: "Always watch Slack and reply to unread threads",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "slack-desktop-main",
+    skillName: null,
+    appTarget: "Slack",
+    livePack: "slack-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-slack-ready",
+    name: "slack-desktop-main",
+    rootPath: "/tmp/slack-desktop-main",
+    profilePath: "/tmp/slack-desktop-main/profile",
+    downloadsPath: "/tmp/slack-desktop-main/downloads",
+    artifactsPath: "/tmp/slack-desktop-main/artifacts",
+    scratchPath: "/tmp/slack-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const worldState = await pack?.observeInbox?.({
+    rule,
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {} as never
+  });
+
+  assert.equal(worldState, null);
+  assert.equal(observeCalls, 0);
+});
+
 test("slack desktop pack ignores OCR-only detections when no accessibility candidates are available", async () => {
   const registry = new LivePackRegistry({
     surfaceRegistry: new SurfaceRegistry({})
@@ -2053,6 +2136,89 @@ test("wechat desktop pack ignores detections when WeChat is not the foreground a
   });
 
   assert.equal(detection, null);
+});
+
+test("wechat desktop pack skips inbox observation until accessibility candidates are ready", async () => {
+  let observeCalls = 0;
+  const fakeSurface = {
+    async waitForAppReady() {
+      return {
+        ready: false,
+        frontmostApp: "WeChat",
+        accessibilityCandidateCount: 0
+      };
+    },
+    async observe() {
+      observeCalls += 1;
+      return {
+        version: 1,
+        surface: "desktop",
+        workspaceId: "workspace-wechat-ready",
+        appContext: {
+          appName: "WeChat",
+          windows: [{ title: "WeChat" }]
+        },
+        capture: null,
+        ocrBlocks: [],
+        interactionCandidates: [],
+        visibleText: "微信",
+        recentActions: [],
+        summary: "WeChat",
+        timestamp: new Date().toISOString()
+      };
+    },
+    async act() {
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("wechat-desktop");
+  const rule: WatchRule = {
+    id: "watch-wechat-ready",
+    goal: "Always watch WeChat and reply to unread conversations",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "wechat-desktop-main",
+    skillName: null,
+    appTarget: "WeChat",
+    livePack: "wechat-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-wechat-ready",
+    name: "wechat-desktop-main",
+    rootPath: "/tmp/wechat-desktop-main",
+    profilePath: "/tmp/wechat-desktop-main/profile",
+    downloadsPath: "/tmp/wechat-desktop-main/downloads",
+    artifactsPath: "/tmp/wechat-desktop-main/artifacts",
+    scratchPath: "/tmp/wechat-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const worldState = await pack?.observeInbox?.({
+    rule,
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {} as never
+  });
+
+  assert.equal(worldState, null);
+  assert.equal(observeCalls, 0);
 });
 
 test("outlook desktop pack can detect unread mail and build reply steps from a desktop world state", async () => {
