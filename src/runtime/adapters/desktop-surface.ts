@@ -81,6 +81,23 @@ function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
+function normalizeSearchText(value: unknown) {
+  return String(value ?? "")
+    .replace(/\s+/gu, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function observationMatchesQuery(text: unknown, query: string) {
+  const normalizedText = normalizeSearchText(text);
+  const normalizedQuery = normalizeSearchText(query);
+  if (!normalizedText || !normalizedQuery) {
+    return false;
+  }
+
+  return normalizedText.includes(normalizedQuery) || normalizedQuery.includes(normalizedText);
+}
+
 function normalizeAppKey(value: unknown) {
   return String(value ?? "")
     .trim()
@@ -918,6 +935,7 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
     const bridge = this.#requireBridge();
     const details: Record<string, any> = {};
     const check = expectation as Record<string, any>;
+    let capture: { path: string } | null = null;
 
     if (check.frontmostApp) {
       const frontmost = await bridge.getFrontmostApp();
@@ -936,9 +954,35 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
       }
     }
 
+    const regionTextVisible = check.regionTextVisible as
+      | { text?: string; region?: { x?: number; y?: number; width?: number; height?: number }; scale?: number }
+      | undefined;
+    if (typeof regionTextVisible?.text === "string" && regionTextVisible.text.trim()) {
+      capture ??= await this.capture({ task, workspace, traceId, label: "verify-region-text" });
+      const region = regionTextVisible.region ?? null;
+      const scale = Number(regionTextVisible.scale ?? 0);
+      const result = await bridge.ocrImage(capture.path, {
+        ...(region ? { region } : {}),
+        ...(Number.isFinite(scale) && scale > 0 ? { scale } : {})
+      });
+      const observations = Array.isArray(result?.observations) ? result.observations : [];
+      const match =
+        observations.find((entry) => observationMatchesQuery(entry?.text, regionTextVisible.text)) ?? null;
+      details.regionTextVisible = Boolean(match);
+      details.regionTextQuery = regionTextVisible.text;
+      if (region) {
+        details.regionTextRegion = region;
+      }
+      if (!match) {
+        details.regionTextPreview = uniqueStrings(observations.map((entry) => entry?.text)).slice(0, 8);
+        return { ok: false, details };
+      }
+      details.regionTextMatch = match;
+    }
+
     const targetText = check.textVisible ?? check.targetVisible?.text;
     if (targetText) {
-      const capture = await this.capture({ task, workspace, traceId, label: "verify-text" });
+      capture ??= await this.capture({ task, workspace, traceId, label: "verify-text" });
       const result = await bridge.findText(capture.path, targetText);
       details.textVisible = result.found;
       if (!result.found) {

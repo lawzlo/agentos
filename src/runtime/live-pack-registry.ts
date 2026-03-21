@@ -721,6 +721,42 @@ function prefillVerificationExpectation(appName: string): Record<string, unknown
   };
 }
 
+const WECHAT_THREAD_HEADER_REGION = {
+  x: 0.34,
+  y: 0.02,
+  width: 0.6,
+  height: 0.16
+} as const;
+
+const WECHAT_COMPOSER_REGION = {
+  x: 0.34,
+  y: 0.78,
+  width: 0.6,
+  height: 0.18
+} as const;
+
+function wechatThreadOpenedExpectation(): Record<string, unknown> {
+  return {
+    frontmostApp: "WeChat",
+    regionTextVisible: {
+      text: "{{threadTitle}}",
+      region: WECHAT_THREAD_HEADER_REGION,
+      scale: 2.2
+    }
+  };
+}
+
+function wechatPrefillVerificationExpectation(): Record<string, unknown> {
+  return {
+    frontmostApp: "WeChat",
+    regionTextVisible: {
+      text: "{{typeTextPreview}}",
+      region: WECHAT_COMPOSER_REGION,
+      scale: 2.2
+    }
+  };
+}
+
 function normalizeSlackSummary(value: string): string {
   return String(value ?? "")
     .replace(/^[●•]\s*/u, "")
@@ -1358,7 +1394,7 @@ function buildWeChatReplySteps(): RuntimeStep[] {
       surface: "desktop",
       action: "clickTarget",
       params: { targetQuery: "{{openTarget}}" },
-      expect: frontmostAppExpectation("WeChat"),
+      expect: wechatThreadOpenedExpectation(),
       checkpoint: false
     },
     {
@@ -1373,7 +1409,7 @@ function buildWeChatReplySteps(): RuntimeStep[] {
       surface: "desktop",
       action: "typeIntoTarget",
       params: { targetQuery: "{{typeTarget}}", text: "{{typeText}}", clear: false },
-      expect: prefillVerificationExpectation("WeChat"),
+      expect: wechatPrefillVerificationExpectation(),
       checkpoint: false
     },
     {
@@ -1397,7 +1433,7 @@ function buildWeChatReplyStepsWithComposerFallback({
       surface: "desktop",
       action: "clickTarget",
       params: { targetQuery: "{{openTarget}}" },
-      expect: frontmostAppExpectation("WeChat"),
+      expect: wechatThreadOpenedExpectation(),
       checkpoint: false
     },
     {
@@ -1413,7 +1449,7 @@ function buildWeChatReplyStepsWithComposerFallback({
       surface: "desktop",
       action: "typeText",
       params: { text: "{{typeText}}" },
-      expect: prefillVerificationExpectation("WeChat"),
+      expect: wechatPrefillVerificationExpectation(),
       checkpoint: false
     }
   ];
@@ -2861,7 +2897,8 @@ function createWeChatPack(): LivePack {
           watchItemText: summary,
           watchSummary: summary,
           watchContext: context.join("\n"),
-          openTarget: String(candidate.text ?? summary).trim() || summary
+          openTarget: String(candidate.text ?? summary).trim() || summary,
+          threadTitle: summary
         },
         metadata: scanned.scrollPasses > 0 ? { ...metadata, observationPasses: scanned.scrollPasses } : metadata
       };
@@ -2910,6 +2947,40 @@ function createWeChatPack(): LivePack {
       const summary = String(detection.summary ?? "").trim();
       const context = extractWeChatThreadContext(threadState, summary);
       const openTarget = String(detection.inputs?.openTarget ?? summary).trim() || summary;
+      const openCandidate = (detection.metadata?.openCandidate ?? null) as InteractionCandidate | Record<string, unknown> | null;
+      const steps = composeCandidate
+        ? buildWeChatReplySteps()
+        : buildWeChatReplyStepsWithComposerFallback({
+            includeSendStep: Boolean(sendCandidate)
+          });
+      if (steps[0]) {
+        steps[0] = {
+          ...steps[0],
+          params: {
+            ...(steps[0].params ?? {}),
+            ...(openCandidate ? { target: openCandidate } : {})
+          }
+        };
+      }
+      if (composeCandidate && steps[2]) {
+        steps[2] = {
+          ...steps[2],
+          params: {
+            ...(steps[2].params ?? {}),
+            target: composeCandidate
+          }
+        };
+      }
+      const sendStepIndex = steps.findIndex((step) => String(step.label ?? "").includes("Send WeChat reply"));
+      if (sendCandidate && sendStepIndex >= 0) {
+        steps[sendStepIndex] = {
+          ...steps[sendStepIndex],
+          params: {
+            ...(steps[sendStepIndex]?.params ?? {}),
+            target: sendCandidate
+          }
+        };
+      }
       return {
         summary,
         context,
@@ -2917,6 +2988,7 @@ function createWeChatPack(): LivePack {
           ...(detection.inputs ?? {}),
           watchContext: context.join("\n"),
           openTarget,
+          threadTitle: summary,
           ...(composeCandidate ? { typeTarget: pickWeChatComposeQuery(threadState) } : {}),
           ...(sendCandidate ? { sendTarget: pickWeChatSendQuery(threadState) } : {}),
           ...(composerFallback
@@ -2939,11 +3011,7 @@ function createWeChatPack(): LivePack {
         },
         taskSpec: {
           preferredSurface: "desktop",
-          steps: composeCandidate
-            ? buildWeChatReplySteps()
-            : buildWeChatReplyStepsWithComposerFallback({
-                includeSendStep: Boolean(sendCandidate)
-              })
+          steps
         }
       };
     },

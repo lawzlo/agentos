@@ -319,6 +319,84 @@ test("desktop observe augments WeChat window captures with supplemental OCR regi
   );
 });
 
+test("desktop verify can require region text visibility", async () => {
+  const { adapter } = createObserveAdapter();
+  adapter.bridge.getFrontmostApp = async () => ({ appName: "WeChat" });
+  adapter.bridge.ocrImage = async (_filePath: string, options?: { region?: Record<string, number> }) => {
+    if (options?.region && Number(options.region.x) > 0.3) {
+      return {
+        observations: [
+          {
+            text: "Tan",
+            confidence: 0.95,
+            box: { x: 520, y: 28, width: 60, height: 24, centerX: 550, centerY: 40 }
+          }
+        ]
+      };
+    }
+    return { observations: [] };
+  };
+
+  const result = await adapter.verify({
+    task: { id: "task_test" },
+    workspace: {
+      id: "workspace_test",
+      artifactsPath: "/tmp",
+      rootPath: "/tmp"
+    },
+    traceId: "trace_test",
+    expectation: {
+      frontmostApp: "WeChat",
+      regionTextVisible: {
+        text: "Tan",
+        region: { x: 0.34, y: 0.02, width: 0.6, height: 0.16 },
+        scale: 2.2
+      }
+    }
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.details.frontmostApp, "WeChat");
+  assert.equal(result.details.regionTextVisible, true);
+});
+
+test("desktop verify fails when region text is not visible in the requested area", async () => {
+  const { adapter } = createObserveAdapter();
+  adapter.bridge.getFrontmostApp = async () => ({ appName: "WeChat" });
+  adapter.bridge.ocrImage = async () => ({
+    observations: [
+      {
+        text: "Official Accounts",
+        confidence: 0.95,
+        box: { x: 120, y: 140, width: 180, height: 28, centerX: 210, centerY: 154 }
+      }
+    ]
+  });
+
+  const result = await adapter.verify({
+    task: { id: "task_test" },
+    workspace: {
+      id: "workspace_test",
+      artifactsPath: "/tmp",
+      rootPath: "/tmp"
+    },
+    traceId: "trace_test",
+    expectation: {
+      frontmostApp: "WeChat",
+      regionTextVisible: {
+        text: "Tan",
+        region: { x: 0.34, y: 0.02, width: 0.6, height: 0.16 },
+        scale: 2.2
+      }
+    }
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.details.frontmostApp, "WeChat");
+  assert.equal(result.details.regionTextVisible, false);
+  assert.deepEqual(result.details.regionTextPreview, ["Official Accounts"]);
+});
+
 test("desktop capture falls back to a full-screen capture when window capture fails", async () => {
   const { adapter, registeredArtifacts } = createObserveAdapter({
     captureMs: 50
