@@ -1,5 +1,5 @@
 import { buildTeachRecording } from "./teach-recorder.js";
-import { ExecutionStoppedError } from "./errors.js";
+import { ExecutionStoppedError, ExecutionYieldedError } from "./errors.js";
 import type { AutonomyAgent } from "./agents/autonomy.js";
 import type { OperatorAgent } from "./agents/operator.js";
 import type { PlannerAgent } from "./agents/planner.js";
@@ -151,13 +151,32 @@ export class RuntimeSupervisor {
     if (!this.acceptingNewTasks) {
       return;
     }
-    this.queue.push(taskId);
+    if (!this.queue.includes(taskId)) {
+      this.queue.push(taskId);
+    }
+    this.scheduleDrain();
+  }
+
+  ensureQueuedTask(taskId: string): void {
+    if (!this.acceptingNewTasks) {
+      return;
+    }
+    const task = this.store.getTask(taskId);
+    if (!task || task.status !== "queued") {
+      return;
+    }
+    if (!this.queue.includes(taskId)) {
+      this.queue.push(taskId);
+    }
     this.scheduleDrain();
   }
 
   scheduleDrain(): void {
     if (this.drainPromise) {
-      return;
+      if (this.running) {
+        return;
+      }
+      this.drainPromise = null;
     }
 
     this.drainPromise = this.drain().finally(() => {
@@ -241,6 +260,13 @@ export class RuntimeSupervisor {
       }
     });
 
+    if (control.mode === "takeover") {
+      throw new ExecutionYieldedError(control.reason ?? "Execution yielded for manual takeover.", {
+        phase,
+        source: control.source
+      });
+    }
+
     await this.executionController.waitForAgent(taskId);
 
     const current = this.store.getTask(taskId);
@@ -289,12 +315,6 @@ export class RuntimeSupervisor {
         classification: decision.classification,
         nextAction: decision.nextAction
       }
-    });
-
-    await this.waitForExecutionAccess({
-      taskId,
-      traceId,
-      phase: "recovery"
     });
   }
 
@@ -361,8 +381,12 @@ export class RuntimeSupervisor {
       const initialTaskSpec = task.taskSpec as TaskSpec;
       const workspace = await this.workspaceManager.prepare(taskId, initialTaskSpec);
       task = this.store.updateTask(taskId, { workspaceId: workspace.id });
-      const trace = this.traceStore.start(taskId, []);
-      task = this.store.updateTask(taskId, { traceId: trace.id });
+      const existingTrace = task.traceId ? this.traceStore.get(task.traceId) : null;
+      const trace =
+        existingTrace && !existingTrace.endedAt ? existingTrace : this.traceStore.start(taskId, []);
+      if (task.traceId !== trace.id) {
+        task = this.store.updateTask(taskId, { traceId: trace.id });
+      }
 
       this.traceStore.log({
         traceId: trace.id,
@@ -538,6 +562,18 @@ export class RuntimeSupervisor {
             return;
           }
 
+          if (error instanceof ExecutionYieldedError) {
+            task = this.store.updateTask(taskId, {
+              status: "takeover",
+              error: error.message,
+              result: this.controlPlane.mergePersistedResult(taskId, {
+                details: errorDetails(error)
+              })
+            });
+            this.eventBus.broadcast("task.updated", this.controlPlane.getTask(taskId));
+            return;
+          }
+
           const decision = this.recovery.handle({
             taskId,
             traceId: trace.id,
@@ -575,7 +611,16 @@ export class RuntimeSupervisor {
                 error,
                 decision
               });
-              continue;
+              task = this.store.updateTask(taskId, {
+                status: "takeover",
+                error: errorMessage(error),
+                result: this.controlPlane.mergePersistedResult(taskId, {
+                  details: errorDetails(error),
+                  recovery: decision
+                })
+              });
+              this.eventBus.broadcast("task.updated", this.controlPlane.getTask(taskId));
+              return;
             } catch (controlError: unknown) {
               task = this.store.updateTask(taskId, {
                 status: "failed",

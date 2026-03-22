@@ -859,16 +859,31 @@ export class ControlPlane {
       });
     }
 
+    const hadActiveExecution = this.executionController.getState(taskId) != null;
+    const resumeDormantTask =
+      ["resume", "return_to_agent"].includes(action) && !hadActiveExecution && ["paused", "takeover"].includes(task.status);
     const finalReason = reason ?? transition.message;
-    this.executionController.setMode(taskId, transition.mode, {
-      reason: finalReason,
-      source
-    });
+    if (!resumeDormantTask) {
+      this.executionController.setMode(taskId, transition.mode, {
+        reason: finalReason,
+        source
+      });
+    }
 
     const updated = this.store.updateTask(taskId, {
-      status: transition.status,
-      error: action === "stop" ? finalReason : task.error
+      status: resumeDormantTask ? "queued" : transition.status,
+      error: action === "stop" ? finalReason : resumeDormantTask ? null : task.error
     }) as TaskRecord | null;
+
+    if (resumeDormantTask) {
+      this.runtimeSupervisor.enqueue(taskId);
+      const kickTimer = setTimeout(() => {
+        this.runtimeSupervisor.ensureQueuedTask(taskId);
+      }, 250);
+      if (typeof (kickTimer as { unref?: () => void }).unref === "function") {
+        kickTimer.unref();
+      }
+    }
 
     if (task.traceId) {
       this.traceStore.log({
@@ -895,6 +910,12 @@ export class ControlPlane {
     const task = this.store.createTask(normalized) as TaskRecord;
     this.eventBus.broadcast("task.created", task);
     this.runtimeSupervisor.enqueue(task.id);
+    const kickTimer = setTimeout(() => {
+      this.runtimeSupervisor.ensureQueuedTask(task.id);
+    }, 250);
+    if (typeof (kickTimer as { unref?: () => void }).unref === "function") {
+      kickTimer.unref();
+    }
     return task;
   }
 

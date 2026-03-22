@@ -80,6 +80,46 @@ export class OperatorAgent {
     this.groundingEngine = groundingEngine;
   }
 
+  async #waitForInlineVerification({
+    surface,
+    task,
+    step,
+    workspace,
+    traceId,
+    initialVerification
+  }: {
+    surface: ExecutableSurface;
+    task: TaskRecord;
+    step: RuntimeStep;
+    workspace: WorkspaceRecord;
+    traceId: string;
+    initialVerification: StepVerification;
+  }): Promise<StepVerification> {
+    const timeoutMs = Math.max(0, Number(step.params?.timeoutMs ?? 0));
+    const pollMs = Math.max(50, Number(step.params?.pollMs ?? 400));
+    if (step.action !== "wait" || !step.expect || initialVerification.ok || timeoutMs <= 0) {
+      return initialVerification;
+    }
+
+    const started = Date.now();
+    let verification = initialVerification;
+    while (!verification.ok && Date.now() - started < timeoutMs) {
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+      verification = await surface.verify({
+        task,
+        step,
+        workspace,
+        traceId,
+        expectation: step.expect
+      });
+      if (verification.ok) {
+        return verification;
+      }
+    }
+
+    return verification;
+  }
+
   async #resolveTarget({
     task,
     step,
@@ -215,6 +255,14 @@ export class OperatorAgent {
           workspace,
           traceId,
           expectation: step.expect
+        });
+        verification = await this.#waitForInlineVerification({
+          surface,
+          task,
+          step,
+          workspace,
+          traceId,
+          initialVerification: verification
         });
 
         this.traceStore.log({

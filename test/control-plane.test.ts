@@ -563,6 +563,79 @@ test("running tasks can be taken over and returned to the agent", async () => {
   }
 });
 
+test("takeover tasks do not block later queued tasks and can be requeued on return", async () => {
+  const dataDir = await createTempDir();
+  const server = await startAgentServer({ dataDir });
+
+  try {
+    const firstResponse = await fetch(`${server.baseUrl}/tasks`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        goal: "Block the queue with a takeover candidate",
+        preferredSurface: "desktop",
+        steps: [
+          {
+            label: "Wait one",
+            surface: "desktop",
+            action: "wait",
+            params: { ms: 700 },
+            checkpoint: false
+          },
+          {
+            label: "Wait two",
+            surface: "desktop",
+            action: "wait",
+            params: { ms: 700 },
+            checkpoint: false
+          }
+        ]
+      })
+    });
+    const { task: firstTask } = await firstResponse.json();
+    await waitForTask(server.baseUrl, firstTask.id, (current) => ["planning", "running"].includes(current.status));
+
+    await fetch(`${server.baseUrl}/tasks/${firstTask.id}/control`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "request_takeover" })
+    });
+    await waitForTask(server.baseUrl, firstTask.id, (current) => current.status === "takeover");
+
+    const secondResponse = await fetch(`${server.baseUrl}/tasks`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        goal: "A later task should still run",
+        preferredSurface: "desktop",
+        steps: [
+          {
+            label: "Short wait",
+            surface: "desktop",
+            action: "wait",
+            params: { ms: 50 },
+            checkpoint: false
+          }
+        ]
+      })
+    });
+    const { task: secondTask } = await secondResponse.json();
+    const completedSecond = await waitForTask(server.baseUrl, secondTask.id, (current) => current.status === "completed");
+    assert.equal(completedSecond.status, "completed");
+
+    await fetch(`${server.baseUrl}/tasks/${firstTask.id}/control`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "return_to_agent" })
+    });
+
+    const completedFirst = await waitForTask(server.baseUrl, firstTask.id, (current) => current.status === "completed");
+    assert.equal(completedFirst.status, "completed");
+  } finally {
+    await server.close();
+  }
+});
+
 test("manual takeover notes are preserved in the task result and learned skill", async () => {
   const dataDir = await createTempDir();
   const server = await startAgentServer({ dataDir });

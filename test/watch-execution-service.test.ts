@@ -180,6 +180,126 @@ test("buildTaskSpecFromWatchRule forces explicit reply plans into planned mode a
   assert.equal(String(taskSpec.inputs?.typeTextPreview).startsWith("This is a longer reply body"), true);
 });
 
+test("scan drafts a reply when explicit reply steps use the typeText placeholder", async () => {
+  const timestamp = new Date().toISOString();
+  let storedRule = createWatchRule();
+  let createdTaskSpec: Record<string, unknown> | null = null;
+  let draftReplyCalls = 0;
+
+  const service = new WatchExecutionService({
+    controlPlane: {
+      modelClient: {
+        isConfigured() {
+          return true;
+        }
+      },
+      surfaceRegistry: {},
+      workspaceManager: {
+        async prepareProfile() {
+          return {
+            id: "profile-watch",
+            name: "desktop-main",
+            rootPath: "/tmp/desktop-main",
+            profilePath: "/tmp/desktop-main/profile",
+            downloadsPath: "/tmp/desktop-main/downloads",
+            artifactsPath: "/tmp/desktop-main/artifacts",
+            scratchPath: "/tmp/desktop-main/scratch",
+            metadata: {},
+            createdAt: timestamp,
+            updatedAt: timestamp
+          };
+        }
+      },
+      watchService: {
+        decorate(rule: WatchRule) {
+          return rule;
+        }
+      },
+      policyEngine: {
+        evaluateAutomation() {
+          return {
+            action: "prefill",
+            policy: "prefill_first",
+            riskLevel: "normal",
+            reasons: []
+          };
+        }
+      },
+      createTask(taskSpec: Record<string, unknown>) {
+        createdTaskSpec = taskSpec;
+        return {
+          id: "task-prefill",
+          status: "queued"
+        };
+      }
+    } as never,
+    store: {
+      getWatchRule() {
+        return storedRule;
+      },
+      getTask() {
+        return null;
+      },
+      getDraft() {
+        return null;
+      },
+      putWatchRule(nextRule: WatchRule) {
+        storedRule = nextRule;
+        return nextRule;
+      }
+    } as never,
+    eventBus: {
+      broadcast() {}
+    } as never,
+    livePackRegistry: {
+      get() {
+        return {
+          activateWorkspace() {
+            return Promise.resolve();
+          },
+          observeInbox() {
+            return Promise.resolve({
+              appName: "Slack",
+              visibleText: ["#general", "hello"],
+              candidates: [],
+              raw: {}
+            });
+          },
+          detectNewItems() {
+            return Promise.resolve({
+              summary: "#general",
+              fingerprint: "item-1",
+              taskSpec: {
+                preferredSurface: "desktop",
+                steps: [
+                  {
+                    label: "Type reply",
+                    surface: "desktop",
+                    action: "typeText",
+                    params: { text: "{{typeText}}" }
+                  }
+                ]
+              }
+            });
+          },
+          draftReply() {
+            draftReplyCalls += 1;
+            return Promise.resolve({
+              replyText: "Generated reply text",
+              metadata: { source: "test" }
+            });
+          }
+        };
+      }
+    } as never
+  });
+
+  await service.scan(storedRule.id);
+
+  assert.equal(draftReplyCalls, 1);
+  assert.equal((createdTaskSpec?.inputs as Record<string, unknown>)?.typeText, "Generated reply text");
+});
+
 test("scan skips a watch trigger when extractContext cannot produce a stable reply context", async () => {
   const timestamp = new Date().toISOString();
   let storedRule = createWatchRule();
@@ -287,6 +407,116 @@ test("scan skips a watch trigger when extractContext cannot produce a stable rep
   assert.equal(createTaskCalls, 0);
   assert.equal(storedRule.status, "watching");
   assert.equal(storedRule.lastError, null);
+  assert.equal(storedRule.dedupeState.lastNoTriggerReason, "extract_context_empty");
+  assert.equal(storedRule.dedupeState.lastNoTriggerStage, "extract_context");
+});
+
+test("scan records no-trigger details for wechat desktop scans", async () => {
+  const timestamp = new Date().toISOString();
+  let storedRule = {
+    ...createWatchRule(),
+    appTarget: "WeChat",
+    livePack: "wechat-desktop"
+  } satisfies WatchRule;
+
+  const service = new WatchExecutionService({
+    controlPlane: {
+      modelClient: {
+        isConfigured() {
+          return true;
+        },
+        supportsImageJson() {
+          return false;
+        }
+      },
+      surfaceRegistry: {},
+      workspaceManager: {
+        async prepareProfile() {
+          return {
+            id: "profile-watch",
+            name: "desktop-main",
+            rootPath: "/tmp/desktop-main",
+            profilePath: "/tmp/desktop-main/profile",
+            downloadsPath: "/tmp/desktop-main/downloads",
+            artifactsPath: "/tmp/desktop-main/artifacts",
+            scratchPath: "/tmp/desktop-main/scratch",
+            metadata: {},
+            createdAt: timestamp,
+            updatedAt: timestamp
+          };
+        }
+      },
+      watchService: {
+        decorate(rule: WatchRule) {
+          return rule;
+        }
+      },
+      policyEngine: {
+        evaluateAutomation() {
+          return {
+            action: "draft",
+            policy: "draft_only",
+            riskLevel: "normal",
+            reasons: []
+          };
+        }
+      },
+      createTask() {
+        throw new Error("createTask should not be called when detectNewItems returns null");
+      }
+    } as never,
+    store: {
+      getWatchRule() {
+        return storedRule;
+      },
+      getTask() {
+        return null;
+      },
+      getDraft() {
+        return null;
+      },
+      putWatchRule(rule: WatchRule) {
+        storedRule = rule;
+        return rule;
+      }
+    } as never,
+    eventBus: {
+      broadcast() {}
+    } as never,
+    livePackRegistry: {
+      get() {
+        return {
+          name: "wechat-desktop",
+          async observeInbox() {
+            return {
+              version: 1,
+              surface: "desktop",
+              workspaceId: "workspace-watch",
+              appContext: { appName: "WeChat" },
+              capture: null,
+              ocrBlocks: [],
+              interactionCandidates: [],
+              visibleText: "WeChat",
+              recentActions: [],
+              summary: "WeChat",
+              timestamp
+            };
+          },
+          async detectNewItems() {
+            return null;
+          }
+        };
+      }
+    } as never
+  });
+
+  await service.scan(storedRule.id);
+
+  assert.equal(storedRule.status, "watching");
+  assert.equal(storedRule.dedupeState.lastNoTriggerReason, "no_detection");
+  assert.equal(storedRule.dedupeState.lastNoTriggerStage, "detect_items");
+  assert.equal(storedRule.dedupeState.lastNoTriggerUnreadCandidate, null);
+  assert.deepEqual(storedRule.dedupeState.lastNoTriggerTopUnread, []);
 });
 
 test("scan records stage details when a watch stage times out", async () => {

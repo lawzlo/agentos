@@ -30,7 +30,7 @@ function createWorkspace(rootPath: string): WorkspaceProfile {
   };
 }
 
-test("collectDesktopProbe summarizes a WeChat world state and pack analysis", async () => {
+test("collectDesktopProbe summarizes a WeChat world state and vision pack analysis", async () => {
   const rootPath = await createTempDir("agentos-desktop-probe-");
   const workspace = createWorkspace(rootPath);
   const focusCalls: string[] = [];
@@ -134,7 +134,29 @@ test("collectDesktopProbe summarizes a WeChat world state and pack analysis", as
 
   const report = await collectDesktopProbe(request, {
     workspace,
-    modelClient: noVisionModelClient,
+      modelClient: {
+        supportsImageJson() {
+          return true;
+        },
+        async analyzeImageJson<TResponse>() {
+          return {
+            openThread: "当前会话",
+            visibleUnreadThreads: [
+              {
+                name: "张三",
+                evidence: "red unread badge",
+                approxSidebarY: 0.18,
+                approxBox: { x: 0.08, y: 0.16, width: 0.26, height: 0.07 }
+              }
+            ],
+            composer: {
+              present: true,
+              evidence: "bottom input area",
+              approxBox: { x: 0.33, y: 0.82, width: 0.56, height: 0.12 }
+            }
+          } as TResponse;
+        }
+      },
     adapter: {
       async focus({ step }) {
         focusCalls.push(String(step?.params?.name ?? ""));
@@ -161,10 +183,11 @@ test("collectDesktopProbe summarizes a WeChat world state and pack analysis", as
   assert.equal(report.accessibilityElementCount, 3);
   assert.equal(report.accessibilityCandidateCount, 3);
   assert.equal(report.packAnalysis?.foreground, true);
-  assert.equal(report.packAnalysis?.unreadCandidate?.text, "未读: 张三");
-  assert.equal(report.packAnalysis?.composeCandidate?.text, "输入消息");
+  assert.equal(report.packAnalysis?.unreadCandidate?.text, "张三");
+  assert.equal(report.packAnalysis?.unreadCandidate?.source, "vision");
+  assert.equal(report.packAnalysis?.composeCandidate?.source, "vision");
   assert.equal(report.packAnalysis?.sendCandidate?.text, "发送");
-  assert.equal(report.packAnalysis?.topUnreadCandidates[0]?.text, "未读: 张三");
+  assert.equal(report.packAnalysis?.topUnreadCandidates[0]?.text, "张三");
   assert.equal(report.topCandidates[0]?.text, "未读: 张三");
 });
 
@@ -293,7 +316,12 @@ test("collectDesktopProbe can use vision analysis to identify WeChat unread thre
           return {
             openThread: "[25P5] 自娱自乐群 (52)",
             visibleUnreadThreads: [
-              { name: "WeChat Pay...", evidence: "badge", approxSidebarY: 0.54 }
+              {
+                name: "WeChat Pay...",
+                evidence: "badge",
+                approxSidebarY: 0.54,
+                approxBox: { x: 0.08, y: 0.5, width: 0.26, height: 0.08 }
+              }
             ],
             composer: {
               present: true,
@@ -316,7 +344,7 @@ test("collectDesktopProbe can use vision analysis to identify WeChat unread thre
   );
 
   assert.equal(report.packAnalysis?.unreadCandidate?.text, "WeChat Pay...");
-  assert.equal(report.packAnalysis?.unreadCandidate?.source, "ocr-wechat-list");
+  assert.equal(report.packAnalysis?.unreadCandidate?.source, "vision");
   assert.equal(report.packAnalysis?.composeCandidate?.source, "vision");
 });
 
@@ -352,7 +380,16 @@ test("collectDesktopProbe can analyze a target app even when the current frontmo
               ocrAvailable: true,
               ocrError: null
             },
-            capture: null,
+            capture: {
+              id: "artifact-wechat-body",
+              taskId: "probe-body",
+              traceId: null,
+              kind: "screenshot",
+              label: "WeChat body text without visible composer",
+              path: `${rootPath}/artifacts/wechat-body.png`,
+              metadata: {},
+              createdAt: new Date().toISOString()
+            },
             ocrBlocks: [],
             interactionCandidates: [],
             visibleText: "Terminal\nagentos desktop probe",
@@ -420,11 +457,11 @@ test("collectDesktopProbe can analyze a target app even when the current frontmo
   assert.equal(report.targetAppInspection?.frontmostApp, "Terminal");
   assert.equal(report.targetAppInspection?.accessibilityCandidateCount, 2);
   assert.equal(report.packAnalysis?.foreground, false);
-  assert.equal(report.packAnalysis?.unreadCandidate?.text, "未读: 李四");
-  assert.equal(report.packAnalysis?.composeCandidate?.text, "输入消息");
+  assert.equal(report.packAnalysis?.unreadCandidate, null);
+  assert.equal(report.packAnalysis?.composeCandidate, null);
 });
 
-test("collectDesktopProbe falls back to OCR world state when target app inspection has no usable signals", async () => {
+test("collectDesktopProbe does not fall back to OCR world state for WeChat when vision is unavailable", async () => {
   const rootPath = await createTempDir("agentos-desktop-probe-");
   const workspace = createWorkspace(rootPath);
   const report = await collectDesktopProbe(
@@ -462,7 +499,16 @@ test("collectDesktopProbe falls back to OCR world state when target app inspecti
               ocrAvailable: true,
               ocrError: null
             },
-            capture: null,
+            capture: {
+              id: "artifact-wechat-body",
+              taskId: "probe-body",
+              traceId: null,
+              kind: "screenshot",
+              label: "WeChat body text without visible composer",
+              path: `${rootPath}/artifacts/wechat-body.png`,
+              metadata: {},
+              createdAt: new Date().toISOString()
+            },
             ocrBlocks: [],
             interactionCandidates: [
               {
@@ -510,11 +556,11 @@ test("collectDesktopProbe falls back to OCR world state when target app inspecti
   );
 
   assert.equal(report.packAnalysis?.foreground, true);
-  assert.equal(report.packAnalysis?.unreadCandidate?.text, "Official Accounts");
-  assert.equal(report.packAnalysis?.topUnreadCandidates[0]?.text, "Official Accounts");
+  assert.equal(report.packAnalysis?.unreadCandidate, null);
+  assert.deepEqual(report.packAnalysis?.topUnreadCandidates ?? [], []);
 });
 
-test("collectDesktopProbe does not treat message-count body text as a WeChat composer candidate", async () => {
+test("collectDesktopProbe uses vision for WeChat and does not infer a composer from body text alone", async () => {
   const rootPath = await createTempDir("agentos-desktop-probe-");
   const workspace = createWorkspace(rootPath);
   const report = await collectDesktopProbe(
@@ -529,7 +575,29 @@ test("collectDesktopProbe does not treat message-count body text as a WeChat com
     },
     {
       workspace,
-      modelClient: noVisionModelClient,
+      modelClient: {
+        supportsImageJson() {
+          return true;
+        },
+        async analyzeImageJson<TResponse>() {
+          return {
+            openThread: "[25P5] 自娱自乐群 (52)",
+            visibleUnreadThreads: [
+              {
+                name: "Tan",
+                evidence: "red unread badge",
+                approxSidebarY: 0.22,
+                approxBox: { x: 0.08, y: 0.19, width: 0.26, height: 0.08 }
+              }
+            ],
+            composer: {
+              present: false,
+              evidence: "",
+              approxBox: null
+            }
+          } as TResponse;
+        }
+      },
       adapter: {
         async focus() {
           return { focused: "WeChat" };
@@ -554,7 +622,16 @@ test("collectDesktopProbe does not treat message-count body text as a WeChat com
               ocrAvailable: true,
               ocrError: null
             },
-            capture: null,
+            capture: {
+              id: "artifact-wechat-body",
+              taskId: "probe-body",
+              traceId: null,
+              kind: "screenshot",
+              label: "WeChat body text without visible composer",
+              path: `${rootPath}/artifacts/wechat-body.png`,
+              metadata: {},
+              createdAt: new Date().toISOString()
+            },
             ocrBlocks: [],
             interactionCandidates: [
               {
@@ -622,7 +699,22 @@ test("collectDesktopProbe does not report a WeChat unread candidate without unre
     },
     {
       workspace,
-      modelClient: noVisionModelClient,
+      modelClient: {
+        supportsImageJson() {
+          return true;
+        },
+        async analyzeImageJson<TResponse>() {
+          return {
+            openThread: "Tan",
+            visibleUnreadThreads: [],
+            composer: {
+              present: true,
+              evidence: "bottom input area",
+              approxBox: { x: 0.31, y: 0.85, width: 0.66, height: 0.12 }
+            }
+          } as TResponse;
+        }
+      },
       adapter: {
         async focus() {
           return { focused: "WeChat" };

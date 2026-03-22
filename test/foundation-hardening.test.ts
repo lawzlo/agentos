@@ -437,3 +437,121 @@ test("runtime supervisor shutdown waits for queued task drains before closing th
   assert.equal(storeClosed, true);
   assert.equal(surfaceShutdown, true);
 });
+
+test("runtime supervisor can recover from a stale drain promise when new queued tasks arrive", async () => {
+  let taskStarted = false;
+  const supervisor = new RuntimeSupervisor({
+    controlPlane: {
+      mergePersistedResult() {
+        return {};
+      },
+      getTask() {
+        return null;
+      },
+      decorateTask(task) {
+        return task;
+      },
+      controlTask() {
+        return null;
+      },
+      saveTaskAsSkill() {
+        return null;
+      },
+      saveTaskAsWatchRule() {
+        return null;
+      }
+    } as never,
+    store: {
+      listTasksByStatuses() {
+        return [];
+      },
+      updateTask() {
+        return null;
+      },
+      getTask(taskId: string) {
+        if (taskId === "task-stale") {
+          return {
+            id: taskId,
+            status: "queued"
+          };
+        }
+        return null;
+      },
+      updateTrace() {
+        return null;
+      },
+      close() {
+        return null;
+      }
+    } as never,
+    traceStore: {
+      start() {
+        return { id: "trace-1" };
+      },
+      finish() {
+        return null;
+      },
+      log() {
+        return null;
+      }
+    } as never,
+    eventBus: new EventBus(),
+    executionController: {
+      registerTask() {
+        return null;
+      },
+      unregisterTask() {
+        return null;
+      },
+      getState() {
+        return null;
+      },
+      waitForAgent() {
+        return Promise.resolve(null);
+      },
+      setMode() {
+        return null;
+      }
+    } as never,
+    workspaceManager: {} as never,
+    policyEngine: {} as never,
+    autonomy: {} as never,
+    planner: {} as never,
+    operator: {} as never,
+    verifier: {} as never,
+    recovery: {} as never,
+    memoryStore: {
+      remember() {
+        return null;
+      }
+    } as never,
+    watchScheduler: {
+      stop() {
+        return Promise.resolve();
+      }
+    } as never,
+    connectors: [],
+    surfaceRegistry: {
+      shutdown() {
+        return Promise.resolve();
+      }
+    } as never
+  });
+
+  supervisor.running = false;
+  supervisor.drainPromise = Promise.resolve();
+  supervisor.runTask = async (taskId: string) => {
+    if (taskId === "task-stale") {
+      taskStarted = true;
+    }
+  };
+
+  supervisor.enqueue("task-stale");
+
+  const startedAt = Date.now();
+  while (!taskStarted && Date.now() - startedAt < 1000) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  assert.equal(taskStarted, true);
+});

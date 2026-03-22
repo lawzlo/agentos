@@ -85,6 +85,15 @@ async function waitForValue(read, matcher, timeoutMs = 10000) {
   throw new Error("Timed out waiting for value");
 }
 
+async function writePngHeader(path, width, height) {
+  const header = Buffer.alloc(24);
+  Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(header, 0);
+  Buffer.from("IHDR").copy(header, 12);
+  header.writeUInt32BE(width, 16);
+  header.writeUInt32BE(height, 20);
+  await fs.writeFile(path, header);
+}
+
 async function waitForWatchDeletion(baseUrl, watchRuleId, timeoutMs = 10000) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
@@ -1910,7 +1919,6 @@ test("slack desktop pack skips reply context extraction when composer is missing
 });
 
 test("wechat desktop pack can detect unread conversations and build reply steps from a desktop world state", async () => {
-  let opened = false;
   const initialWorldState = {
     version: 1,
     surface: "desktop",
@@ -1925,7 +1933,7 @@ test("wechat desktop pack can detect unread conversations and build reply steps 
         }
       ]
     },
-    capture: null,
+    capture: { path: "/tmp/wechat-thread-detect.png" },
     ocrBlocks: [],
     interactionCandidates: [
       {
@@ -1945,65 +1953,9 @@ test("wechat desktop pack can detect unread conversations and build reply steps 
     summary: "WeChat unread list",
     timestamp: new Date().toISOString()
   };
-  const threadWorldState = {
-    ...initialWorldState,
-    interactionCandidates: [
-      {
-        id: "thread-zhangsan",
-        surface: "desktop",
-        kind: "text",
-        text: "张三",
-        role: "button",
-        bounds: { x: 10, y: 10, width: 160, height: 24, centerX: 90, centerY: 22 },
-        confidence: 0.98,
-        sourceHints: { source: "accessibility", ariaLabel: "张三", actions: ["AXPress"] },
-        isInteractive: true
-      },
-      {
-        id: "compose",
-        surface: "desktop",
-        kind: "text",
-        text: "输入消息",
-        role: "textbox",
-        bounds: { x: 420, y: 640, width: 260, height: 32, centerX: 550, centerY: 656 },
-        confidence: 0.98,
-        sourceHints: { source: "accessibility", placeholder: "输入消息", actions: ["AXPress"] },
-        isInteractive: true
-      },
-      {
-        id: "thread-title",
-        surface: "desktop",
-        kind: "text",
-        text: "张三",
-        role: "text",
-        bounds: { x: 520, y: 96, width: 90, height: 24, centerX: 565, centerY: 108 },
-        confidence: 0.97,
-        sourceHints: { source: "ocr" },
-        isInteractive: true
-      },
-      {
-        id: "send",
-        surface: "desktop",
-        kind: "text",
-        text: "发送",
-        role: "button",
-        bounds: { x: 760, y: 640, width: 70, height: 32, centerX: 795, centerY: 656 },
-        confidence: 0.98,
-        sourceHints: { source: "accessibility", actions: ["AXPress"] },
-        isInteractive: true
-      }
-    ],
-    visibleText: "微信\n张三\n客户: 明天下午方便吗？\n我: 我先确认一下时间。\n输入消息\n发送"
-  };
   const fakeSurface = {
     async observe() {
-      return opened ? threadWorldState : initialWorldState;
-    },
-    async act({ step }) {
-      if (step.action === "clickTarget") {
-        opened = true;
-      }
-      return { ok: true };
+      return initialWorldState;
     }
   };
   const registry = new LivePackRegistry({
@@ -2051,12 +2003,31 @@ test("wechat desktop pack can detect unread conversations and build reply steps 
     dedupeState: {},
     workspace,
     surfaceRegistry: registry.surfaceRegistry as never,
-    controlPlane: {} as never
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        analyzeImageJson: async () => ({
+          openThread: "当前会话",
+          visibleUnreadThreads: [
+            {
+              name: "张三",
+              evidence: "red unread badge",
+              approxSidebarY: 0.18,
+              approxBox: { x: 0.08, y: 0.16, width: 0.26, height: 0.07 }
+            }
+          ],
+          composer: {
+            present: true,
+            evidence: "bottom input area",
+            approxBox: { x: 0.33, y: 0.82, width: 0.56, height: 0.12 }
+          }
+        })
+      }
+    } as never
   });
   assert.equal(detection?.summary, "张三");
   assert.equal(detection?.metadata?.threadKey, "张三");
-  const openCandidate = detection?.metadata?.openCandidate as { sourceHints?: { source?: string } } | undefined;
-  assert.equal(openCandidate?.sourceHints?.source, "accessibility");
+  assert.equal(Number.isFinite(Number((detection?.metadata as { openPoint?: { x?: unknown } } | undefined)?.openPoint?.x ?? NaN)), true);
 
   const context = await pack?.extractContext?.({
     rule,
@@ -2064,39 +2035,35 @@ test("wechat desktop pack can detect unread conversations and build reply steps 
     detection: detection as never,
     workspace,
     surfaceRegistry: registry.surfaceRegistry as never,
-    controlPlane: {
-      modelClient: { isConfigured: () => false }
-    } as never
+    controlPlane: {} as never
   });
-  assert.equal(context?.inputs?.typeTarget, "输入消息");
-  assert.equal(context?.inputs?.sendTarget, "发送");
+  assert.equal(Number(context?.inputs?.composeX ?? 0) > 0, true);
+  assert.equal(Number(context?.inputs?.composeY ?? 0) > 0, true);
   assert.equal(context?.inputs?.threadTitle, "张三");
-  assert.equal(context?.context?.[0], "客户: 明天下午方便吗？");
+  assert.equal((context?.context ?? []).includes("客户: 明天下午方便吗？"), true);
   assert.equal(context?.metadata?.threadKey, "张三");
-  assert.equal(context?.metadata?.sender, "客户");
+  assert.equal(context?.metadata?.threadVerificationDeferred, true);
   assert.equal(Array.isArray(context?.taskSpec?.steps), true);
-  const firstStepTarget = context?.taskSpec?.steps?.[0]?.params?.target as { id?: string } | undefined;
-  const firstStepExpect = context?.taskSpec?.steps?.[0]?.expect as {
+  assert.equal(context?.taskSpec?.steps?.[0]?.action, "focusApp");
+  assert.equal(context?.taskSpec?.steps?.[1]?.action, "pressKey");
+  assert.equal(context?.taskSpec?.steps?.[2]?.action, "clickAt");
+  assert.equal(context?.taskSpec?.steps?.[3]?.action, "wait");
+  const verifyThreadExpect = context?.taskSpec?.steps?.[3]?.expect as {
     visualCheck?: { type?: string; targetThread?: string };
   } | undefined;
-  const typeStepTarget = context?.taskSpec?.steps?.[2]?.params?.target as { id?: string } | undefined;
-  const typeStepExpect = context?.taskSpec?.steps?.[2]?.expect as {
+  const verifyPrefillExpectShifted = context?.taskSpec?.steps?.[6]?.expect as {
     visualCheck?: { type?: string; replyPreview?: string };
   } | undefined;
-  const sendStepTarget = context?.taskSpec?.steps?.[3]?.params?.target as { id?: string } | undefined;
-  assert.equal(context?.taskSpec?.steps?.[0]?.action, "clickTarget");
-  assert.equal(firstStepTarget?.id, "thread-zhangsan");
-  assert.equal(firstStepExpect?.visualCheck?.type, "wechat_thread");
-  assert.equal(firstStepExpect?.visualCheck?.targetThread, "{{threadTitle}}");
-  assert.equal(context?.taskSpec?.steps?.[2]?.params?.text, "{{typeText}}");
-  assert.equal(typeStepTarget?.id, "compose");
-  assert.equal(typeStepExpect?.visualCheck?.type, "wechat_prefill");
-  assert.equal(typeStepExpect?.visualCheck?.replyPreview, "{{typeTextPreview}}");
-  assert.equal(sendStepTarget?.id, "send");
+  assert.equal(verifyThreadExpect?.visualCheck?.type, "wechat_thread");
+  assert.equal(verifyThreadExpect?.visualCheck?.targetThread, "{{threadTitle}}");
+  assert.equal(context?.taskSpec?.steps?.[4]?.action, "clickAt");
+  assert.equal(context?.taskSpec?.steps?.[5]?.action, "typeText");
+  assert.equal(context?.taskSpec?.steps?.[6]?.action, "wait");
+  assert.equal(verifyPrefillExpectShifted?.visualCheck?.type, "wechat_prefill");
+  assert.equal(verifyPrefillExpectShifted?.visualCheck?.replyPreview, "{{typeTextPreview}}");
 });
 
-test("wechat desktop pack can fall back to clicking the composer area when no compose candidate is visible", async () => {
-  let opened = false;
+test("wechat desktop pack can fall back to the window composer region when vision sees no composer box", async () => {
   const initialWorldState = {
     version: 1,
     surface: "desktop",
@@ -2111,7 +2078,7 @@ test("wechat desktop pack can fall back to clicking the composer area when no co
         }
       ]
     },
-    capture: null,
+    capture: { path: "/tmp/wechat-composer-fallback.png" },
     ocrBlocks: [],
     interactionCandidates: [
       {
@@ -2142,54 +2109,9 @@ test("wechat desktop pack can fall back to clicking the composer area when no co
     summary: "WeChat inbox",
     timestamp: new Date().toISOString()
   };
-  const threadWorldState = {
-    ...initialWorldState,
-    interactionCandidates: [
-      {
-        id: "message-summary",
-        surface: "desktop",
-        kind: "text",
-        text: "25P5 #Jit: [Video] 4 message(s)",
-        role: "text",
-        bounds: { x: 620, y: 150, width: 320, height: 28, centerX: 780, centerY: 164 },
-        confidence: 0.92,
-        sourceHints: { source: "ocr" },
-        isInteractive: true
-      },
-      {
-        id: "thread-title",
-        surface: "desktop",
-        kind: "text",
-        text: "Tan",
-        role: "text",
-        bounds: { x: 520, y: 96, width: 80, height: 24, centerX: 560, centerY: 108 },
-        confidence: 0.95,
-        sourceHints: { source: "ocr" },
-        isInteractive: true
-      },
-      {
-        id: "message-1",
-        surface: "desktop",
-        kind: "text",
-        text: "客户: 在吗？",
-        role: "text",
-        bounds: { x: 460, y: 180, width: 160, height: 24, centerX: 540, centerY: 192 },
-        confidence: 0.9,
-        sourceHints: { source: "ocr" },
-        isInteractive: true
-      }
-    ],
-    visibleText: "Tan\n客户: 在吗？\n11:15"
-  };
   const fakeSurface = {
     async observe() {
-      return opened ? threadWorldState : initialWorldState;
-    },
-    async act({ step }) {
-      if (step.action === "clickTarget") {
-        opened = true;
-      }
-      return { ok: true };
+      return initialWorldState;
     }
   };
   const registry = new LivePackRegistry({
@@ -2241,42 +2163,228 @@ test("wechat desktop pack can fall back to clicking the composer area when no co
     dedupeState: {},
     workspace,
     surfaceRegistry: registry.surfaceRegistry as never,
-    controlPlane: {} as never
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        analyzeImageJson: async () => ({
+          openThread: "[25P5] 自娱自乐群 (52)",
+          visibleUnreadThreads: [
+            {
+              name: "Tan",
+              evidence: "red unread badge",
+              approxSidebarY: 0.22,
+              approxBox: { x: 0.08, y: 0.19, width: 0.26, height: 0.08 }
+            }
+          ],
+          composer: {
+            present: false,
+            evidence: "",
+            approxBox: null
+          }
+        })
+      }
+    } as never
   });
   assert.equal(detection?.summary, "Tan");
+  assert.equal(Number(detection?.inputs?.composeX ?? 0) > 0, true);
+  assert.equal(Number(detection?.inputs?.composeY ?? 0) > 0, true);
+  assert.equal(Array.isArray(detection?.taskSpec?.steps), true);
+});
+
+test("wechat desktop extractContext reuses prior visual analysis without a second vision call", async () => {
+  let opened = false;
+  let analyzeCalls = 0;
+  const initialWorldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-wechat-vision-reuse",
+    appContext: {
+      appName: "WeChat",
+      windows: [
+        {
+          ownerName: "WeChat",
+          windowName: "WeChat",
+          bounds: { x: 100, y: 40, width: 900, height: 700, centerX: 550, centerY: 390 }
+        }
+      ]
+    },
+    capture: { path: "/tmp/wechat-vision-reuse-before.png" },
+    ocrBlocks: [],
+    interactionCandidates: [
+      {
+        id: "thread-unread",
+        surface: "desktop",
+        kind: "text",
+        text: "硅谷 AI+ 和 TA ...",
+        role: "button",
+        bounds: { x: 220, y: 180, width: 180, height: 32, centerX: 310, centerY: 196 },
+        confidence: 0.96,
+        sourceHints: { source: "ocr-wechat-sidebar" },
+        isInteractive: true
+      }
+    ],
+    visibleText: "WeChat\n硅谷 AI+ 和 TA ...",
+    recentActions: [],
+    summary: "WeChat",
+    timestamp: new Date().toISOString()
+  };
+  const threadWorldState = {
+    ...initialWorldState,
+    capture: { path: "/tmp/wechat-vision-reuse-after.png" },
+    interactionCandidates: [
+      {
+        id: "compose",
+        surface: "desktop",
+        kind: "text",
+        text: "输入消息",
+        role: "textbox",
+        bounds: { x: 600, y: 640, width: 240, height: 36, centerX: 720, centerY: 658 },
+        confidence: 0.98,
+        sourceHints: { source: "ocr-wechat-compose", placeholder: "输入消息" },
+        isInteractive: true
+      },
+      {
+        id: "send",
+        surface: "desktop",
+        kind: "text",
+        text: "发送",
+        role: "button",
+        bounds: { x: 860, y: 640, width: 48, height: 28, centerX: 884, centerY: 654 },
+        confidence: 0.97,
+        sourceHints: { source: "ocr" },
+        isInteractive: true
+      }
+    ],
+    visibleText: "WeChat\n输入消息\n发送",
+    timestamp: new Date().toISOString()
+  };
+  const fakeSurface = {
+    async waitForAppReady() {
+      return {
+        ready: true,
+        frontmostApp: "WeChat",
+        accessibilityCandidateCount: 0
+      };
+    },
+    async observe() {
+      return opened ? threadWorldState : initialWorldState;
+    },
+    async act({ step }) {
+      if (step.action === "clickTarget" || step.action === "clickAt") {
+        opened = true;
+      }
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("wechat-desktop");
+  const rule: WatchRule = {
+    id: "watch-wechat-vision-reuse",
+    goal: "Always watch WeChat and prefill replies for unread conversations without sending",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "wechat-desktop-main",
+    skillName: null,
+    appTarget: "WeChat",
+    livePack: "wechat-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {
+      governance: {
+        replyPolicy: "prefill_first"
+      }
+    },
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-wechat-vision-reuse",
+    name: "wechat-desktop-main",
+    rootPath: "/tmp/wechat-desktop-main",
+    profilePath: "/tmp/wechat-desktop-main/profile",
+    downloadsPath: "/tmp/wechat-desktop-main/downloads",
+    artifactsPath: "/tmp/wechat-desktop-main/artifacts",
+    scratchPath: "/tmp/wechat-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
 
   const context = await pack?.extractContext?.({
     rule,
     worldState: initialWorldState as never,
-    detection: detection as never,
+    detection: {
+      fingerprint: "wechat-vision-reuse",
+      summary: "硅谷 AI+ 和 TA ...",
+      text: "硅谷 AI+ 和 TA ...",
+      context: ["现有上下文"],
+      inputs: {
+        openTarget: "硅谷 AI+ 和 TA ...",
+        threadTitle: "硅谷 AI+ 和 TA ..."
+      },
+      metadata: {
+        visualAnalysis: {
+          openThread: null,
+          visibleUnreadThreads: [
+            {
+              name: "硅谷 AI+ 和 TA ...",
+              evidence: "red unread badge on the row",
+              approxSidebarY: 0.22,
+              approxBox: { x: 0.08, y: 0.19, width: 0.26, height: 0.08 }
+            }
+          ],
+          composer: {
+            present: true,
+            evidence: "input area visible",
+            approxBox: { x: 0.33, y: 0.8, width: 0.56, height: 0.12 }
+          }
+        }
+      },
+      taskSpec: {
+        preferredSurface: "desktop",
+        steps: [
+          {
+            label: "Focus WeChat",
+            surface: "desktop",
+            action: "focusApp",
+            params: {
+              name: "WeChat"
+            }
+          }
+        ]
+      }
+    } as never,
     workspace,
     surfaceRegistry: registry.surfaceRegistry as never,
     controlPlane: {
-      modelClient: { isConfigured: () => false }
+      modelClient: {
+        isConfigured: () => true,
+        supportsImageJson: () => true,
+        analyzeImageJson: async () => {
+          analyzeCalls += 1;
+          throw new Error("extractContext should not request a second WeChat vision pass");
+        }
+      }
     } as never
   });
 
-  assert.equal(Number(context?.inputs?.composeX ?? 0) > 0, true);
-  assert.equal(Number(context?.inputs?.composeY ?? 0) > 0, true);
-  assert.equal(context?.inputs?.threadTitle, "Tan");
-  const fallbackFirstStepTarget = context?.taskSpec?.steps?.[0]?.params?.target as { id?: string } | undefined;
-  const fallbackFirstStepExpect = context?.taskSpec?.steps?.[0]?.expect as {
-    visualCheck?: { type?: string; targetThread?: string };
-  } | undefined;
-  const fallbackTypeStepExpect = context?.taskSpec?.steps?.[2]?.expect as {
-    visualCheck?: { type?: string; replyPreview?: string };
-  } | undefined;
-  assert.equal(fallbackFirstStepTarget?.id, "thread-tan");
-  assert.equal(fallbackFirstStepExpect?.visualCheck?.type, "wechat_thread");
-  assert.equal(fallbackFirstStepExpect?.visualCheck?.targetThread, "{{threadTitle}}");
-  assert.equal(context?.taskSpec?.steps?.[1]?.action, "clickAt");
-  assert.equal(context?.taskSpec?.steps?.[2]?.action, "typeText");
-  assert.equal(fallbackTypeStepExpect?.visualCheck?.type, "wechat_prefill");
-  assert.equal(fallbackTypeStepExpect?.visualCheck?.replyPreview, "{{typeTextPreview}}");
+  assert.equal(analyzeCalls, 0);
+  assert.equal(context?.inputs?.threadTitle, "硅谷 AI+ 和 TA ...");
+  assert.equal(context?.context?.[0], "现有上下文");
+  assert.equal(context?.metadata?.threadVerificationDeferred, true);
+  assert.equal(Array.isArray(context?.taskSpec?.steps), true);
 });
 
-test("wechat desktop pack can fall back to OCR-only detections when accessibility candidates are unavailable", async () => {
-  let opened = false;
+test("wechat desktop pack requires vision analysis to detect unread conversations", async () => {
   const initialWorldState = {
     version: 1,
     surface: "desktop",
@@ -2323,65 +2431,9 @@ test("wechat desktop pack can fall back to OCR-only detections when accessibilit
     summary: "WeChat OCR unread list",
     timestamp: new Date().toISOString()
   };
-  const threadWorldState = {
-    ...initialWorldState,
-    interactionCandidates: [
-      {
-        id: "ocr-thread-lisi",
-        surface: "desktop",
-        kind: "text",
-        text: "李四",
-        role: "text",
-        bounds: { x: 80, y: 140, width: 120, height: 30, centerX: 140, centerY: 155 },
-        confidence: 0.94,
-        sourceHints: { source: "ocr" },
-        isInteractive: true
-      },
-      {
-        id: "ocr-compose",
-        surface: "desktop",
-        kind: "text",
-        text: "输入",
-        role: "text",
-        bounds: { x: 280, y: 630, width: 100, height: 24, centerX: 330, centerY: 642 },
-        confidence: 0.92,
-        sourceHints: { source: "ocr" },
-        isInteractive: true
-      },
-      {
-        id: "ocr-thread-title",
-        surface: "desktop",
-        kind: "text",
-        text: "李四",
-        role: "text",
-        bounds: { x: 500, y: 96, width: 80, height: 24, centerX: 540, centerY: 108 },
-        confidence: 0.94,
-        sourceHints: { source: "ocr" },
-        isInteractive: true
-      },
-      {
-        id: "ocr-send",
-        surface: "desktop",
-        kind: "text",
-        text: "发送",
-        role: "text",
-        bounds: { x: 760, y: 632, width: 70, height: 24, centerX: 795, centerY: 644 },
-        confidence: 0.95,
-        sourceHints: { source: "ocr" },
-        isInteractive: true
-      }
-    ],
-    visibleText: "微信\n李四\n客户: 方便的话回个电话\n我: 我晚点给你回电。\n输入\n发送"
-  };
   const fakeSurface = {
     async observe() {
-      return opened ? threadWorldState : initialWorldState;
-    },
-    async act({ step }) {
-      if (step.action === "clickTarget") {
-        opened = true;
-      }
-      return { ok: true };
+      return initialWorldState;
     },
     async waitForAppReady() {
       return {
@@ -2441,22 +2493,7 @@ test("wechat desktop pack can fall back to OCR-only detections when accessibilit
     surfaceRegistry: registry.surfaceRegistry as never,
     controlPlane: {} as never
   });
-  assert.equal(detection?.summary, "李四");
-
-  const context = await pack?.extractContext?.({
-    rule,
-    worldState: initialWorldState as never,
-    detection: detection as never,
-    workspace,
-    surfaceRegistry: registry.surfaceRegistry as never,
-    controlPlane: {
-      modelClient: { isConfigured: () => false }
-    } as never
-  });
-  assert.equal(Number(context?.inputs?.composeX ?? 0) > 0, true);
-  assert.equal(Number(context?.inputs?.composeY ?? 0) > 0, true);
-  assert.equal(context?.inputs?.sendTarget, "发送");
-  assert.equal(context?.metadata?.threadKey, "李四");
+  assert.equal(detection, null);
 });
 
 test("wechat desktop pack can use visual model analysis to identify unread threads", async () => {
@@ -2552,7 +2589,14 @@ test("wechat desktop pack can use visual model analysis to identify unread threa
         supportsImageJson: () => true,
         analyzeImageJson: async () => ({
           openThread: "[25P5] 自娱自乐群 (52)",
-          visibleUnreadThreads: [{ name: "WeChat Pay...", evidence: "badge", approxSidebarY: 0.54 }],
+          visibleUnreadThreads: [
+            {
+              name: "WeChat Pay...",
+              evidence: "badge",
+              approxSidebarY: 0.54,
+              approxBox: { x: 0.08, y: 0.5, width: 0.26, height: 0.08 }
+            }
+          ],
           composer: {
             present: true,
             evidence: "bottom input area",
@@ -2565,13 +2609,365 @@ test("wechat desktop pack can use visual model analysis to identify unread threa
 
   assert.equal(detection?.summary, "WeChat Pay...");
   assert.equal(detection?.inputs?.openTarget, "WeChat Pay...");
+  assert.equal(Number.isFinite(Number((detection?.metadata as { openPoint?: { x?: unknown } } | undefined)?.openPoint?.x ?? NaN)), true);
   assert.equal(
     Array.isArray((detection?.metadata?.visualAnalysis as { visibleUnreadThreads?: unknown[] } | undefined)?.visibleUnreadThreads),
     true
   );
 });
 
-test("wechat desktop OCR scoring downranks dates and URL snippets in the conversation list", async () => {
+test("wechat desktop pack clamps vision unread click targets back into the left sidebar", async () => {
+  const worldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-wechat-vision-clamp",
+    appContext: {
+      appName: "WeChat",
+      windows: [
+        {
+          ownerName: "WeChat",
+          windowName: "WeChat",
+          bounds: { x: 100, y: 40, width: 900, height: 700, centerX: 550, centerY: 390 }
+        }
+      ]
+    },
+    capture: {
+      id: "artifact-vision-clamp",
+      taskId: "task-vision-clamp",
+      traceId: null,
+      kind: "screenshot",
+      label: "WeChat vision clamp state",
+      path: "/tmp/wechat-vision-clamp.png",
+      metadata: {},
+      createdAt: new Date().toISOString()
+    },
+    ocrBlocks: [],
+    interactionCandidates: [],
+    visibleText: "WeChat\nTan",
+    recentActions: [],
+    summary: "WeChat",
+    timestamp: new Date().toISOString()
+  };
+
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({})
+  });
+  const pack = registry.get("wechat-desktop");
+  const rule: WatchRule = {
+    id: "watch-wechat-vision-clamp",
+    goal: "Always watch WeChat and reply to unread conversations",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "wechat-desktop-main",
+    skillName: null,
+    appTarget: "WeChat",
+    livePack: "wechat-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-wechat-vision-clamp",
+    name: "wechat-desktop-main",
+    rootPath: "/tmp/wechat-desktop-main",
+    profilePath: "/tmp/wechat-desktop-main/profile",
+    downloadsPath: "/tmp/wechat-desktop-main/downloads",
+    artifactsPath: "/tmp/wechat-desktop-main/artifacts",
+    scratchPath: "/tmp/wechat-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: worldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        analyzeImageJson: async () => ({
+          openThread: "Current thread",
+          visibleUnreadThreads: [
+            {
+              name: "Tan",
+              evidence: "badge",
+              approxSidebarY: 0.16,
+              approxBox: { x: 0.58, y: 0.12, width: 0.18, height: 0.08 }
+            }
+          ],
+          composer: {
+            present: true,
+            evidence: "bottom input area",
+            approxBox: { x: 0.31, y: 0.85, width: 0.66, height: 0.12 }
+          }
+        })
+      }
+    } as never
+  });
+
+  assert.equal(detection?.summary, "Tan");
+  assert.equal(
+    Math.round(Number((detection?.metadata as { openPoint?: { x?: unknown } } | undefined)?.openPoint?.x ?? 0)),
+    298
+  );
+});
+
+test("wechat desktop pack prefers target-specific vision grounding for the click point", async () => {
+  const worldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-wechat-vision-grounding",
+    appContext: {
+      appName: "WeChat",
+      windows: [
+        {
+          ownerName: "WeChat",
+          windowName: "WeChat",
+          bounds: { x: 100, y: 40, width: 900, height: 700, centerX: 550, centerY: 390 }
+        }
+      ]
+    },
+    capture: {
+      id: "artifact-vision-grounding",
+      taskId: "task-vision-grounding",
+      traceId: null,
+      kind: "screenshot",
+      label: "WeChat vision grounding state",
+      path: "/tmp/wechat-vision-grounding.png",
+      metadata: {},
+      createdAt: new Date().toISOString()
+    },
+    ocrBlocks: [],
+    interactionCandidates: [],
+    visibleText: "WeChat\nTan",
+    recentActions: [],
+    summary: "WeChat",
+    timestamp: new Date().toISOString()
+  };
+
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({})
+  });
+  const pack = registry.get("wechat-desktop");
+  const rule: WatchRule = {
+    id: "watch-wechat-vision-grounding",
+    goal: "Always watch WeChat and reply to unread conversations",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "wechat-desktop-main",
+    skillName: null,
+    appTarget: "WeChat",
+    livePack: "wechat-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-wechat-vision-grounding",
+    name: "wechat-desktop-main",
+    rootPath: "/tmp/wechat-desktop-main",
+    profilePath: "/tmp/wechat-desktop-main/profile",
+    downloadsPath: "/tmp/wechat-desktop-main/downloads",
+    artifactsPath: "/tmp/wechat-desktop-main/artifacts",
+    scratchPath: "/tmp/wechat-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  let analyzeCalls = 0;
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: worldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        analyzeImageJson: async ({ schemaName }: { schemaName?: string }) => {
+          analyzeCalls += 1;
+          if (schemaName === "agentos_wechat_thread_grounding") {
+            return {
+              targetVisible: true,
+              evidence: "Exact Tan row visible in left sidebar",
+              clickPoint: { x: 0.16, y: 0.18 },
+              rowBox: { x: 0.06, y: 0.14, width: 0.26, height: 0.08 }
+            };
+          }
+          return {
+            openThread: "Current thread",
+            visibleUnreadThreads: [
+              {
+                name: "Tan",
+                evidence: "badge",
+                approxSidebarY: 0.16,
+                approxBox: { x: 0.58, y: 0.12, width: 0.18, height: 0.08 }
+              }
+            ],
+            composer: {
+              present: true,
+              evidence: "bottom input area",
+              approxBox: { x: 0.31, y: 0.85, width: 0.66, height: 0.12 }
+            }
+          };
+        }
+      }
+    } as never
+  });
+
+  assert.equal(analyzeCalls, 2);
+  assert.equal(detection?.summary, "Tan");
+  assert.equal(
+    Math.round(Number((detection?.metadata as { openPoint?: { x?: unknown } } | undefined)?.openPoint?.x ?? 0)),
+    205
+  );
+  assert.equal(
+    Math.round(Number((detection?.metadata as { openPoint?: { y?: unknown } } | undefined)?.openPoint?.y ?? 0)),
+    166
+  );
+});
+
+test("wechat desktop pack maps vision click targets into on-screen window coordinates for window-local captures", async () => {
+  const capturePath = "/tmp/wechat-vision-window-local.png";
+  await writePngHeader(capturePath, 3024, 1964);
+  const worldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-wechat-vision-window-local",
+    appContext: {
+      appName: "WeChat",
+      windows: [
+        {
+          ownerName: "WeChat",
+          windowName: "WeChat",
+          windowNumber: 88,
+          bounds: { x: 100, y: 40, width: 900, height: 700, centerX: 550, centerY: 390 }
+        }
+      ]
+    },
+    capture: {
+      id: "artifact-vision-window-local",
+      taskId: "task-vision-window-local",
+      traceId: null,
+      kind: "screenshot",
+      label: "WeChat vision window-local state",
+      path: capturePath,
+      metadata: { windowNumber: 88 },
+      createdAt: new Date().toISOString()
+    },
+    ocrBlocks: [],
+    interactionCandidates: [],
+    visibleText: "WeChat\nTan",
+    recentActions: [],
+    summary: "WeChat",
+    timestamp: new Date().toISOString()
+  };
+
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({})
+  });
+  const pack = registry.get("wechat-desktop");
+  const rule: WatchRule = {
+    id: "watch-wechat-vision-window-local",
+    goal: "Always watch WeChat and reply to unread conversations",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "wechat-desktop-main",
+    skillName: null,
+    appTarget: "WeChat",
+    livePack: "wechat-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-wechat-vision-window-local",
+    name: "wechat-desktop-main",
+    rootPath: "/tmp/wechat-desktop-main",
+    profilePath: "/tmp/wechat-desktop-main/profile",
+    downloadsPath: "/tmp/wechat-desktop-main/downloads",
+    artifactsPath: "/tmp/wechat-desktop-main/artifacts",
+    scratchPath: "/tmp/wechat-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: worldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        analyzeImageJson: async ({ schemaName }: { schemaName?: string }) => {
+          if (schemaName === "agentos_wechat_thread_grounding") {
+            return {
+              targetVisible: true,
+              evidence: "Exact Tan row visible in left sidebar",
+              clickPoint: { x: 0.16, y: 0.18 },
+              rowBox: { x: 0.06, y: 0.14, width: 0.26, height: 0.08 }
+            };
+          }
+          return {
+            openThread: "Current thread",
+            visibleUnreadThreads: [
+              {
+                name: "Tan",
+                evidence: "badge",
+                approxSidebarY: 0.16,
+                approxBox: { x: 0.08, y: 0.14, width: 0.26, height: 0.08 }
+              }
+            ],
+            composer: {
+              present: true,
+              evidence: "bottom input area",
+              approxBox: { x: 0.31, y: 0.85, width: 0.66, height: 0.12 }
+            }
+          };
+        }
+      }
+    } as never
+  });
+
+  assert.equal(
+    Math.round(Number((detection?.metadata as { openPoint?: { x?: unknown } } | undefined)?.openPoint?.x ?? 0)),
+    205
+  );
+  assert.equal(
+    Math.round(Number((detection?.metadata as { openPoint?: { y?: unknown } } | undefined)?.openPoint?.y ?? 0)),
+    166
+  );
+});
+
+test("wechat desktop vision analysis can ignore timestamps and URL snippets in the conversation list", async () => {
   const registry = new LivePackRegistry({
     surfaceRegistry: new SurfaceRegistry({
       desktop: {} as never
@@ -2627,7 +3023,7 @@ test("wechat desktop OCR scoring downranks dates and URL snippets in the convers
       ],
       accessibilityCandidateCount: 0
     },
-    capture: null,
+    capture: { path: "/tmp/wechat-vision-ranking.png" },
     ocrBlocks: [],
     interactionCandidates: [
       {
@@ -2687,13 +3083,35 @@ test("wechat desktop OCR scoring downranks dates and URL snippets in the convers
     dedupeState: {},
     workspace,
     surfaceRegistry: registry.surfaceRegistry as never,
-    controlPlane: {} as never
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        analyzeImageJson: async () => ({
+          openThread: null,
+          visibleUnreadThreads: [
+            {
+              name: "Official Accounts",
+              evidence: "red unread badge",
+              approxSidebarY: 0.26,
+              replyable: false,
+              threadKind: "official_account",
+              approxBox: { x: 0.08, y: 0.22, width: 0.26, height: 0.08 }
+            }
+          ],
+          composer: {
+            present: false,
+            evidence: "",
+            approxBox: null
+          }
+        })
+      }
+    } as never
   });
 
-  assert.equal(detection?.summary, "Official Accounts");
+  assert.equal(detection, null);
 });
 
-test("wechat desktop OCR scoring prefers list-region candidates over compose-region text", async () => {
+test("wechat desktop vision analysis does not confuse body text for unread conversations", async () => {
   const registry = new LivePackRegistry({
     surfaceRegistry: new SurfaceRegistry({
       desktop: {} as never
@@ -2749,7 +3167,7 @@ test("wechat desktop OCR scoring prefers list-region candidates over compose-reg
       ],
       accessibilityCandidateCount: 0
     },
-    capture: null,
+    capture: { path: "/tmp/wechat-vision-region-ranking.png" },
     ocrBlocks: [],
     interactionCandidates: [
       {
@@ -2798,14 +3216,35 @@ test("wechat desktop OCR scoring prefers list-region candidates over compose-reg
     dedupeState: {},
     workspace,
     surfaceRegistry: registry.surfaceRegistry as never,
-    controlPlane: {} as never
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        analyzeImageJson: async () => ({
+          openThread: "[25P5] 自娱自乐群 (52)",
+          visibleUnreadThreads: [
+            {
+              name: "Official Accounts",
+              evidence: "red unread badge",
+              approxSidebarY: 0.28,
+              replyable: false,
+              threadKind: "official_account",
+              approxBox: { x: 0.08, y: 0.24, width: 0.26, height: 0.08 }
+            }
+          ],
+          composer: {
+            present: false,
+            evidence: "",
+            approxBox: null
+          }
+        })
+      }
+    } as never
   });
 
-  assert.equal(detection?.summary, "Official Accounts");
+  assert.equal(detection, null);
 });
 
-test("wechat desktop pack can scroll the conversation list to find off-screen unread candidates", async () => {
-  let scrollCalls = 0;
+test("wechat desktop pack returns null when vision sees no visible unread conversations", async () => {
   const initialWorldState = {
     version: 1,
     surface: "desktop",
@@ -2829,43 +3268,9 @@ test("wechat desktop pack can scroll the conversation list to find off-screen un
     summary: "WeChat conversation list",
     timestamp: new Date().toISOString()
   };
-  const scrolledWorldState = {
-    ...initialWorldState,
-    interactionCandidates: [
-      {
-        id: "ocr-badge-official-accounts",
-        surface: "desktop",
-        kind: "text",
-        text: "3",
-        role: "text",
-        bounds: { x: 140, y: 210, width: 18, height: 18, centerX: 149, centerY: 219 },
-        confidence: 0.95,
-        sourceHints: { source: "ocr" },
-        isInteractive: true
-      },
-      {
-        id: "ocr-thread-official-accounts",
-        surface: "desktop",
-        kind: "text",
-        text: "Official Accounts",
-        role: "text",
-        bounds: { x: 180, y: 210, width: 180, height: 28, centerX: 270, centerY: 224 },
-        confidence: 0.95,
-        sourceHints: { source: "ocr-wechat-list" },
-        isInteractive: true
-      }
-    ],
-    visibleText: "微信\n未读\nOfficial Accounts\n03/11\nhttps://apps.apple.co..\n"
-  };
   const fakeSurface = {
     async observe() {
-      return scrollCalls > 0 ? scrolledWorldState : initialWorldState;
-    },
-    async act({ step }) {
-      if (step.action === "scroll") {
-        scrollCalls += 1;
-      }
-      return { ok: true };
+      return initialWorldState;
     }
   };
   const registry = new LivePackRegistry({
@@ -2913,12 +3318,141 @@ test("wechat desktop pack can scroll the conversation list to find off-screen un
     dedupeState: {},
     workspace,
     surfaceRegistry: registry.surfaceRegistry as never,
-    controlPlane: {} as never
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        analyzeImageJson: async () => ({
+          openThread: "工作群",
+          visibleUnreadThreads: [],
+          composer: {
+            present: true,
+            evidence: "bottom input area",
+            approxBox: { x: 0.31, y: 0.85, width: 0.66, height: 0.12 }
+          }
+        })
+      }
+    } as never
   });
 
-  assert.equal(scrollCalls > 0, true);
-  assert.equal(detection?.summary, "Official Accounts");
-  assert.equal(detection?.metadata?.observationPasses, 1);
+  assert.equal(detection, null);
+});
+
+test("wechat desktop pack ignores standalone badge numbers as unread thread names", async () => {
+  const worldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-wechat-vision-ignore-badge",
+    appContext: {
+      appName: "WeChat",
+      windows: [
+        {
+          ownerName: "WeChat",
+          windowName: "WeChat",
+          bounds: { x: 100, y: 40, width: 900, height: 700, centerX: 550, centerY: 390 }
+        }
+      ]
+    },
+    capture: {
+      id: "artifact-vision-ignore-badge",
+      taskId: "task-vision-ignore-badge",
+      traceId: null,
+      kind: "screenshot",
+      label: "WeChat vision ignore badge state",
+      path: "/tmp/wechat-vision-ignore-badge.png",
+      metadata: {},
+      createdAt: new Date().toISOString()
+    },
+    ocrBlocks: [],
+    interactionCandidates: [],
+    visibleText: "WeChat\n33\nL",
+    recentActions: [],
+    summary: "WeChat",
+    timestamp: new Date().toISOString()
+  };
+
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({})
+  });
+  const pack = registry.get("wechat-desktop");
+  const rule: WatchRule = {
+    id: "watch-wechat-ignore-badge",
+    goal: "Always watch WeChat and reply to unread conversations",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "wechat-desktop-main",
+    skillName: null,
+    appTarget: "WeChat",
+    livePack: "wechat-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-wechat-ignore-badge",
+    name: "wechat-desktop-main",
+    rootPath: "/tmp/wechat-desktop-main",
+    profilePath: "/tmp/wechat-desktop-main/profile",
+    downloadsPath: "/tmp/wechat-desktop-main/downloads",
+    artifactsPath: "/tmp/wechat-desktop-main/artifacts",
+    scratchPath: "/tmp/wechat-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: worldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        analyzeImageJson: async ({ schemaName }: { schemaName?: string }) => {
+          if (schemaName === "agentos_wechat_thread_grounding") {
+            return {
+              targetVisible: true,
+              evidence: "The L row is visible in the left sidebar",
+              clickPoint: { x: 0.18, y: 0.22 },
+              rowBox: { x: 0.08, y: 0.18, width: 0.26, height: 0.08 }
+            };
+          }
+          return {
+            openThread: "Current thread",
+            visibleUnreadThreads: [
+              {
+                name: "33",
+                evidence: "top app badge",
+                approxSidebarY: 0.12,
+                approxBox: { x: 0.02, y: 0.1, width: 0.06, height: 0.06 }
+              },
+              {
+                name: "L",
+                evidence: "red unread badge on the row",
+                approxSidebarY: 0.22,
+                approxBox: { x: 0.08, y: 0.18, width: 0.26, height: 0.08 }
+              }
+            ],
+            composer: {
+              present: true,
+              evidence: "bottom input area",
+              approxBox: { x: 0.31, y: 0.85, width: 0.66, height: 0.12 }
+            }
+          };
+        }
+      }
+    } as never
+  });
+
+  assert.equal(detection?.summary, "L");
 });
 
 test("wechat desktop pack ignores detections when WeChat is not the foreground app", async () => {

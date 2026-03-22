@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import fs from "node:fs/promises";
 import path from "node:path";
 import type { ControlPlane } from "./control-plane.js";
 import { packDefaultReplyPolicy } from "./reply-policy.js";
@@ -56,6 +57,9 @@ interface WeChatVisualThreadSummary {
   name: string;
   evidence: string;
   approxSidebarY: number;
+  approxBox: WeChatVisualComposerBox | null;
+  replyable: boolean;
+  threadKind: "chat" | "official_account" | "service" | "unknown";
 }
 
 interface WeChatVisualComposerBox {
@@ -75,6 +79,16 @@ interface WeChatVisualAnalysis {
   };
   targetThreadOpen?: boolean | null;
   prefillVisible?: boolean | null;
+}
+
+interface WeChatVisualThreadGrounding {
+  targetVisible: boolean;
+  evidence: string;
+  clickPoint: {
+    x: number;
+    y: number;
+  } | null;
+  rowBox: WeChatVisualComposerBox | null;
 }
 
 function defaultDesktopAppTargetForLivePack(livePack: string | null | undefined): string | null {
@@ -1080,6 +1094,10 @@ function normalizeWeChatVisualName(value: unknown): string {
     .toLowerCase();
 }
 
+function looksLikeWeChatBadgeOnlyName(value: unknown): boolean {
+  return /^(?:\d{1,4}|\d{1,4}\+)$/.test(String(value ?? "").trim());
+}
+
 function clampUnit(value: unknown, fallback = 0): number {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) {
@@ -1100,14 +1118,37 @@ function normalizeWeChatVisualAnalysis(raw: Record<string, unknown> | null | und
             return null;
           }
           const name = String((entry as { name?: unknown }).name ?? "").trim();
-          if (!name) {
+          if (!name || looksLikeWeChatBadgeOnlyName(name)) {
             return null;
           }
+          const approxBoxRaw = ((entry as { approxBox?: unknown }).approxBox ?? null) as Record<string, unknown> | null;
+          const approxBox =
+            approxBoxRaw &&
+            ["x", "y", "width", "height"].every((key) => Number.isFinite(Number(approxBoxRaw[key])))
+              ? {
+                  x: clampUnit(approxBoxRaw.x, 0),
+                  y: clampUnit(approxBoxRaw.y, 0),
+                  width: clampUnit(approxBoxRaw.width, 0),
+                  height: clampUnit(approxBoxRaw.height, 0)
+                }
+              : null;
           return {
             name,
             evidence: String((entry as { evidence?: unknown }).evidence ?? "").trim(),
-            approxSidebarY: clampUnit((entry as { approxSidebarY?: unknown }).approxSidebarY, 0)
-          } satisfies WeChatVisualThreadSummary;
+            approxSidebarY: clampUnit((entry as { approxSidebarY?: unknown }).approxSidebarY, 0),
+            approxBox,
+            replyable:
+              typeof (entry as { replyable?: unknown }).replyable === "boolean"
+                ? Boolean((entry as { replyable?: unknown }).replyable)
+                : true,
+            threadKind: (() => {
+              const kind = String((entry as { threadKind?: unknown }).threadKind ?? "").trim().toLowerCase();
+              if (kind === "chat" || kind === "official_account" || kind === "service") {
+                return kind;
+              }
+              return "chat";
+            })()
+          } as WeChatVisualThreadSummary;
         })
         .filter((entry): entry is WeChatVisualThreadSummary => Boolean(entry))
     : [];
@@ -1144,16 +1185,90 @@ function normalizeWeChatVisualAnalysis(raw: Record<string, unknown> | null | und
   };
 }
 
+function normalizeWeChatVisualThreadGrounding(
+  raw: Record<string, unknown> | null | undefined
+): WeChatVisualThreadGrounding | null {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+
+  const clickPointRaw = (raw.clickPoint ?? null) as Record<string, unknown> | null;
+  const clickPoint =
+    clickPointRaw && ["x", "y"].every((key) => Number.isFinite(Number(clickPointRaw[key])))
+      ? {
+          x: clampUnit(clickPointRaw.x, 0.22),
+          y: clampUnit(clickPointRaw.y, 0.2)
+        }
+      : null;
+  const rowBoxRaw = (raw.rowBox ?? null) as Record<string, unknown> | null;
+  const rowBox =
+    rowBoxRaw && ["x", "y", "width", "height"].every((key) => Number.isFinite(Number(rowBoxRaw[key])))
+      ? {
+          x: clampUnit(rowBoxRaw.x, 0),
+          y: clampUnit(rowBoxRaw.y, 0),
+          width: clampUnit(rowBoxRaw.width, 0),
+          height: clampUnit(rowBoxRaw.height, 0)
+        }
+      : null;
+
+  return {
+    targetVisible: Boolean(raw.targetVisible),
+    evidence: String(raw.evidence ?? "").trim(),
+    clickPoint,
+    rowBox
+  };
+}
+
+function resolveWeChatGroundedOpenPoint(
+  bounds: InteractionCandidate["bounds"] | null,
+  groundedTarget: WeChatVisualThreadGrounding | null,
+  fallbackOpenPoint: { x?: number; y?: number } | null
+): { x: number; y: number } | null {
+  if (bounds && groundedTarget?.targetVisible && groundedTarget.rowBox) {
+    const box = groundedTarget.rowBox;
+    const anchorXNorm = box.x + Math.min(Math.max(box.width * 0.22, 0.04), box.width * 0.5);
+    const anchorYNorm = box.y + box.height * 0.5;
+    const x = Number(bounds.x ?? 0) + Number(bounds.width ?? 0) * anchorXNorm;
+    const y = Number(bounds.y ?? 0) + Number(bounds.height ?? 0) * anchorYNorm;
+    if (Number.isFinite(x) && Number.isFinite(y)) {
+      return { x, y };
+    }
+  }
+
+  if (bounds && groundedTarget?.targetVisible && groundedTarget.clickPoint) {
+    const x = Number(bounds.x ?? 0) + Number(bounds.width ?? 0) * groundedTarget.clickPoint.x;
+    const y = Number(bounds.y ?? 0) + Number(bounds.height ?? 0) * groundedTarget.clickPoint.y;
+    if (Number.isFinite(x) && Number.isFinite(y)) {
+      return { x, y };
+    }
+  }
+
+  if (
+    fallbackOpenPoint
+    && Number.isFinite(Number(fallbackOpenPoint.x ?? NaN))
+    && Number.isFinite(Number(fallbackOpenPoint.y ?? NaN))
+  ) {
+    return {
+      x: Number(fallbackOpenPoint.x),
+      y: Number(fallbackOpenPoint.y)
+    };
+  }
+
+  return null;
+}
+
 async function analyzeWeChatDesktopVisualState({
   modelClient,
   worldState,
   targetThread = null,
-  replyPreview = null
+  replyPreview = null,
+  timeoutMs = 25000
 }: {
   modelClient: Pick<LivePackControlPlane["modelClient"], "supportsImageJson" | "analyzeImageJson"> | null | undefined;
   worldState: WorldState | null;
   targetThread?: string | null;
   replyPreview?: string | null;
+  timeoutMs?: number;
 }): Promise<WeChatVisualAnalysis | null> {
   if (!modelClient?.supportsImageJson?.()) {
     return null;
@@ -1174,6 +1289,15 @@ async function analyzeWeChatDesktopVisualState({
   const payload = [
     "Analyze this WeChat desktop screenshot for grounded UI state.",
     "Only rely on what is visible in the image.",
+    "Focus on the left conversation sidebar for unread rows and the bottom-right composer area for reply input.",
+    "Treat red unread count badges, red mention pills such as [@AI], red dots, or red unread markers on a row as unread evidence.",
+    "Do not return a standalone red badge number like 33 as the thread name. Always return the conversation title text from the row.",
+    "For each unread row, return an approximate normalized bounding box for the full clickable row in the left sidebar.",
+    "Unread row boxes must stay inside the left sidebar. Their horizontal center must remain within the left-most 40% of the screenshot.",
+    "Do not mark a row as unread from timestamps, snippets, or plain row text alone.",
+    "Classify each unread row as threadKind=chat, official_account, service, or unknown.",
+    "Set replyable=true only for normal person/group chat rows that AgentOS should answer in the main composer.",
+    "Set replyable=false for Official Accounts, article feeds, subscription feeds, payment/service inboxes, or any non-conversational row.",
     candidateNames.length ? `Visible candidate texts:\n${candidateNames.join("\n")}` : "",
     lines.length ? `Visible OCR lines:\n${lines.join("\n")}` : "",
     target ? `Target thread to verify: ${target}` : "",
@@ -1183,31 +1307,141 @@ async function analyzeWeChatDesktopVisualState({
     .filter(Boolean)
     .join("\n\n");
 
-  const result = await modelClient.analyzeImageJson<Record<string, unknown>>({
-    schemaName: "agentos_wechat_desktop_visual",
-    schema: {
-      type: "object",
-      properties: {
-        openThread: { type: ["string", "null"] },
-        visibleUnreadThreads: {
-          type: "array",
-          items: {
-            type: "object",
-            properties: {
-              name: { type: "string" },
-              evidence: { type: "string" },
-              approxSidebarY: { type: "number" }
-            },
-            required: ["name", "evidence", "approxSidebarY"],
-            additionalProperties: false
-          }
-        },
-        composer: {
+  let timeoutHandle: NodeJS.Timeout | null = null;
+  try {
+    const result = await Promise.race([
+      modelClient.analyzeImageJson<Record<string, unknown>>({
+        schemaName: "agentos_wechat_desktop_visual",
+        schema: {
           type: "object",
           properties: {
-            present: { type: "boolean" },
+            openThread: { type: ["string", "null"] },
+            visibleUnreadThreads: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  name: { type: "string" },
+                  evidence: { type: "string" },
+                  approxSidebarY: { type: "number" },
+                  replyable: { type: "boolean" },
+                  threadKind: { type: "string", enum: ["chat", "official_account", "service", "unknown"] },
+                  approxBox: {
+                    type: ["object", "null"],
+                    properties: {
+                      x: { type: "number" },
+                      y: { type: "number" },
+                      width: { type: "number" },
+                      height: { type: "number" }
+                    },
+                    required: ["x", "y", "width", "height"],
+                    additionalProperties: false
+                  }
+                },
+                required: ["name", "evidence", "approxSidebarY", "replyable", "threadKind", "approxBox"],
+                additionalProperties: false
+              }
+            },
+            composer: {
+              type: "object",
+              properties: {
+                present: { type: "boolean" },
+                evidence: { type: "string" },
+                approxBox: {
+                  type: ["object", "null"],
+                  properties: {
+                    x: { type: "number" },
+                    y: { type: "number" },
+                    width: { type: "number" },
+                    height: { type: "number" }
+                  },
+                  required: ["x", "y", "width", "height"],
+                  additionalProperties: false
+                }
+              },
+              required: ["present", "evidence", "approxBox"],
+              additionalProperties: false
+            },
+            targetThreadOpen: { type: ["boolean", "null"] },
+            prefillVisible: { type: ["boolean", "null"] }
+          },
+          required: ["openThread", "visibleUnreadThreads", "composer"],
+          additionalProperties: false
+        },
+        systemPrompt:
+          "You are a strict UI grounding model for AgentOS. Identify the currently open WeChat thread, any clearly visible unread conversation rows in the left sidebar, and the bottom composer area. Only mark a thread as unread when there is visible red badge, red mention tag, red unread count, or red highlight evidence on that row. For each unread row, estimate the clickable row box in normalized screenshot coordinates and classify whether it is a replyable chat versus an official/service feed. Return JSON only.",
+        userPrompt: payload,
+        imagePath,
+        temperature: 0
+      }),
+      new Promise<never>((_, reject) => {
+        timeoutHandle = setTimeout(() => {
+          reject(new Error(`WeChat desktop vision analysis timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+      })
+    ]);
+
+    return normalizeWeChatVisualAnalysis(result);
+  } finally {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
+  }
+}
+
+async function groundWeChatTargetThreadClickPoint({
+  modelClient,
+  worldState,
+  targetThread,
+  timeoutMs = 12000
+}: {
+  modelClient: Pick<LivePackControlPlane["modelClient"], "supportsImageJson" | "analyzeImageJson"> | null | undefined;
+  worldState: WorldState | null;
+  targetThread: string;
+  timeoutMs?: number;
+}): Promise<WeChatVisualThreadGrounding | null> {
+  if (!modelClient?.supportsImageJson?.()) {
+    return null;
+  }
+
+  const imagePath = String(worldState?.capture?.path ?? "").trim();
+  const target = String(targetThread ?? "").trim();
+  if (!imagePath || !target) {
+    return null;
+  }
+
+  const lines = visibleLines(worldState).slice(0, 24);
+  const payload = [
+    "Analyze this WeChat desktop screenshot and ground the target conversation row in the left sidebar.",
+    "Return a click point that safely selects the target row inside the left conversation list.",
+    "The click point must stay inside the left sidebar, on the same horizontal band as the target row, and must not land in the right thread pane or on article cards.",
+    `Target thread: ${target}`,
+    lines.length ? `Visible OCR lines:\n${lines.join("\n")}` : "",
+    "Return strict JSON."
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
+  let timeoutHandle: NodeJS.Timeout | null = null;
+  try {
+    const result = await Promise.race([
+      modelClient.analyzeImageJson<Record<string, unknown>>({
+        schemaName: "agentos_wechat_thread_grounding",
+        schema: {
+          type: "object",
+          properties: {
+            targetVisible: { type: "boolean" },
             evidence: { type: "string" },
-            approxBox: {
+            clickPoint: {
+              type: ["object", "null"],
+              properties: {
+                x: { type: "number" },
+                y: { type: "number" }
+              },
+              required: ["x", "y"],
+              additionalProperties: false
+            },
+            rowBox: {
               type: ["object", "null"],
               properties: {
                 x: { type: "number" },
@@ -1219,23 +1453,28 @@ async function analyzeWeChatDesktopVisualState({
               additionalProperties: false
             }
           },
-          required: ["present", "evidence", "approxBox"],
+          required: ["targetVisible", "evidence", "clickPoint", "rowBox"],
           additionalProperties: false
         },
-        targetThreadOpen: { type: ["boolean", "null"] },
-        prefillVisible: { type: ["boolean", "null"] }
-      },
-      required: ["openThread", "visibleUnreadThreads", "composer"],
-      additionalProperties: false
-    },
-    systemPrompt:
-      "You are a strict UI grounding model for AgentOS. Identify the currently open WeChat thread, any clearly visible unread conversation rows in the left sidebar, and the bottom composer area. Only mark a thread as unread when there is visible badge/highlight evidence. Return JSON only.",
-    userPrompt: payload,
-    imagePath,
-    temperature: 0
-  });
+        systemPrompt:
+          "You are a strict UI grounding model for AgentOS. Find the target WeChat conversation row in the left sidebar and return JSON only.",
+        userPrompt: payload,
+        imagePath,
+        temperature: 0
+      }),
+      new Promise<never>((_, reject) => {
+        timeoutHandle = setTimeout(() => {
+          reject(new Error(`WeChat thread grounding timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+      })
+    ]);
 
-  return normalizeWeChatVisualAnalysis(result);
+    return normalizeWeChatVisualThreadGrounding((result as Record<string, unknown> | null) ?? null);
+  } finally {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
+  }
 }
 
 function isWeChatUiChrome(text: string): boolean {
@@ -1424,7 +1663,7 @@ function findWeChatUnreadCandidate(worldState: WorldState | null): InteractionCa
 }
 
 function findWeChatVisionUnreadCandidate(
-  worldState: WorldState | null,
+  frameBounds: InteractionCandidate["bounds"] | null,
   analysis: WeChatVisualAnalysis | null
 ): {
   candidate: InteractionCandidate | null;
@@ -1435,45 +1674,33 @@ function findWeChatVisionUnreadCandidate(
     return null;
   }
 
-  const conversationListCandidates = wechatCandidates(worldState).filter(
-    (candidate) =>
-      isWeChatCandidateInRegion(candidate, worldState, { x: 0.06, y: 0.08, width: 0.42, height: 0.82 })
-      && !looksLikeDateOrTimeToken(String(candidate.text ?? ""))
-      && !looksLikeUrlOrDomainToken(String(candidate.text ?? ""))
-  );
-
   for (const thread of analysis.visibleUnreadThreads) {
-    const normalizedThread = normalizeWeChatVisualName(thread.name);
-    if (!normalizedThread) {
+    if (!thread.replyable || thread.threadKind !== "chat") {
       continue;
     }
-    const matchedCandidate =
-      conversationListCandidates.find((candidate) => {
-        const normalizedCandidate = normalizeWeChatVisualName(candidate.text || candidateHintText(candidate));
-        return (
-          normalizedCandidate === normalizedThread
-          || normalizedCandidate.includes(normalizedThread)
-          || normalizedThread.includes(normalizedCandidate)
-        );
-      }) ?? null;
-    if (matchedCandidate) {
-      return {
-        candidate: matchedCandidate,
-        openTarget: String(matchedCandidate.text ?? thread.name).trim() || thread.name,
-        openPoint: null
-      };
+    const openTarget = String(thread.name ?? "").trim();
+    if (!openTarget) {
+      continue;
     }
-
-    const bounds = findDesktopWindowBounds(worldState, "WeChat");
-    if (bounds) {
-      const x = Number(bounds.x ?? 0) + Number(bounds.width ?? 0) * 0.22;
-      const y = Number(bounds.y ?? 0) + Number(bounds.height ?? 0) * clampUnit(thread.approxSidebarY, 0.2);
+    if (frameBounds) {
+      const rowBox = thread.approxBox ?? null;
+      const rowCenterXUnit = rowBox ? clampUnit(rowBox.x + rowBox.width / 2, 0.22) : 0.22;
+      const safeXUnit = rowCenterXUnit >= 0.05 && rowCenterXUnit <= 0.4 ? rowCenterXUnit : 0.22;
+      const rowCenterYUnit = rowBox ? clampUnit(rowBox.y + rowBox.height / 2, clampUnit(thread.approxSidebarY, 0.2)) : clampUnit(thread.approxSidebarY, 0.2);
+      const x = Number(frameBounds.x ?? 0) + Number(frameBounds.width ?? 0) * safeXUnit;
+      const y = Number(frameBounds.y ?? 0) + Number(frameBounds.height ?? 0) * rowCenterYUnit;
       return {
         candidate: null,
-        openTarget: thread.name,
+        openTarget,
         openPoint: { x, y }
       };
     }
+
+    return {
+      candidate: null,
+      openTarget,
+      openPoint: null
+    };
   }
 
   return null;
@@ -1920,10 +2147,32 @@ function buildWeChatReplyStepsWithComposerFallback({
 } = {}): RuntimeStep[] {
   const steps: RuntimeStep[] = [
     {
+      label: "Focus WeChat",
+      surface: "desktop",
+      action: "focusApp",
+      params: { name: "WeChat" },
+      expect: frontmostAppExpectation("WeChat"),
+      checkpoint: false
+    },
+    {
+      label: "Dismiss stray WeChat overlay",
+      surface: "desktop",
+      action: "pressKey",
+      params: { key: "Escape" },
+      checkpoint: false
+    },
+    {
       label: "Open unread WeChat conversation",
       surface: "desktop",
       action: "clickTarget",
       params: { targetQuery: "{{openTarget}}" },
+      checkpoint: false
+    },
+    {
+      label: "Wait for WeChat thread to open",
+      surface: "desktop",
+      action: "wait",
+      params: { ms: 500, timeoutMs: 8000, pollMs: 500 },
       expect: wechatVisionThreadExpectation(),
       checkpoint: false
     },
@@ -1940,6 +2189,13 @@ function buildWeChatReplyStepsWithComposerFallback({
       surface: "desktop",
       action: "typeText",
       params: { text: "{{typeText}}" },
+      checkpoint: false
+    },
+    {
+      label: "Verify WeChat prefill",
+      surface: "desktop",
+      action: "wait",
+      params: { ms: 250, timeoutMs: 4000, pollMs: 400 },
       expect: wechatVisionPrefillExpectation(),
       checkpoint: false
     }
@@ -1968,6 +2224,70 @@ function findDesktopWindowBounds(worldState: WorldState | null, appName: string)
   return (matched?.bounds ?? null) as InteractionCandidate["bounds"] | null;
 }
 
+async function readCaptureImageSize(
+  capturePath: string
+): Promise<{ width: number; height: number } | null> {
+  const imagePath = String(capturePath ?? "").trim();
+  if (!imagePath) {
+    return null;
+  }
+
+  try {
+    const handle = await fs.open(imagePath, "r");
+    try {
+      const header = Buffer.alloc(32);
+      const { bytesRead } = await handle.read(header, 0, header.length, 0);
+      if (bytesRead >= 24 && header.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
+        const width = header.readUInt32BE(16);
+        const height = header.readUInt32BE(20);
+        if (width > 0 && height > 0) {
+          return { width, height };
+        }
+      }
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+async function resolveDesktopVisionFrame(
+  worldState: WorldState | null,
+  appName: string
+): Promise<InteractionCandidate["bounds"] | null> {
+  const windowBounds = findDesktopWindowBounds(worldState, appName);
+  const appContext = (worldState?.appContext ?? null) as Record<string, unknown> | null;
+  const windows = Array.isArray(appContext?.windows) ? (appContext.windows as Array<Record<string, unknown>>) : [];
+  const matchedWindow = windows.find((windowInfo) => {
+    const ownerName = String(windowInfo?.ownerName ?? "");
+    const windowName = String(windowInfo?.windowName ?? "");
+    return appName && (ownerName.includes(appName) || windowName.includes(appName));
+  }) ?? null;
+  // Vision boxes are normalized against the screenshot, but click/prefill actions
+  // must land in desktop screen coordinates. When we know the target window bounds,
+  // prefer those on-screen bounds even if the capture itself is window-local.
+  if (windowBounds) {
+    return windowBounds;
+  }
+
+  const captureSize = await readCaptureImageSize(String(worldState?.capture?.path ?? ""));
+  if (captureSize) {
+    return {
+      x: 0,
+      y: 0,
+      width: captureSize.width,
+      height: captureSize.height,
+      centerX: captureSize.width / 2,
+      centerY: captureSize.height / 2
+    };
+  }
+
+  return windowBounds;
+}
+
 function deriveWeChatComposerFallback(worldState: WorldState | null): { x: number; y: number } | null {
   const bounds = findDesktopWindowBounds(worldState, "WeChat");
   if (!bounds) {
@@ -1987,12 +2307,12 @@ function deriveWeChatComposerFallback(worldState: WorldState | null): { x: numbe
   };
 }
 
-function deriveWeChatVisualComposerFallback(
+async function deriveWeChatVisualComposerFallback(
   worldState: WorldState | null,
   analysis: WeChatVisualAnalysis | null
-): { x: number; y: number } | null {
+): Promise<{ x: number; y: number } | null> {
   const box = analysis?.composer?.approxBox ?? null;
-  const bounds = findDesktopWindowBounds(worldState, "WeChat");
+  const bounds = await resolveDesktopVisionFrame(worldState, "WeChat");
   if (!box || !bounds) {
     return null;
   }
@@ -2859,75 +3179,95 @@ export async function analyzeDesktopConversationPackWithVision({
     worldState
   }).catch(() => null);
   if (!vision) {
-    return base;
+    return {
+      packName: "wechat-desktop",
+      foreground: base?.foreground ?? isWeChatDesktopForeground(worldState),
+      unreadCandidate: null,
+      composeCandidate: null,
+      sendCandidate: null,
+      topUnreadCandidates: []
+    };
   }
 
-  const unreadMatch = findWeChatVisionUnreadCandidate(worldState, vision);
-  const composeCandidate =
-    base?.composeCandidate ??
-    (vision.composer.present
-      ? {
-          id: "wechat-vision-composer",
-          text: vision.composer.evidence || "WeChat composer",
-          role: "textbox",
-          interactive: true,
-          source: "vision",
-          score: 100,
-          bounds:
-            worldState && vision.composer.approxBox
-              ? (() => {
-                  const bounds = findDesktopWindowBounds(worldState, "WeChat");
-                  const box = vision.composer.approxBox;
-                  if (!bounds) {
-                    return undefined;
-                  }
-                  const x = Number(bounds.x ?? 0) + Number(bounds.width ?? 0) * box.x;
-                  const y = Number(bounds.y ?? 0) + Number(bounds.height ?? 0) * box.y;
-                  const width = Number(bounds.width ?? 0) * box.width;
-                  const height = Number(bounds.height ?? 0) * box.height;
-                  return {
-                    x,
-                    y,
-                    width,
-                    height,
-                    centerX: x + width / 2,
-                    centerY: y + height / 2
-                  };
-                })()
-              : undefined,
-          hints: [vision.composer.evidence].filter(Boolean)
-        } satisfies DesktopProbeCandidateSummary
-      : null);
+  const wechatVisionFrame = await resolveDesktopVisionFrame(worldState, "WeChat");
+  const unreadMatch = findWeChatVisionUnreadCandidate(wechatVisionFrame, vision);
+  const composeCandidate = vision.composer.present
+    ? {
+        id: "wechat-vision-composer",
+        text: vision.composer.evidence || "WeChat composer",
+        role: "textbox",
+        interactive: true,
+        source: "vision",
+        score: 100,
+        bounds:
+          wechatVisionFrame && vision.composer.approxBox
+            ? (() => {
+                const bounds = wechatVisionFrame;
+                const box = vision.composer.approxBox;
+                if (!bounds) {
+                  return undefined;
+                }
+                const x = Number(bounds.x ?? 0) + Number(bounds.width ?? 0) * box.x;
+                const y = Number(bounds.y ?? 0) + Number(bounds.height ?? 0) * box.y;
+                const width = Number(bounds.width ?? 0) * box.width;
+                const height = Number(bounds.height ?? 0) * box.height;
+                return {
+                  x,
+                  y,
+                  width,
+                  height,
+                  centerX: x + width / 2,
+                  centerY: y + height / 2
+                };
+              })()
+            : undefined,
+        hints: [vision.composer.evidence].filter(Boolean)
+      } satisfies DesktopProbeCandidateSummary
+    : null;
+  const visionThreadCandidates = vision.visibleUnreadThreads.map((thread) => ({
+    id: "wechat-vision-unread",
+    text: thread.name,
+    role: "text",
+    interactive: true,
+    source: "vision",
+    score: 100,
+    bounds:
+      wechatVisionFrame && thread.approxBox
+        ? {
+            x: Number(wechatVisionFrame.x ?? 0) + Number(wechatVisionFrame.width ?? 0) * thread.approxBox.x,
+            y: Number(wechatVisionFrame.y ?? 0) + Number(wechatVisionFrame.height ?? 0) * thread.approxBox.y,
+            width: Number(wechatVisionFrame.width ?? 0) * thread.approxBox.width,
+            height: Number(wechatVisionFrame.height ?? 0) * thread.approxBox.height,
+            centerX:
+              Number(wechatVisionFrame.x ?? 0) +
+              Number(wechatVisionFrame.width ?? 0) * (thread.approxBox.x + thread.approxBox.width / 2),
+            centerY:
+              Number(wechatVisionFrame.y ?? 0) +
+              Number(wechatVisionFrame.height ?? 0) * (thread.approxBox.y + thread.approxBox.height / 2)
+          }
+        : undefined,
+    hints: [thread.evidence, `kind:${thread.threadKind}`, thread.replyable ? "replyable" : "non-replyable"].filter(Boolean)
+  })) satisfies DesktopProbeCandidateSummary[];
 
   return {
     packName: "wechat-desktop",
     foreground: base?.foreground ?? isWeChatDesktopForeground(worldState),
     unreadCandidate: unreadMatch
-      ? summarizeProbeCandidate(unreadMatch.candidate, 100) ?? {
+      ? {
           id: "wechat-vision-unread",
           text: unreadMatch.openTarget ?? "",
           role: "text",
           interactive: true,
           source: "vision",
           score: 100,
-          hints: unreadMatch.openTarget ? [unreadMatch.openTarget] : []
+          bounds:
+            visionThreadCandidates.find((candidate) => candidate.text === unreadMatch.openTarget)?.bounds,
+          hints: []
         }
       : null,
     composeCandidate,
     sendCandidate: base?.sendCandidate ?? null,
-    topUnreadCandidates: unreadMatch
-      ? [
-          summarizeProbeCandidate(unreadMatch.candidate, 100) ?? {
-            id: "wechat-vision-unread",
-            text: unreadMatch.openTarget ?? "",
-            role: "text",
-            interactive: true,
-            source: "vision",
-            score: 100,
-            hints: unreadMatch.openTarget ? [unreadMatch.openTarget] : []
-          }
-        ]
-      : []
+    topUnreadCandidates: visionThreadCandidates
   };
 }
 
@@ -3143,6 +3483,10 @@ async function observeWatchSurface({
       if (desktopRequireAccessibility && readiness && !readiness.ready) {
         return null;
       }
+    }
+
+    if (rule.livePack === "wechat-desktop") {
+      await new Promise((resolve) => setTimeout(resolve, 450));
     }
   }
 
@@ -3448,32 +3792,17 @@ function createWeChatPack(): LivePack {
         desktopRequireAccessibility: false
       });
     },
-    async detectNewItems({ rule, worldState, dedupeState = {}, workspace, surfaceRegistry, controlPlane }) {
-      if (!isWeChatDesktopForeground(worldState)) {
-        return null;
-      }
-
+    async detectNewItems({ rule, worldState, dedupeState = {}, controlPlane }) {
       const vision = await analyzeWeChatDesktopVisualState({
         modelClient: controlPlane.modelClient,
         worldState
       }).catch(() => null);
-      const visualMatch = findWeChatVisionUnreadCandidate(worldState, vision);
-      const scanned = visualMatch
-        ? {
-            candidate: null,
-            worldState,
-            scrollPasses: 0
-          }
-        : await scanWeChatUnreadConversation({
-            rule,
-            worldState,
-            dedupeState,
-            workspace,
-            surfaceRegistry,
-            controlPlane,
-            initialWorldState: worldState
-          });
-      const candidate = visualMatch?.candidate ?? scanned.candidate;
+      if (!vision) {
+        return null;
+      }
+      const wechatVisionFrame = await resolveDesktopVisionFrame(worldState, "WeChat");
+      const visualMatch = findWeChatVisionUnreadCandidate(wechatVisionFrame, vision);
+      const candidate = visualMatch?.candidate ?? null;
       const openTarget = String(visualMatch?.openTarget ?? candidate?.text ?? "").trim();
       if (!candidate && !openTarget) {
         return null;
@@ -3483,8 +3812,19 @@ function createWeChatPack(): LivePack {
       if (!summary) {
         return null;
       }
+      const composerFallback =
+        (await deriveWeChatVisualComposerFallback(worldState, vision)) ?? deriveWeChatComposerFallback(worldState);
+      if (!composerFallback) {
+        return null;
+      }
 
-      const context = contextForSignal(scanned.worldState, { text: openTarget || candidate?.text || summary });
+      const groundedTarget = await groundWeChatTargetThreadClickPoint({
+        modelClient: controlPlane.modelClient,
+        worldState,
+        targetThread: openTarget || summary
+      }).catch(() => null);
+
+      const context = contextForSignal(worldState, { text: openTarget || candidate?.text || summary });
       const itemFingerprint = fingerprint(
         `wechat-desktop:${rule.workspaceName ?? "default"}:${summary}:${context.join("|")}`
       );
@@ -3500,6 +3840,30 @@ function createWeChatPack(): LivePack {
         openTarget: openTarget || summary,
         candidate
       });
+      const openPoint = resolveWeChatGroundedOpenPoint(wechatVisionFrame, groundedTarget, visualMatch?.openPoint ?? null);
+      const steps = buildWeChatReplyStepsWithComposerFallback({
+        includeSendStep: false
+      });
+      const openStepIndex = steps.findIndex((step) => String(step.label ?? "").includes("Open unread WeChat conversation"));
+      if (openStepIndex >= 0 && steps[openStepIndex]) {
+        steps[openStepIndex] = {
+          ...steps[openStepIndex],
+          ...(Number.isFinite(Number(openPoint?.x ?? NaN)) && Number.isFinite(Number(openPoint?.y ?? NaN))
+            ? {
+                action: "clickAt",
+                params: {
+                  x: Number(openPoint?.x),
+                  y: Number(openPoint?.y)
+                }
+              }
+            : {
+                params: {
+                  ...(steps[openStepIndex].params ?? {}),
+                  ...(candidate ? { target: candidate } : {})
+                }
+              })
+        };
+      }
 
       return {
         fingerprint: itemFingerprint,
@@ -3511,121 +3875,34 @@ function createWeChatPack(): LivePack {
           watchSummary: summary,
           watchContext: context.join("\n"),
           openTarget: openTarget || summary,
-          threadTitle: summary
+          threadTitle: summary,
+          composeX: composerFallback.x,
+          composeY: composerFallback.y
         },
         metadata: {
-          ...(scanned.scrollPasses > 0 ? { observationPasses: scanned.scrollPasses } : {}),
-          ...(visualMatch?.openPoint ? { openPoint: visualMatch.openPoint } : {}),
+          ...(openPoint ? { openPoint } : {}),
+          ...(groundedTarget ? { threadGrounding: groundedTarget } : {}),
           ...(vision ? { visualAnalysis: vision } : {}),
+          threadVerificationDeferred: true,
           ...metadata
+        },
+        taskSpec: {
+          preferredSurface: "desktop",
+          steps
         }
       };
     },
-    async extractContext({ rule, workspace, surfaceRegistry, detection, controlPlane }) {
-      const adapter = surfaceRegistry.get("desktop");
-      if (!adapter) {
-        return null;
-      }
-
-      const candidateOpenTarget = String(detection.inputs?.openTarget ?? detection.summary ?? "").trim();
-      const openPoint = (detection.metadata?.openPoint ?? null) as { x?: unknown; y?: unknown } | null;
-      if (candidateOpenTarget) {
-        const openCandidate = (detection.metadata?.openCandidate ?? null) as Record<string, unknown> | null;
-        await adapter.act({
-          task: createWatchTask(rule),
-          step: {
-            id: `wechat-open-${rule.id}`,
-            label: "Open WeChat conversation",
-            surface: "desktop",
-            action:
-              Number.isFinite(Number(openPoint?.x ?? NaN)) && Number.isFinite(Number(openPoint?.y ?? NaN))
-                ? "clickAt"
-                : "clickTarget",
-            params:
-              Number.isFinite(Number(openPoint?.x ?? NaN)) && Number.isFinite(Number(openPoint?.y ?? NaN))
-                ? { x: Number(openPoint?.x), y: Number(openPoint?.y) }
-                : {
-                    targetQuery: candidateOpenTarget,
-                    ...(openCandidate ? { target: openCandidate } : {})
-                  }
-          },
-          workspace: profileAsWorkspace(rule, workspace),
-          traceId: null,
-          outputs: {}
-        });
-      }
-
-      const threadState = await observeWatchSurface({
-        rule,
-        workspace,
-        surfaceRegistry,
-        controlPlane: {} as LivePackControlPlane,
-        surface: "desktop",
-        desktopRequireAccessibility: false
-      });
+    async extractContext({ detection, worldState }) {
       const summary = String(detection.summary ?? "").trim();
-      const vision = await analyzeWeChatDesktopVisualState({
-        modelClient: controlPlane.modelClient,
-        worldState: threadState,
-        targetThread: summary
-      }).catch(() => null);
-      const threadOpen =
-        vision?.targetThreadOpen === true || (vision?.targetThreadOpen == null && Boolean(findWeChatThreadTargetCandidate(threadState, summary)));
-      if (!threadOpen) {
+      const priorVision = normalizeWeChatVisualAnalysis(
+        ((detection.metadata as Record<string, unknown> | undefined)?.visualAnalysis ?? null) as Record<string, unknown> | null
+      );
+      if (!priorVision) {
         return null;
       }
-      const composeCandidate = findWeChatComposeCandidate(threadState);
-      const sendCandidate = findWeChatSendCandidate(threadState);
-      const composerFallback = composeCandidate ? null : deriveWeChatVisualComposerFallback(threadState, vision) ?? deriveWeChatComposerFallback(threadState);
-      if (!composeCandidate && !composerFallback) {
-        return null;
-      }
-      const context = extractWeChatThreadContext(threadState, summary);
+
+      const context = Array.isArray(detection.context) ? detection.context : [];
       const openTarget = String(detection.inputs?.openTarget ?? summary).trim() || summary;
-      const openCandidate = (detection.metadata?.openCandidate ?? null) as InteractionCandidate | Record<string, unknown> | null;
-      const steps = composeCandidate
-        ? buildWeChatReplySteps()
-        : buildWeChatReplyStepsWithComposerFallback({
-            includeSendStep: Boolean(sendCandidate)
-          });
-      if (steps[0]) {
-        steps[0] = {
-          ...steps[0],
-          ...(Number.isFinite(Number(openPoint?.x ?? NaN)) && Number.isFinite(Number(openPoint?.y ?? NaN))
-            ? {
-                action: "clickAt",
-                params: {
-                  x: Number(openPoint?.x),
-                  y: Number(openPoint?.y)
-                }
-              }
-            : {
-                params: {
-                  ...(steps[0].params ?? {}),
-                  ...(openCandidate ? { target: openCandidate } : {})
-                }
-              })
-        };
-      }
-      if (composeCandidate && steps[2]) {
-        steps[2] = {
-          ...steps[2],
-          params: {
-            ...(steps[2].params ?? {}),
-            target: composeCandidate
-          }
-        };
-      }
-      const sendStepIndex = steps.findIndex((step) => String(step.label ?? "").includes("Send WeChat reply"));
-      if (sendCandidate && sendStepIndex >= 0) {
-        steps[sendStepIndex] = {
-          ...steps[sendStepIndex],
-          params: {
-            ...(steps[sendStepIndex]?.params ?? {}),
-            target: sendCandidate
-          }
-        };
-      }
       return {
         summary,
         context,
@@ -3633,19 +3910,12 @@ function createWeChatPack(): LivePack {
           ...(detection.inputs ?? {}),
           watchContext: context.join("\n"),
           openTarget,
-          threadTitle: summary,
-          ...(composeCandidate ? { typeTarget: pickWeChatComposeQuery(threadState) } : {}),
-          ...(sendCandidate ? { sendTarget: pickWeChatSendQuery(threadState) } : {}),
-          ...(composerFallback
-            ? {
-                composeX: composerFallback.x,
-                composeY: composerFallback.y
-              }
-            : {})
+          threadTitle: summary
         },
         metadata: {
           ...(detection.metadata ?? {}),
-          ...(vision ? { visualAnalysis: vision } : {}),
+          ...(priorVision ? { visualAnalysis: priorVision } : {}),
+          threadVerificationDeferred: true,
           ...buildConversationMetadata({
             packName: "wechat-desktop",
             surface: "desktop",
@@ -3655,10 +3925,7 @@ function createWeChatPack(): LivePack {
             candidate: (detection.metadata?.openCandidate ?? null) as InteractionCandidate | Record<string, unknown> | null
           })
         },
-        taskSpec: {
-          preferredSurface: "desktop",
-          steps
-        }
+        taskSpec: detection.taskSpec ?? undefined
       };
     },
     async draftReply({ rule, detection, controlPlane }) {
