@@ -2594,6 +2594,13 @@ test("wechat desktop pack can use visual model analysis to identify unread threa
               name: "WeChat Pay...",
               evidence: "badge",
               approxSidebarY: 0.54,
+              replyable: true,
+              threadKind: "chat",
+              conversationKind: "direct",
+              shouldReply: true,
+              replyReason: "The visible unread row is a direct chat waiting for a response.",
+              latestSnippet: "Can you check the payment update?",
+              priority: "high",
               approxBox: { x: 0.08, y: 0.5, width: 0.26, height: 0.08 }
             }
           ],
@@ -2609,11 +2616,297 @@ test("wechat desktop pack can use visual model analysis to identify unread threa
 
   assert.equal(detection?.summary, "WeChat Pay...");
   assert.equal(detection?.inputs?.openTarget, "WeChat Pay...");
+  assert.deepEqual(detection?.context?.slice(0, 2), [
+    "Can you check the payment update?",
+    "The visible unread row is a direct chat waiting for a response."
+  ]);
   assert.equal(Number.isFinite(Number((detection?.metadata as { openPoint?: { x?: unknown } } | undefined)?.openPoint?.x ?? NaN)), true);
   assert.equal(
     Array.isArray((detection?.metadata?.visualAnalysis as { visibleUnreadThreads?: unknown[] } | undefined)?.visibleUnreadThreads),
     true
   );
+});
+
+test("wechat desktop pack skips noisy group threads and prefers reply-worthy direct chats", async () => {
+  const worldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-wechat-vision-priority",
+    appContext: {
+      appName: "WeChat",
+      windows: [
+        {
+          ownerName: "WeChat",
+          windowName: "WeChat",
+          bounds: { x: 100, y: 40, width: 900, height: 700, centerX: 550, centerY: 390 }
+        }
+      ]
+    },
+    capture: {
+      id: "artifact-vision-priority",
+      taskId: "task-vision-priority",
+      traceId: null,
+      kind: "screenshot",
+      label: "WeChat vision priority state",
+      path: "/tmp/wechat-vision-priority.png",
+      metadata: {},
+      createdAt: new Date().toISOString()
+    },
+    ocrBlocks: [],
+    interactionCandidates: [],
+    visibleText: "WeChat\n硅谷 AI+ 和 TA 的朋友们 (499)\nTan",
+    recentActions: [],
+    summary: "WeChat",
+    timestamp: new Date().toISOString()
+  };
+
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({})
+  });
+  const pack = registry.get("wechat-desktop");
+  const rule: WatchRule = {
+    id: "watch-wechat-vision-priority",
+    goal: "Always watch WeChat and reply to unread conversations",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "wechat-desktop-main",
+    skillName: null,
+    appTarget: "WeChat",
+    livePack: "wechat-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-wechat-vision-priority",
+    name: "wechat-desktop-main",
+    rootPath: "/tmp/wechat-desktop-main",
+    profilePath: "/tmp/wechat-desktop-main/profile",
+    downloadsPath: "/tmp/wechat-desktop-main/downloads",
+    artifactsPath: "/tmp/wechat-desktop-main/artifacts",
+    scratchPath: "/tmp/wechat-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: worldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        analyzeImageJson: async () => ({
+          openThread: "Official Accounts",
+          visibleUnreadThreads: [
+            {
+              name: "硅谷 AI+ 和 TA 的朋友们 (499)",
+              evidence: "red badge with link shares",
+              approxSidebarY: 0.76,
+              replyable: true,
+              threadKind: "chat",
+              conversationKind: "group",
+              shouldReply: false,
+              replyReason: "Large noisy group with passive link shares and no direct ask.",
+              latestSnippet: "Clawbot 教程链接",
+              priority: "low",
+              approxBox: { x: 0.07, y: 0.71, width: 0.28, height: 0.09 }
+            },
+            {
+              name: "Tan",
+              evidence: "red unread badge on the row",
+              approxSidebarY: 0.22,
+              replyable: true,
+              threadKind: "chat",
+              conversationKind: "direct",
+              shouldReply: true,
+              replyReason: "Direct unread message that clearly expects a reply.",
+              latestSnippet: "你今晚方便看下这个方案吗？",
+              priority: "high",
+              approxBox: { x: 0.08, y: 0.19, width: 0.26, height: 0.08 }
+            }
+          ],
+          composer: {
+            present: true,
+            evidence: "bottom input area",
+            approxBox: { x: 0.31, y: 0.85, width: 0.66, height: 0.12 }
+          }
+        })
+      }
+    } as never
+  });
+
+  assert.equal(detection?.summary, "Tan");
+  assert.equal(detection?.inputs?.openTarget, "Tan");
+  assert.deepEqual(detection?.context?.slice(0, 2), [
+    "你今晚方便看下这个方案吗？",
+    "Direct unread message that clearly expects a reply."
+  ]);
+});
+
+test("wechat desktop pack can scroll the conversation list to find unread threads beyond the first screen", async () => {
+  let observeCount = 0;
+  const actions: string[] = [];
+  const initialWorldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-wechat-scroll",
+    appContext: {
+      appName: "WeChat",
+      windows: [
+        {
+          ownerName: "WeChat",
+          windowName: "WeChat",
+          bounds: { x: 100, y: 40, width: 900, height: 700, centerX: 550, centerY: 390 }
+        }
+      ]
+    },
+    capture: { path: "/tmp/wechat-scroll-initial.png" },
+    ocrBlocks: [],
+    interactionCandidates: [],
+    visibleText: "WeChat\n清华互助群\nOfficial Accounts",
+    recentActions: [],
+    summary: "WeChat",
+    timestamp: new Date().toISOString()
+  };
+  const scrolledWorldState = {
+    ...initialWorldState,
+    capture: { path: "/tmp/wechat-scroll-pass-1.png" },
+    visibleText: "WeChat\nTan\n输入消息"
+  };
+  const fakeSurface = {
+    async observe() {
+      observeCount += 1;
+      return scrolledWorldState;
+    },
+    async act({ step }) {
+      actions.push(String(step?.action ?? ""));
+      return { ok: true };
+    }
+  };
+  let analyzeCalls = 0;
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("wechat-desktop");
+  const rule: WatchRule = {
+    id: "watch-wechat-scroll",
+    goal: "Always watch WeChat and prefill replies for unread conversations without sending",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "wechat-desktop-main",
+    skillName: null,
+    appTarget: "WeChat",
+    livePack: "wechat-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {
+      governance: {
+        replyPolicy: "prefill_first"
+      }
+    },
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-wechat-scroll",
+    name: "wechat-desktop-main",
+    rootPath: "/tmp/wechat-desktop-main",
+    profilePath: "/tmp/wechat-desktop-main/profile",
+    downloadsPath: "/tmp/wechat-desktop-main/downloads",
+    artifactsPath: "/tmp/wechat-desktop-main/artifacts",
+    scratchPath: "/tmp/wechat-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: initialWorldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        analyzeImageJson: async ({ imagePath }) => {
+          analyzeCalls += 1;
+          if (String(imagePath).includes("initial")) {
+            return {
+              openThread: null,
+              visibleUnreadThreads: [
+                {
+                  name: "清华互助群",
+                  evidence: "group row with forwarded content",
+                  approxSidebarY: 0.28,
+                  approxBox: { x: 0.08, y: 0.24, width: 0.28, height: 0.08 },
+                  replyable: true,
+                  threadKind: "chat",
+                  conversationKind: "group",
+                  shouldReply: false,
+                  replyReason: "No direct question or mention visible.",
+                  latestSnippet: "转发内容",
+                  priority: "low"
+                }
+              ],
+              composer: {
+                present: false,
+                evidence: "",
+                approxBox: null
+              }
+            };
+          }
+          return {
+            openThread: null,
+            visibleUnreadThreads: [
+              {
+                name: "Tan",
+                evidence: "direct unread badge",
+                approxSidebarY: 0.36,
+                approxBox: { x: 0.08, y: 0.32, width: 0.26, height: 0.08 },
+                replyable: true,
+                threadKind: "chat",
+                conversationKind: "direct",
+                shouldReply: true,
+                replyReason: "Direct unread message waiting for a response.",
+                latestSnippet: "晚上有空聊一下吗？",
+                priority: "high"
+              }
+            ],
+            composer: {
+              present: true,
+              evidence: "bottom input composer visible",
+              approxBox: { x: 0.34, y: 0.8, width: 0.56, height: 0.12 }
+            }
+          };
+        }
+      }
+    } as never
+  });
+
+  assert.equal(detection?.summary, "Tan");
+  assert.equal(detection?.metadata?.scrollPasses, 1);
+  assert.equal(analyzeCalls, 3);
+  assert(actions.includes("clickAt"));
+  assert(actions.includes("scroll"));
 });
 
 test("wechat desktop pack clamps vision unread click targets back into the left sidebar", async () => {

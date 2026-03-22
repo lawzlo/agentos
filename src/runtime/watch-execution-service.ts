@@ -184,7 +184,7 @@ const DEFAULT_SCAN_STAGE_TIMEOUT_MS: Record<WatchScanStage, number> = {
 };
 
 const WECHAT_SCAN_STAGE_TIMEOUT_MS: Partial<Record<WatchScanStage, number>> = {
-  detect_items: 30000,
+  detect_items: 75000,
   extract_context: 20000,
   draft_reply: 20000
 };
