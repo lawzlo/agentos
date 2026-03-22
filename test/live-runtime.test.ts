@@ -3449,7 +3449,7 @@ test("wechat desktop pack prefers target-specific vision grounding for the click
   assert.equal(detection?.summary, "Tan");
   assert.equal(
     Math.round(Number((detection?.metadata as { openPoint?: { x?: unknown } } | undefined)?.openPoint?.x ?? 0)),
-    205
+    244
   );
   assert.equal(
     Math.round(Number((detection?.metadata as { openPoint?: { y?: unknown } } | undefined)?.openPoint?.y ?? 0)),
@@ -3571,7 +3571,265 @@ test("wechat desktop pack maps vision click targets into on-screen window coordi
 
   assert.equal(
     Math.round(Number((detection?.metadata as { openPoint?: { x?: unknown } } | undefined)?.openPoint?.x ?? 0)),
-    205
+    244
+  );
+  assert.equal(
+    Math.round(Number((detection?.metadata as { openPoint?: { y?: unknown } } | undefined)?.openPoint?.y ?? 0)),
+    166
+  );
+});
+
+test("wechat desktop pack normalizes pixel-based thread grounding output from vision models", async () => {
+  const capturePath = "/tmp/wechat-vision-pixel-grounding.png";
+  await writePngHeader(capturePath, 3024, 1964);
+  const worldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-wechat-vision-pixel-grounding",
+    appContext: {
+      appName: "WeChat",
+      windows: [
+        {
+          ownerName: "WeChat",
+          windowName: "WeChat",
+          windowNumber: 88,
+          bounds: { x: 100, y: 40, width: 900, height: 700, centerX: 550, centerY: 390 }
+        }
+      ],
+      captureWindowNumber: 88
+    },
+    capture: {
+      id: "artifact-vision-pixel-grounding",
+      taskId: "task-vision-pixel-grounding",
+      traceId: null,
+      kind: "screenshot",
+      label: "WeChat vision pixel grounding state",
+      path: capturePath,
+      metadata: { windowNumber: 88 },
+      createdAt: new Date().toISOString()
+    },
+    ocrBlocks: [],
+    interactionCandidates: [],
+    visibleText: "WeChat\n徐畅",
+    recentActions: [],
+    summary: "WeChat",
+    timestamp: new Date().toISOString()
+  };
+
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({})
+  });
+  const pack = registry.get("wechat-desktop");
+  const rule: WatchRule = {
+    id: "watch-wechat-pixel-grounding",
+    goal: "Always watch WeChat and reply to unread conversations",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "wechat-desktop-main",
+    skillName: null,
+    appTarget: "WeChat",
+    livePack: "wechat-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-wechat-pixel-grounding",
+    name: "wechat-desktop-main",
+    rootPath: "/tmp/wechat-desktop-main",
+    profilePath: "/tmp/wechat-desktop-main/profile",
+    downloadsPath: "/tmp/wechat-desktop-main/downloads",
+    artifactsPath: "/tmp/wechat-desktop-main/artifacts",
+    scratchPath: "/tmp/wechat-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: worldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        analyzeImageJson: async ({ schemaName }: { schemaName?: string }) => {
+          if (schemaName === "agentos_wechat_thread_grounding") {
+            return {
+              targetVisible: true,
+              evidence: "The 徐畅 row is visible and returned in pixel coordinates",
+              clickPoint: { x: 200, y: 145 },
+              rowBox: { x: 79, y: 117, width: 245, height: 56 }
+            };
+          }
+          return {
+            openThread: "Current thread",
+            visibleUnreadThreads: [
+              {
+                name: "徐畅",
+                evidence: "red unread badge on the row",
+                approxSidebarY: 0.18,
+                replyable: true,
+                threadKind: "chat",
+                conversationKind: "direct",
+                shouldReply: true,
+                replyReason: "direct message with unread badge",
+                latestSnippet: "阔以！跟林老师学习🤙",
+                priority: "high",
+                approxBox: { x: 0.08, y: 0.14, width: 0.26, height: 0.08 }
+              }
+            ],
+            composer: {
+              present: true,
+              evidence: "bottom input area",
+              approxBox: { x: 0.31, y: 0.85, width: 0.66, height: 0.12 }
+            }
+          };
+        }
+      }
+    } as never
+  });
+
+  assert.equal(detection?.summary, "徐畅");
+  assert.equal(
+    Math.round(Number((detection?.metadata as { openPoint?: { x?: unknown } } | undefined)?.openPoint?.x ?? 0)),
+    160
+  );
+  assert.equal(
+    Math.round(Number((detection?.metadata as { openPoint?: { y?: unknown } } | undefined)?.openPoint?.y ?? 0)),
+    92
+  );
+});
+
+test("wechat desktop pack falls back to the first-pass unread row point when thread grounding diverges too far", async () => {
+  const worldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-wechat-grounding-fallback",
+    appContext: {
+      appName: "WeChat",
+      windows: [
+        {
+          ownerName: "WeChat",
+          windowName: "WeChat",
+          bounds: { x: 100, y: 40, width: 900, height: 700, centerX: 550, centerY: 390 }
+        }
+      ]
+    },
+    capture: {
+      id: "artifact-grounding-fallback",
+      taskId: "task-grounding-fallback",
+      traceId: null,
+      kind: "screenshot",
+      label: "WeChat grounding fallback state",
+      path: "/tmp/wechat-grounding-fallback.png",
+      metadata: {},
+      createdAt: new Date().toISOString()
+    },
+    ocrBlocks: [],
+    interactionCandidates: [],
+    visibleText: "WeChat\n徐畅",
+    recentActions: [],
+    summary: "WeChat",
+    timestamp: new Date().toISOString()
+  };
+
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({})
+  });
+  const pack = registry.get("wechat-desktop");
+  const rule: WatchRule = {
+    id: "watch-wechat-grounding-fallback",
+    goal: "Always watch WeChat and reply to unread conversations",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "wechat-desktop-main",
+    skillName: null,
+    appTarget: "WeChat",
+    livePack: "wechat-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-wechat-grounding-fallback",
+    name: "wechat-desktop-main",
+    rootPath: "/tmp/wechat-desktop-main",
+    profilePath: "/tmp/wechat-desktop-main/profile",
+    downloadsPath: "/tmp/wechat-desktop-main/downloads",
+    artifactsPath: "/tmp/wechat-desktop-main/artifacts",
+    scratchPath: "/tmp/wechat-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: worldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        analyzeImageJson: async ({ schemaName }: { schemaName?: string }) => {
+          if (schemaName === "agentos_wechat_thread_grounding") {
+            return {
+              targetVisible: true,
+              evidence: "A distant row was grounded incorrectly",
+              clickPoint: { x: 0.42, y: 0.62 },
+              rowBox: { x: 0.34, y: 0.56, width: 0.12, height: 0.08 }
+            };
+          }
+          return {
+            openThread: "Current thread",
+            visibleUnreadThreads: [
+              {
+                name: "徐畅",
+                evidence: "red unread badge on the row",
+                approxSidebarY: 0.18,
+                replyable: true,
+                threadKind: "chat",
+                conversationKind: "direct",
+                shouldReply: true,
+                replyReason: "direct message with unread badge",
+                latestSnippet: "阔以！跟林老师学习🤙",
+                priority: "high",
+                approxBox: { x: 0.08, y: 0.14, width: 0.26, height: 0.08 }
+              }
+            ],
+            composer: {
+              present: true,
+              evidence: "bottom input area",
+              approxBox: { x: 0.31, y: 0.85, width: 0.66, height: 0.12 }
+            }
+          };
+        }
+      }
+    } as never
+  });
+
+  assert.equal(detection?.summary, "徐畅");
+  assert.equal(
+    Math.round(Number((detection?.metadata as { openPoint?: { x?: unknown } } | undefined)?.openPoint?.x ?? 0)),
+    289
   );
   assert.equal(
     Math.round(Number((detection?.metadata as { openPoint?: { y?: unknown } } | undefined)?.openPoint?.y ?? 0)),

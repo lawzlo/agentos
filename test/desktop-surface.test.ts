@@ -319,6 +319,47 @@ test("desktop observe augments WeChat window captures with supplemental OCR regi
   );
 });
 
+test("desktop observe captures the target app window even when another app is frontmost", async () => {
+  const { adapter } = createObserveAdapter();
+  const capturedWindowNumbers: Array<number | null> = [];
+  adapter.bridge.getFrontmostApp = async () => ({ appName: "Terminal" });
+  adapter.bridge.captureScreen = async (_filePath: string, windowNumber?: number | null) => {
+    capturedWindowNumbers.push(windowNumber ?? null);
+    return { ok: true, windowNumber: windowNumber ?? null };
+  };
+  adapter.bridge.listWindows = async () => ({
+    windows: [
+      {
+        ownerName: "WeChat",
+        windowName: "WeChat",
+        windowNumber: 52183,
+        bounds: { x: 20, y: 20, width: 300, height: 500, centerX: 170, centerY: 270 }
+      },
+      {
+        ownerName: "Terminal",
+        windowName: "Terminal",
+        windowNumber: 49764,
+        bounds: { x: 500, y: 0, width: 400, height: 400, centerX: 700, centerY: 200 }
+      }
+    ]
+  });
+
+  const worldState = (await adapter.observe({
+    task: { id: "task_test" },
+    workspace: {
+      id: "workspace_test",
+      artifactsPath: "/tmp",
+      rootPath: "/tmp"
+    },
+    traceId: "trace_test",
+    targetAppName: "WeChat"
+  })) as WorldState;
+
+  assert.deepEqual(capturedWindowNumbers, [52183]);
+  assert.equal(worldState.appContext?.targetAppName, "WeChat");
+  assert.equal(worldState.appContext?.captureWindowNumber, 52183);
+});
+
 test("desktop verify can require region text visibility", async () => {
   const { adapter } = createObserveAdapter();
   adapter.bridge.getFrontmostApp = async () => ({ appName: "WeChat" });
@@ -501,6 +542,7 @@ test("desktop capture falls back to a full-screen capture when window capture fa
 });
 
 test("desktop verify can use visual checks for WeChat thread and prefill validation", async () => {
+  const captureCalls: Array<number | null> = [];
   const adapter = new DesktopSurfaceAdapter({
     artifactStore: {
       registerExistingFile(payload: Record<string, unknown>) {
@@ -532,14 +574,24 @@ test("desktop verify can use visual checks for WeChat thread and prefill validat
   }) as DesktopSurfaceAdapter & { bridge: Record<string, unknown> };
 
   adapter.bridge = {
-    async captureScreen() {
-      return { ok: true };
+    async captureScreen(_filePath: string, windowNumber?: number | null) {
+      captureCalls.push(windowNumber ?? null);
+      return { ok: true, windowNumber: windowNumber ?? null };
     },
     async getFrontmostApp() {
       return { appName: "WeChat" };
     },
     async listWindows() {
-      return { windows: [] };
+      return {
+        windows: [
+          {
+            ownerName: "WeChat",
+            windowName: "WeChat",
+            windowNumber: 11,
+            bounds: { x: 0, y: 0, width: 900, height: 700, centerX: 450, centerY: 350 }
+          }
+        ]
+      };
     },
     async getPermissionsStatus() {
       return { accessibility: true, screenRecording: true };
@@ -571,6 +623,7 @@ test("desktop verify can use visual checks for WeChat thread and prefill validat
   assert.equal(result.details.frontmostApp, "WeChat");
   assert.equal(result.details.visualCheck?.targetThreadOpen, true);
   assert.equal(result.details.visualCheck?.prefillVisible, true);
+  assert.deepEqual(captureCalls, [11]);
 });
 
 test("desktop waitForAppReady waits for a stable frontmost app with accessibility candidates", async () => {

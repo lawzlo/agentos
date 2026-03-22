@@ -662,7 +662,7 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
     };
   }
 
-  async observe({ task, workspace, traceId, label = "desktop-observe", recentActions = [] }) {
+  async observe({ task, workspace, traceId, label = "desktop-observe", recentActions = [], targetAppName = "" }) {
     const bridge = this.#requireBridge();
     const [frontmostApp, windows, permissions] = await Promise.all([
       this.#withTimeout(
@@ -686,7 +686,8 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
       )
     ]);
     const windowsList = Array.isArray(windows.windows) ? (windows.windows as Array<Record<string, unknown>>) : [];
-    const windowNumber = pickPrimaryWindowNumber(windowsList, frontmostApp?.appName);
+    const effectiveCaptureAppName = String(targetAppName ?? "").trim() || String(frontmostApp?.appName ?? "").trim();
+    const windowNumber = pickPrimaryWindowNumber(windowsList, effectiveCaptureAppName);
     let captureError: string | null = null;
     const capture = await this.capture({ task, workspace, traceId, label, windowNumber }).catch((error: unknown) => {
       captureError = errorMessage(error);
@@ -716,9 +717,9 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
           error: captureError ? `capture unavailable: ${captureError}` : "capture unavailable"
         };
     const accessibility =
-      typeof bridge.getAccessibilitySnapshot === "function" && frontmostApp?.appName
+      typeof bridge.getAccessibilitySnapshot === "function" && effectiveCaptureAppName
         ? await this.#withTimeout(
-            bridge.getAccessibilitySnapshot(String(frontmostApp.appName)).catch(() => null),
+            bridge.getAccessibilitySnapshot(String(effectiveCaptureAppName)).catch(() => null),
             this.timeouts.accessibilityMs,
             () => null
           )
@@ -737,7 +738,7 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
         ...normalizeOcrBlocks(ocrResult.observations ?? [], "desktop"),
         ...supplementalOcrBlocks
       ]),
-      frontmostApp: (frontmostApp ?? null) as Record<string, unknown> | null,
+      frontmostApp: { ...(frontmostApp ?? {}), appName: effectiveCaptureAppName } as Record<string, unknown>,
       windows: windowsList,
       captureWindowNumber: Number.isFinite(actualCaptureWindowNumber) && actualCaptureWindowNumber > 0 ? actualCaptureWindowNumber : null
     });
@@ -758,6 +759,7 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
         permissions,
         accessibility,
         accessibilityCandidateCount: accessibilityCandidates.length,
+        targetAppName: effectiveCaptureAppName || null,
         captureAvailable: Boolean(capture),
         captureError,
         supplementalOcrBlockCount: supplementalOcrBlocks.length,
@@ -769,18 +771,35 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
       interactionCandidates,
       visibleText,
       recentActions: summarizeRecentActions(recentActions),
-      summary: `${frontmostApp.appName} with ${accessibilityCandidates.length} accessibility candidates and ${ocrBlocks.length} OCR observations across ${(windows.windows ?? []).length} windows${ocrError ? ` (OCR unavailable: ${ocrError})` : ""}`
+      summary: `${effectiveCaptureAppName || frontmostApp.appName} with ${accessibilityCandidates.length} accessibility candidates and ${ocrBlocks.length} OCR observations across ${(windows.windows ?? []).length} windows${ocrError ? ` (OCR unavailable: ${ocrError})` : ""}`
     });
   }
 
-  async capture({ task, workspace, traceId, label = "desktop-capture", windowNumber = null }) {
+  async capture({ task, workspace, traceId, label = "desktop-capture", windowNumber = null, targetAppName = "" }) {
     const bridge = this.#requireBridge();
     const filePath = path.join(workspace.artifactsPath, `${Date.now()}-${label.replaceAll(/\s+/g, "-")}.png`);
+    const effectiveTargetAppName = String(targetAppName ?? "").trim();
+    let requestedWindowNumber = Number.isFinite(Number(windowNumber)) && Number(windowNumber) > 0
+      ? Number(windowNumber)
+      : null;
+    if (!requestedWindowNumber && effectiveTargetAppName && typeof bridge.listWindows === "function") {
+      const listedWindows = await this.#withTimeout(
+        bridge.listWindows().catch(() => ({ windows: [] })),
+        this.timeouts.windowsMs,
+        () => ({ windows: [] })
+      );
+      const windowsList = Array.isArray(listedWindows?.windows) ? listedWindows.windows as Array<Record<string, unknown>> : [];
+      requestedWindowNumber = pickPrimaryWindowNumber(windowsList, effectiveTargetAppName);
+    }
     let captureResult: Record<string, unknown> | null = null;
     try {
-      captureResult = await this.#withTimeout(bridge.captureScreen(filePath, windowNumber), this.timeouts.captureMs, null);
+      captureResult = await this.#withTimeout(
+        bridge.captureScreen(filePath, requestedWindowNumber),
+        this.timeouts.captureMs,
+        null
+      );
     } catch (error) {
-      if (!windowNumber) {
+      if (!requestedWindowNumber) {
         throw error;
       }
       captureResult = await this.#withTimeout(bridge.captureScreen(filePath, null), this.timeouts.captureMs, null);
@@ -1055,8 +1074,30 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
     const visualCheck = (check.visualCheck ?? null) as
       | { type?: string; targetThread?: string; replyPreview?: string }
       | null;
+    const captureTargetAppName =
+      String(check.frontmostApp ?? "").trim()
+      || (visualCheck?.type?.startsWith("wechat_") ? "WeChat" : "");
     if (visualCheck?.type && this.visualModelClient?.supportsImageJson?.()) {
-      capture ??= await this.capture({ task, workspace, traceId, label: "verify-vision" });
+      if (!capture && captureTargetAppName) {
+        const observedState = await this.observe({
+          task,
+          workspace,
+          traceId,
+          label: "verify-vision",
+          targetAppName: captureTargetAppName
+        });
+        const observedCapture = (observedState as Record<string, unknown> | null)?.capture as { path?: string } | null;
+        if (typeof observedCapture?.path === "string" && observedCapture.path.trim()) {
+          capture = { path: observedCapture.path };
+        }
+      }
+      capture ??= await this.capture({
+        task,
+        workspace,
+        traceId,
+        label: "verify-vision",
+        ...(captureTargetAppName ? { targetAppName: captureTargetAppName } : {})
+      });
       const targetThread = String(visualCheck.targetThread ?? "").trim();
       const replyPreview = String(visualCheck.replyPreview ?? "").trim();
       const result = await this.visualModelClient.analyzeImageJson<{

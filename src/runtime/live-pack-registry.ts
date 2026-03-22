@@ -105,6 +105,7 @@ interface WeChatVisualAnalysis {
 interface WeChatVisualThreadGrounding {
   targetVisible: boolean;
   evidence: string;
+  coordinateMode?: "normalized" | "pixel";
   clickPoint: {
     x: number;
     y: number;
@@ -1375,27 +1376,77 @@ function normalizeWeChatVisualThreadGrounding(
   }
 
   const clickPointRaw = (raw.clickPoint ?? null) as Record<string, unknown> | null;
+  const rowBoxRaw = (raw.rowBox ?? null) as Record<string, unknown> | null;
+  const coordinateMode = [
+    Number(clickPointRaw?.x ?? NaN),
+    Number(clickPointRaw?.y ?? NaN),
+    Number(rowBoxRaw?.x ?? NaN),
+    Number(rowBoxRaw?.y ?? NaN),
+    Number(rowBoxRaw?.width ?? NaN),
+    Number(rowBoxRaw?.height ?? NaN)
+  ].some((value) => Number.isFinite(value) && value > 1)
+    ? "pixel"
+    : "normalized";
   const clickPoint =
     clickPointRaw && ["x", "y"].every((key) => Number.isFinite(Number(clickPointRaw[key])))
       ? {
-          x: clampUnit(clickPointRaw.x, 0.22),
-          y: clampUnit(clickPointRaw.y, 0.2)
+          x:
+            coordinateMode === "pixel"
+              ? Number(clickPointRaw.x)
+              : clampUnit(clickPointRaw.x, 0.22),
+          y:
+            coordinateMode === "pixel"
+              ? Number(clickPointRaw.y)
+              : clampUnit(clickPointRaw.y, 0.2)
         }
       : null;
-  const rowBoxRaw = (raw.rowBox ?? null) as Record<string, unknown> | null;
   const rowBox =
     rowBoxRaw && ["x", "y", "width", "height"].every((key) => Number.isFinite(Number(rowBoxRaw[key])))
       ? {
-          x: clampUnit(rowBoxRaw.x, 0),
-          y: clampUnit(rowBoxRaw.y, 0),
-          width: clampUnit(rowBoxRaw.width, 0),
-          height: clampUnit(rowBoxRaw.height, 0)
+          x: coordinateMode === "pixel" ? Number(rowBoxRaw.x) : clampUnit(rowBoxRaw.x, 0),
+          y: coordinateMode === "pixel" ? Number(rowBoxRaw.y) : clampUnit(rowBoxRaw.y, 0),
+          width: coordinateMode === "pixel" ? Number(rowBoxRaw.width) : clampUnit(rowBoxRaw.width, 0),
+          height: coordinateMode === "pixel" ? Number(rowBoxRaw.height) : clampUnit(rowBoxRaw.height, 0)
         }
       : null;
 
   return {
     targetVisible: Boolean(raw.targetVisible),
     evidence: String(raw.evidence ?? "").trim(),
+    coordinateMode,
+    clickPoint,
+    rowBox
+  };
+}
+
+function normalizeWeChatGroundingWithImageSize(
+  grounding: WeChatVisualThreadGrounding | null,
+  imageSize: { width: number; height: number } | null
+): WeChatVisualThreadGrounding | null {
+  if (!grounding || !imageSize || !(imageSize.width > 0) || !(imageSize.height > 0)) {
+    return grounding;
+  }
+
+  const normalizeX = (value: number) => (value > 1 ? value / imageSize.width : value);
+  const normalizeY = (value: number) => (value > 1 ? value / imageSize.height : value);
+  const clickPoint = grounding.clickPoint
+    ? {
+        x: clampUnit(normalizeX(Number(grounding.clickPoint.x ?? 0)), 0.22),
+        y: clampUnit(normalizeY(Number(grounding.clickPoint.y ?? 0)), 0.2)
+      }
+    : null;
+  const rowBox = grounding.rowBox
+    ? {
+        x: clampUnit(normalizeX(Number(grounding.rowBox.x ?? 0)), 0),
+        y: clampUnit(normalizeY(Number(grounding.rowBox.y ?? 0)), 0),
+        width: clampUnit(normalizeX(Number(grounding.rowBox.width ?? 0)), 0),
+        height: clampUnit(normalizeY(Number(grounding.rowBox.height ?? 0)), 0)
+      }
+    : null;
+
+  return {
+    ...grounding,
+    coordinateMode: grounding.coordinateMode ?? "normalized",
     clickPoint,
     rowBox
   };
@@ -1479,34 +1530,56 @@ function resolveWeChatGroundedOpenPoint(
   groundedTarget: WeChatVisualThreadGrounding | null,
   fallbackOpenPoint: { x?: number; y?: number } | null
 ): { x: number; y: number } | null {
-  if (bounds && groundedTarget?.targetVisible && groundedTarget.rowBox) {
-    const box = groundedTarget.rowBox;
-    const anchorXNorm = box.x + Math.min(Math.max(box.width * 0.22, 0.04), box.width * 0.5);
-    const anchorYNorm = box.y + box.height * 0.5;
-    const x = Number(bounds.x ?? 0) + Number(bounds.width ?? 0) * anchorXNorm;
-    const y = Number(bounds.y ?? 0) + Number(bounds.height ?? 0) * anchorYNorm;
-    if (Number.isFinite(x) && Number.isFinite(y)) {
-      return { x, y };
-    }
-  }
-
+  const normalizedFallbackPoint =
+    fallbackOpenPoint
+    && Number.isFinite(Number(fallbackOpenPoint.x ?? NaN))
+    && Number.isFinite(Number(fallbackOpenPoint.y ?? NaN))
+      ? {
+          x: Number(fallbackOpenPoint.x),
+          y: Number(fallbackOpenPoint.y)
+        }
+      : null;
+  let groundedPoint: { x: number; y: number } | null = null;
   if (bounds && groundedTarget?.targetVisible && groundedTarget.clickPoint) {
     const x = Number(bounds.x ?? 0) + Number(bounds.width ?? 0) * groundedTarget.clickPoint.x;
     const y = Number(bounds.y ?? 0) + Number(bounds.height ?? 0) * groundedTarget.clickPoint.y;
     if (Number.isFinite(x) && Number.isFinite(y)) {
-      return { x, y };
+      groundedPoint = { x, y };
+    }
+  }
+
+  if (!groundedPoint && bounds && groundedTarget?.targetVisible && groundedTarget.rowBox) {
+    const box = groundedTarget.rowBox;
+    const anchorXNorm = box.x + box.width * 0.5;
+    const anchorYNorm = box.y + box.height * 0.5;
+    const x = Number(bounds.x ?? 0) + Number(bounds.width ?? 0) * anchorXNorm;
+    const y = Number(bounds.y ?? 0) + Number(bounds.height ?? 0) * anchorYNorm;
+    if (Number.isFinite(x) && Number.isFinite(y)) {
+      groundedPoint = { x, y };
     }
   }
 
   if (
-    fallbackOpenPoint
-    && Number.isFinite(Number(fallbackOpenPoint.x ?? NaN))
-    && Number.isFinite(Number(fallbackOpenPoint.y ?? NaN))
+    groundedPoint
+    && normalizedFallbackPoint
+    && bounds
+    && groundedTarget?.coordinateMode !== "pixel"
   ) {
-    return {
-      x: Number(fallbackOpenPoint.x),
-      y: Number(fallbackOpenPoint.y)
-    };
+    const thresholdX = Math.max(Number(bounds.width ?? 0) * 0.08, 48);
+    const thresholdY = Math.max(Number(bounds.height ?? 0) * 0.08, 48);
+    const dx = Math.abs(groundedPoint.x - normalizedFallbackPoint.x);
+    const dy = Math.abs(groundedPoint.y - normalizedFallbackPoint.y);
+    if (dx > thresholdX || dy > thresholdY) {
+      return normalizedFallbackPoint;
+    }
+  }
+
+  if (groundedPoint) {
+    return groundedPoint;
+  }
+
+  if (normalizedFallbackPoint) {
+    return normalizedFallbackPoint;
   }
 
   return null;
@@ -1724,6 +1797,7 @@ async function groundWeChatTargetThreadClickPoint({
   const payload = [
     "Analyze this WeChat desktop screenshot and ground the target conversation row in the left sidebar.",
     "Return a click point that safely selects the target row inside the left conversation list.",
+    "Return clickPoint and rowBox in normalized screenshot coordinates from 0 to 1, not pixels.",
     "The click point must stay inside the left sidebar, on the same horizontal band as the target row, and must not land in the right thread pane or on article cards.",
     `Target thread: ${target}`,
     lines.length ? `Visible OCR lines:\n${lines.join("\n")}` : "",
@@ -1779,7 +1853,10 @@ async function groundWeChatTargetThreadClickPoint({
       })
     ]);
 
-    return normalizeWeChatVisualThreadGrounding((result as Record<string, unknown> | null) ?? null);
+    return normalizeWeChatGroundingWithImageSize(
+      normalizeWeChatVisualThreadGrounding((result as Record<string, unknown> | null) ?? null),
+      await readCaptureImageSize(imagePath)
+    );
   } finally {
     if (timeoutHandle) {
       clearTimeout(timeoutHandle);
@@ -3654,11 +3731,13 @@ export function analyzeDesktopConversationPack(
 export async function analyzeDesktopConversationPackWithVision({
   packName,
   worldState,
-  modelClient
+  modelClient,
+  timeoutMs
 }: {
   packName: string;
   worldState: WorldState | null;
   modelClient?: Pick<LivePackControlPlane["modelClient"], "supportsImageJson" | "analyzeImageJson"> | null;
+  timeoutMs?: number;
 }): Promise<DesktopConversationPackAnalysis | null> {
   const base = analyzeDesktopConversationPack(packName, worldState);
   if (packName !== "wechat-desktop") {
@@ -3667,7 +3746,8 @@ export async function analyzeDesktopConversationPackWithVision({
 
   const vision = await analyzeWeChatDesktopVisualState({
     modelClient: modelClient ?? null,
-    worldState
+    worldState,
+    timeoutMs
   }).catch(() => null);
   if (!vision) {
     return withAnalysisSemantics({
@@ -4002,7 +4082,8 @@ async function observeWatchSurface({
     task: createWatchTask(rule),
     workspace: profileAsWorkspace(rule, workspace),
     traceId: null,
-    label: `watch-${rule.id}`
+    label: `watch-${rule.id}`,
+    ...(effectiveDesktopAppTarget ? { targetAppName: effectiveDesktopAppTarget } : {})
   })) as WorldState;
 }
 

@@ -27,6 +27,7 @@ interface DesktopProbeAdapter {
     traceId: string | null;
     label?: string;
     recentActions?: unknown[];
+    targetAppName?: string;
   }): Promise<WorldState>;
   inspectApp?: (args: { appName: string }) => Promise<{
     targetAppName: string;
@@ -324,7 +325,8 @@ export async function collectDesktopProbe(request: DesktopProbeRequest, deps: De
       task,
       workspace,
       traceId: null,
-      label: `desktop-probe-${safeName(request.appName)}`
+      label: `desktop-probe-${safeName(request.appName)}`,
+      targetAppName: request.appName
     });
     const targetInspection = typeof adapter.inspectApp === "function" ? await adapter.inspectApp({ appName: request.appName }) : null;
 
@@ -370,7 +372,8 @@ export async function collectDesktopProbe(request: DesktopProbeRequest, deps: De
       ? await analyzeDesktopConversationPackWithVision({
           packName: request.packName,
           worldState: packAnalysisWorldState,
-          modelClient
+          modelClient,
+          timeoutMs: Math.max(5000, request.timeoutMs)
         })
       : null;
     const appContext = (worldState.appContext ?? {}) as Record<string, unknown>;

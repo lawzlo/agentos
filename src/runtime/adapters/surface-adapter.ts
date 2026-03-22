@@ -16,6 +16,7 @@ interface SurfaceContext {
   outputs?: Record<string, unknown>;
   expectation?: Record<string, unknown>;
   recentActions?: unknown[];
+  targetAppName?: string;
 }
 
 export class SurfaceAdapter {
