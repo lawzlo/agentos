@@ -7,10 +7,19 @@ import { BrowserSurfaceAdapter } from "../../src/runtime/adapters/browser-surfac
 import {
   analyzeConversationPack,
   detectBrowserManualIntervention,
+  runnerTypeForPack,
   type DesktopConversationPackAnalysis,
   type DesktopProbeCandidateSummary
 } from "../../src/runtime/live-pack-registry.js";
-import type { TaskRecord, WatchRule, WorkspaceProfile, WorldState } from "../../src/types/runtime-schema.js";
+import type {
+  SceneType,
+  SurfaceRecoveryAction,
+  SurfaceRunnerType,
+  TaskRecord,
+  WatchRule,
+  WorkspaceProfile,
+  WorldState
+} from "../../src/types/runtime-schema.js";
 
 type SurfaceName = "browser" | "desktop";
 
@@ -61,6 +70,11 @@ export interface SurfaceStateReport {
   ready: boolean;
   readinessState: SurfaceReadinessState;
   blockers: SurfaceReadinessState[];
+  runnerType: SurfaceRunnerType;
+  scene: SceneType | null;
+  selectedTarget: string | null;
+  skipReasons: string[];
+  recoverySuggested: SurfaceRecoveryAction | null;
   frontmostApp: string | null;
   activeWindow: string | null;
   visibleTextPreview: string[];
@@ -85,6 +99,89 @@ export interface SurfaceStateDeps {
   browserAdapter?: BrowserStateAdapter;
   workspace?: WorkspaceProfile;
   nowIso?: () => string;
+}
+
+function genericSceneFromPackAnalysis(packAnalysis: DesktopConversationPackAnalysis | null): SceneType | null {
+  if (!packAnalysis) {
+    return null;
+  }
+  return packAnalysis.scene ?? (packAnalysis.composeCandidate ? "thread" : packAnalysis.unreadCandidate ? "list" : "unknown");
+}
+
+function browserSceneFromState({
+  request,
+  packAnalysis,
+  manualIntervention
+}: {
+  request: SurfaceStateRequest;
+  packAnalysis: DesktopConversationPackAnalysis | null;
+  manualIntervention: ReturnType<typeof detectBrowserManualIntervention> | null;
+}): {
+  runnerType: SurfaceRunnerType;
+  scene: SceneType | null;
+  selectedTarget: string | null;
+  skipReasons: string[];
+  recoverySuggested: SurfaceRecoveryAction | null;
+} {
+  const runnerType = runnerTypeForPack(request.packName, "browser");
+  const interventionKind = manualIntervention?.metadata?.manualInterventionKind ?? null;
+  if (interventionKind === "login" || interventionKind === "session_expired") {
+    return {
+      runnerType,
+      scene: "signin",
+      selectedTarget: null,
+      skipReasons: ["blocked_signin"],
+      recoverySuggested: "complete_signin"
+    };
+  }
+  if (interventionKind === "verification") {
+    return {
+      runnerType,
+      scene: "verification",
+      selectedTarget: null,
+      skipReasons: ["blocked_verification"],
+      recoverySuggested: "complete_verification"
+    };
+  }
+  if (interventionKind === "access_denied") {
+    return {
+      runnerType,
+      scene: "foreign_view",
+      selectedTarget: null,
+      skipReasons: ["blocked_access_denied"],
+      recoverySuggested: "takeover"
+    };
+  }
+
+  return {
+    runnerType,
+    scene: genericSceneFromPackAnalysis(packAnalysis),
+    selectedTarget: String(packAnalysis?.selectedTarget ?? packAnalysis?.unreadCandidate?.text ?? "").trim() || null,
+    skipReasons: Array.isArray(packAnalysis?.skipReasons) ? packAnalysis.skipReasons : [],
+    recoverySuggested: packAnalysis?.recoveryAction ?? null
+  };
+}
+
+function desktopSceneFromState({
+  request,
+  packAnalysis
+}: {
+  request: SurfaceStateRequest;
+  packAnalysis: DesktopConversationPackAnalysis | null;
+}): {
+  runnerType: SurfaceRunnerType;
+  scene: SceneType | null;
+  selectedTarget: string | null;
+  skipReasons: string[];
+  recoverySuggested: SurfaceRecoveryAction | null;
+} {
+  return {
+    runnerType: packAnalysis?.runnerType ?? runnerTypeForPack(request.packName, "desktop"),
+    scene: genericSceneFromPackAnalysis(packAnalysis),
+    selectedTarget: String(packAnalysis?.selectedTarget ?? packAnalysis?.unreadCandidate?.text ?? "").trim() || null,
+    skipReasons: Array.isArray(packAnalysis?.skipReasons) ? packAnalysis.skipReasons : [],
+    recoverySuggested: packAnalysis?.recoveryAction ?? null
+  };
 }
 
 function safeName(value: string) {
@@ -350,8 +447,19 @@ function renderSurfaceState(report: SurfaceStateReport): string {
   lines.push("");
   lines.push(`Surface: ${report.surface}`);
   lines.push(`Pack: ${report.request.packName ?? "(none)"}`);
+  lines.push(`Runner: ${report.runnerType}`);
+  lines.push(`Scene: ${report.scene ?? "unknown"}`);
   lines.push(`Readiness: ${report.readinessState}`);
   lines.push(`Blockers: ${report.blockers.length ? report.blockers.join(", ") : "none"}`);
+  if (report.selectedTarget) {
+    lines.push(`Selected target: ${report.selectedTarget}`);
+  }
+  if (report.recoverySuggested && report.recoverySuggested !== "none") {
+    lines.push(`Recovery suggested: ${report.recoverySuggested}`);
+  }
+  if (report.skipReasons.length) {
+    lines.push(`Skip reasons: ${report.skipReasons.join(", ")}`);
+  }
   if (report.frontmostApp) {
     lines.push(`Frontmost app: ${report.frontmostApp}`);
   }
@@ -406,6 +514,11 @@ async function collectBrowserState(
       ready: false,
       readinessState: "browser_unavailable",
       blockers: ["browser_unavailable"],
+      runnerType: "browser_native",
+      scene: "unknown",
+      selectedTarget: null,
+      skipReasons: ["browser_unavailable"],
+      recoverySuggested: "takeover",
       frontmostApp: null,
       activeWindow: null,
       visibleTextPreview: [],
@@ -462,6 +575,11 @@ async function collectBrowserState(
       packAnalysis,
       manualIntervention
     });
+    const sceneState = browserSceneFromState({
+      request,
+      packAnalysis,
+      manualIntervention
+    });
 
     return {
       request,
@@ -469,6 +587,11 @@ async function collectBrowserState(
       ready: readiness.ready,
       readinessState: readiness.readinessState,
       blockers: readiness.blockers,
+      runnerType: sceneState.runnerType,
+      scene: sceneState.scene,
+      selectedTarget: sceneState.selectedTarget,
+      skipReasons: sceneState.skipReasons,
+      recoverySuggested: sceneState.recoverySuggested,
       frontmostApp: String(worldState.appContext?.title ?? "").trim() || null,
       activeWindow: String(worldState.appContext?.url ?? "").trim() || null,
       visibleTextPreview: String(worldState.visibleText ?? "")
@@ -522,6 +645,10 @@ export async function collectSurfaceState(
   );
   const readiness = deriveDesktopReadiness(report);
   const activeWindow = report.targetAppInspection?.topCandidates?.[0]?.hints?.[0] ?? null;
+  const sceneState = desktopSceneFromState({
+    request,
+    packAnalysis: report.packAnalysis
+  });
 
   return {
     request,
@@ -529,6 +656,11 @@ export async function collectSurfaceState(
     ready: readiness.ready,
     readinessState: readiness.readinessState,
     blockers: readiness.blockers,
+    runnerType: sceneState.runnerType,
+    scene: sceneState.scene,
+    selectedTarget: sceneState.selectedTarget,
+    skipReasons: sceneState.skipReasons,
+    recoverySuggested: sceneState.recoverySuggested,
     frontmostApp: report.frontmostApp,
     activeWindow: activeWindow || report.targetAppInspection?.frontmostApp || null,
     visibleTextPreview: report.visibleTextPreview,

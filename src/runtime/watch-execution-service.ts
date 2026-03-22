@@ -14,7 +14,13 @@ import {
 } from "./conversation-thread-state.js";
 import type { ControlPlane } from "./control-plane.js";
 import type { EventBus } from "./event-bus.js";
-import { analyzeDesktopConversationPackWithVision, type LivePack, type LivePackDraftResponse, type LivePackRegistry } from "./live-pack-registry.js";
+import {
+  analyzeDesktopConversationPackWithVision,
+  runnerTypeForPack,
+  type LivePack,
+  type LivePackDraftResponse,
+  type LivePackRegistry
+} from "./live-pack-registry.js";
 import type { DecoratedDraftRecord } from "./watch-presenters.js";
 import type { ControlPlaneStore } from "./store.js";
 import type {
@@ -59,7 +65,12 @@ function clearWatchFailureState(dedupeState: Record<string, unknown> = {}) {
     lastNoTriggerAt: null,
     lastNoTriggerUnreadCandidate: null,
     lastNoTriggerComposeCandidate: null,
-    lastNoTriggerTopUnread: []
+    lastNoTriggerTopUnread: [],
+    lastNoTriggerRunnerType: null,
+    lastNoTriggerScene: null,
+    lastNoTriggerSelectedTarget: null,
+    lastNoTriggerSkipReasons: [],
+    lastNoTriggerRecoveryAction: null
   };
 }
 
@@ -484,12 +495,18 @@ export class WatchExecutionService {
     reason: string,
     stage: WatchScanStage | null
   ): Promise<Record<string, unknown>> {
+    const baseDebug = {
+      lastNoTriggerReason: reason,
+      lastNoTriggerStage: stage,
+      lastNoTriggerAt: nowIso(),
+      lastNoTriggerRunnerType: runnerTypeForPack(watchRule.livePack, watchRule.preferredSurface),
+      lastNoTriggerScene: null,
+      lastNoTriggerSelectedTarget: null,
+      lastNoTriggerSkipReasons: [reason],
+      lastNoTriggerRecoveryAction: null
+    };
     if (watchRule.livePack !== "wechat-desktop" || !worldState) {
-      return {
-        lastNoTriggerReason: reason,
-        lastNoTriggerStage: stage,
-        lastNoTriggerAt: nowIso()
-      };
+      return baseDebug;
     }
 
     const analysis = await analyzeDesktopConversationPackWithVision({
@@ -499,11 +516,16 @@ export class WatchExecutionService {
     }).catch(() => null);
 
     return {
-      lastNoTriggerReason: reason,
-      lastNoTriggerStage: stage,
-      lastNoTriggerAt: nowIso(),
+      ...baseDebug,
       lastNoTriggerUnreadCandidate: String(analysis?.unreadCandidate?.text ?? "").trim() || null,
       lastNoTriggerComposeCandidate: String(analysis?.composeCandidate?.text ?? "").trim() || null,
+      lastNoTriggerScene: analysis?.scene ?? null,
+      lastNoTriggerSelectedTarget: String(analysis?.selectedTarget ?? analysis?.unreadCandidate?.text ?? "").trim() || null,
+      lastNoTriggerSkipReasons:
+        Array.isArray(analysis?.skipReasons) && analysis.skipReasons.length
+          ? analysis.skipReasons.map((entry) => String(entry).trim()).filter(Boolean).slice(0, 6)
+          : [reason],
+      lastNoTriggerRecoveryAction: analysis?.recoveryAction ?? null,
       lastNoTriggerTopUnread: Array.isArray(analysis?.topUnreadCandidates)
         ? analysis.topUnreadCandidates.map((candidate) => String(candidate.text ?? "").trim()).filter(Boolean).slice(0, 5)
         : []

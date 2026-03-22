@@ -253,7 +253,18 @@ export interface WatchHealth {
   scanStageStatus?: "running" | "failed" | null;
   scanStageStartedAt?: string | null;
   scanStageTimeoutMs?: number | null;
+  runnerType?: SurfaceRunnerType | null;
+  scene?: SceneType | null;
+  selectedTarget?: string | null;
+  lastSkipReasons?: string[];
+  lastRecoveryAction?: SurfaceRecoveryAction | null;
 }
+
+export type SurfaceRunnerType = "browser_native" | "desktop_ax" | "desktop_vlm";
+
+export type SceneType = "list" | "thread" | "foreign_view" | "signin" | "verification" | "unknown";
+
+export type SurfaceRecoveryAction = "recover_to_list" | "complete_signin" | "complete_verification" | "takeover" | "none";
 
 export interface ConversationThreadState {
   threadKey: string;

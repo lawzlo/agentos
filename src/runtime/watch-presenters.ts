@@ -52,6 +52,16 @@ export function buildWatchHealth(rule: WatchRule | null): WatchHealth | null {
       Number.isFinite(Number(rule.dedupeState?.scanStageTimeoutMs))
         ? Number(rule.dedupeState?.scanStageTimeoutMs)
         : null,
+    runnerType:
+      (String(rule.dedupeState?.lastNoTriggerRunnerType ?? "").trim() || null) as WatchHealth["runnerType"],
+    scene:
+      (String(rule.dedupeState?.lastNoTriggerScene ?? "").trim() || null) as WatchHealth["scene"],
+    selectedTarget: String(rule.dedupeState?.lastNoTriggerSelectedTarget ?? "").trim() || null,
+    lastSkipReasons: Array.isArray(rule.dedupeState?.lastNoTriggerSkipReasons)
+      ? rule.dedupeState.lastNoTriggerSkipReasons.map((entry) => String(entry).trim()).filter(Boolean)
+      : [],
+    lastRecoveryAction:
+      (String(rule.dedupeState?.lastNoTriggerRecoveryAction ?? "").trim() || null) as WatchHealth["lastRecoveryAction"],
     summary:
       rule.lastError ??
       (String(rule.dedupeState?.lastSummary ?? "").trim() || null) ??

@@ -10,6 +10,9 @@ import type {
   LivePackCategory,
   LivePackInfo,
   RuntimeStep,
+  SceneType,
+  SurfaceRecoveryAction,
+  SurfaceRunnerType,
   TaskRecord,
   WatchDetection,
   WatchDetectionMetadata,
@@ -51,6 +54,11 @@ export interface DesktopConversationPackAnalysis {
   composeCandidate: DesktopProbeCandidateSummary | null;
   sendCandidate: DesktopProbeCandidateSummary | null;
   topUnreadCandidates: DesktopProbeCandidateSummary[];
+  runnerType?: SurfaceRunnerType;
+  scene?: SceneType;
+  selectedTarget?: string | null;
+  skipReasons?: string[];
+  recoveryAction?: SurfaceRecoveryAction | null;
 }
 
 interface WeChatVisualThreadSummary {
@@ -82,6 +90,9 @@ interface WeChatVisualAnalysis {
     evidence: string;
     approxBox: WeChatVisualComposerBox | null;
   };
+  scene: SceneType;
+  sceneEvidence: string;
+  recommendedRecoveryAction: SurfaceRecoveryAction | null;
   targetThreadOpen?: boolean | null;
   prefillVisible?: boolean | null;
 }
@@ -109,6 +120,17 @@ function defaultDesktopAppTargetForLivePack(livePack: string | null | undefined)
     default:
       return null;
   }
+}
+
+export function runnerTypeForPack(packName: string | null | undefined, surface: LivePackSurface | null = null): SurfaceRunnerType {
+  const normalized = String(packName ?? "").trim();
+  if (normalized === "wechat-desktop") {
+    return "desktop_vlm";
+  }
+  if (surface === "desktop" || normalized.endsWith("-desktop")) {
+    return "desktop_ax";
+  }
+  return "browser_native";
 }
 
 interface LivePackActivationArgs {
@@ -1262,6 +1284,45 @@ function normalizeWeChatVisualAnalysis(raw: Record<string, unknown> | null | und
         }
       : null;
 
+  const normalizedScene = (() => {
+    const scene = String(raw.scene ?? "").trim().toLowerCase();
+    if (scene === "chat_list" || scene === "list") {
+      return "list" satisfies SceneType;
+    }
+    if (scene === "thread_open" || scene === "thread") {
+      return "thread" satisfies SceneType;
+    }
+    if (scene === "foreign_view") {
+      return "foreign_view" satisfies SceneType;
+    }
+    if (scene === "signin") {
+      return "signin" satisfies SceneType;
+    }
+    if (scene === "verification") {
+      return "verification" satisfies SceneType;
+    }
+    if (typeof raw.targetThreadOpen === "boolean" && raw.targetThreadOpen) {
+      return "thread" satisfies SceneType;
+    }
+    if (Boolean(composerRaw?.present) && String(raw.openThread ?? "").trim()) {
+      return "thread" satisfies SceneType;
+    }
+    if (unreadThreads.length > 0) {
+      return "list" satisfies SceneType;
+    }
+    return "unknown" satisfies SceneType;
+  })();
+  const recommendedRecoveryAction = (() => {
+    const action = String(raw.recommendedRecoveryAction ?? "").trim().toLowerCase();
+    if (action === "recover_to_list" || action === "complete_signin" || action === "complete_verification" || action === "takeover") {
+      return action as SurfaceRecoveryAction;
+    }
+    if (action === "none") {
+      return "none" as const;
+    }
+    return normalizedScene === "foreign_view" ? "recover_to_list" : null;
+  })();
+
   return {
     openThread: String(raw.openThread ?? "").trim() || null,
     visibleUnreadThreads: unreadThreads,
@@ -1270,6 +1331,9 @@ function normalizeWeChatVisualAnalysis(raw: Record<string, unknown> | null | und
       evidence: String(composerRaw?.evidence ?? "").trim(),
       approxBox: composerBox
     },
+    scene: normalizedScene,
+    sceneEvidence: String(raw.sceneEvidence ?? raw.openThread ?? composerRaw?.evidence ?? "").trim(),
+    recommendedRecoveryAction,
     targetThreadOpen:
       typeof raw.targetThreadOpen === "boolean"
         ? raw.targetThreadOpen
@@ -1313,6 +1377,79 @@ function normalizeWeChatVisualThreadGrounding(
     clickPoint,
     rowBox
   };
+}
+
+function inferGenericConversationScene(
+  analysis: Pick<DesktopConversationPackAnalysis, "unreadCandidate" | "composeCandidate" | "topUnreadCandidates">
+): SceneType {
+  if (analysis.composeCandidate) {
+    return "thread";
+  }
+  if (analysis.unreadCandidate || analysis.topUnreadCandidates.length > 0) {
+    return "list";
+  }
+  return "unknown";
+}
+
+function defaultSkipReasonsForAnalysis(
+  analysis: Pick<DesktopConversationPackAnalysis, "unreadCandidate" | "composeCandidate" | "topUnreadCandidates">
+): string[] {
+  if (!analysis.unreadCandidate && analysis.topUnreadCandidates.length === 0) {
+    return ["no_visible_thread"];
+  }
+  if (analysis.unreadCandidate && !analysis.composeCandidate) {
+    return [];
+  }
+  return [];
+}
+
+function withAnalysisSemantics(
+  analysis: DesktopConversationPackAnalysis,
+  overrides: Partial<Pick<DesktopConversationPackAnalysis, "runnerType" | "scene" | "selectedTarget" | "skipReasons" | "recoveryAction">> = {}
+): DesktopConversationPackAnalysis {
+  const scene = overrides.scene ?? inferGenericConversationScene(analysis);
+  return {
+    ...analysis,
+    runnerType: overrides.runnerType ?? runnerTypeForPack(analysis.packName),
+    scene,
+    selectedTarget:
+      overrides.selectedTarget
+      ?? analysis.unreadCandidate?.text
+      ?? analysis.composeCandidate?.text
+      ?? null,
+    skipReasons: overrides.skipReasons ?? defaultSkipReasonsForAnalysis(analysis),
+    recoveryAction: overrides.recoveryAction ?? null
+  };
+}
+
+function deriveWeChatSkipReasons({
+  vision,
+  unreadMatch
+}: {
+  vision: WeChatVisualAnalysis;
+  unreadMatch: ReturnType<typeof findWeChatVisionUnreadCandidate>;
+}): string[] {
+  const reasons: string[] = [];
+  if (vision.scene === "foreign_view") {
+    reasons.push("foreign_view");
+  }
+  if (!unreadMatch) {
+    if (vision.visibleUnreadThreads.some((thread) => !thread.shouldReply || !thread.replyable)) {
+      reasons.push("no_reply_worthy_thread");
+    } else {
+      reasons.push("no_visible_thread");
+    }
+  }
+  if (vision.scene === "thread" && !vision.composer.present) {
+    reasons.push("no_visible_composer");
+  }
+
+  return uniqueStrings([
+    ...reasons,
+    ...vision.visibleUnreadThreads
+      .filter((thread) => !thread.shouldReply || !thread.replyable)
+      .map((thread) => thread.replyReason || `skip:${thread.name}`)
+  ]).slice(0, 6);
 }
 
 function resolveWeChatGroundedOpenPoint(
@@ -1385,6 +1522,8 @@ async function analyzeWeChatDesktopVisualState({
   const payload = [
     "Analyze this WeChat desktop screenshot for grounded UI state.",
     "Only rely on what is visible in the image.",
+    "First classify the overall scene as one of: chat_list, thread_open, foreign_view, or unknown.",
+    "Use foreign_view for article readers, file previews, browser-like detail pages, minimized group views, official-account browsing views, or any screen where AgentOS should recover back to the chat list before replying.",
     "Focus on the left conversation sidebar for unread rows and the bottom-right composer area for reply input.",
     "Treat red unread count badges, red mention pills such as [@AI], red dots, or red unread markers on a row as unread evidence.",
     "Do not return a standalone red badge number like 33 as the thread name. Always return the conversation title text from the row.",
@@ -1417,6 +1556,15 @@ async function analyzeWeChatDesktopVisualState({
         schema: {
           type: "object",
           properties: {
+            scene: {
+              type: "string",
+              enum: ["chat_list", "thread_open", "foreign_view", "unknown"]
+            },
+            sceneEvidence: { type: "string" },
+            recommendedRecoveryAction: {
+              type: "string",
+              enum: ["recover_to_list", "complete_signin", "complete_verification", "takeover", "none"]
+            },
             openThread: { type: ["string", "null"] },
             visibleUnreadThreads: {
               type: "array",
@@ -1484,11 +1632,11 @@ async function analyzeWeChatDesktopVisualState({
             targetThreadOpen: { type: ["boolean", "null"] },
             prefillVisible: { type: ["boolean", "null"] }
           },
-          required: ["openThread", "visibleUnreadThreads", "composer"],
+          required: ["scene", "sceneEvidence", "recommendedRecoveryAction", "openThread", "visibleUnreadThreads", "composer"],
           additionalProperties: false
         },
         systemPrompt:
-          "You are a strict UI grounding model for AgentOS. Identify the currently open WeChat thread, any clearly visible unread conversation rows in the left sidebar, and the bottom composer area. Only mark a thread as unread when there is visible red badge, red mention tag, red unread count, or red highlight evidence on that row. For each unread row, estimate the clickable row box in normalized screenshot coordinates, classify the conversation, and decide whether AgentOS should reply right now. Return JSON only.",
+          "You are a strict UI grounding model for AgentOS. First classify the overall WeChat scene as chat_list, thread_open, foreign_view, or unknown. foreign_view means the agent is inside an article reader, file preview, browser-like detail page, minimized groups page, or any non-reply surface that should be recovered back to the chat list. Then identify the currently open WeChat thread, any clearly visible unread conversation rows in the left sidebar, and the bottom composer area. Only mark a thread as unread when there is visible red badge, red mention tag, red unread count, or red highlight evidence on that row. For each unread row, estimate the clickable row box in normalized screenshot coordinates, classify the conversation, and decide whether AgentOS should reply right now. Return JSON only.",
         userPrompt: payload,
         imagePath,
         temperature: 0
@@ -3197,31 +3345,31 @@ export function analyzeConversationPack(
 
   if (normalizedPackName === "slack-desktop") {
     const candidates = conversationCandidates(worldState, { desktopRequiresAccessibility: true });
-    return {
+    return withAnalysisSemantics({
       packName: normalizedPackName,
       foreground: isSlackDesktopForeground(worldState),
       unreadCandidate: summarizeProbeCandidate(findSlackUnreadCandidate(worldState)),
       composeCandidate: summarizeProbeCandidate(findSlackComposeCandidate(worldState, "desktop")),
       sendCandidate: summarizeProbeCandidate(findSlackSendCandidate(worldState, "desktop")),
       topUnreadCandidates: rankProbeCandidates(worldState, scoreSlackCandidate, candidates)
-    };
+    });
   }
 
   if (normalizedPackName === "slack-browser") {
     const candidates = conversationCandidates(worldState);
-    return {
+    return withAnalysisSemantics({
       packName: normalizedPackName,
       foreground: true,
       unreadCandidate: summarizeProbeCandidate(findSlackUnreadCandidate(worldState)),
       composeCandidate: summarizeProbeCandidate(findSlackComposeCandidate(worldState, "browser")),
       sendCandidate: summarizeProbeCandidate(findSlackSendCandidate(worldState, "browser")),
       topUnreadCandidates: rankProbeCandidates(worldState, scoreSlackCandidate, candidates)
-    };
+    });
   }
 
   if (normalizedPackName === "wechat-desktop") {
     const candidates = conversationCandidates(worldState);
-    return {
+    return withAnalysisSemantics({
       packName: normalizedPackName,
       foreground: isWeChatDesktopForeground(worldState),
       unreadCandidate: summarizeProbeCandidate(findWeChatUnreadCandidate(worldState)),
@@ -3231,55 +3379,57 @@ export function analyzeConversationPack(
         .slice(0, 5)
         .map((entry) => summarizeProbeCandidate(entry.candidate, entry.score))
         .filter((entry): entry is DesktopProbeCandidateSummary => Boolean(entry))
-    };
+    }, {
+      runnerType: "desktop_vlm"
+    });
   }
 
   if (normalizedPackName === "outlook-desktop") {
     const candidates = conversationCandidates(worldState, { desktopRequiresAccessibility: true });
-    return {
+    return withAnalysisSemantics({
       packName: normalizedPackName,
       foreground: isOutlookDesktopForeground(worldState),
       unreadCandidate: summarizeProbeCandidate(findOutlookUnreadCandidate(worldState)),
       composeCandidate: summarizeProbeCandidate(findOutlookComposeCandidate(worldState)),
       sendCandidate: summarizeProbeCandidate(findOutlookSendCandidate(worldState)),
       topUnreadCandidates: rankProbeCandidates(worldState, scoreOutlookCandidate, candidates)
-    };
+    });
   }
 
   if (normalizedPackName === "generic-mail-desktop") {
     const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
-    return {
+    return withAnalysisSemantics({
       packName: normalizedPackName,
       foreground: true,
       unreadCandidate: summarizeProbeCandidate(findMailUnreadCandidate(worldState)),
       composeCandidate: summarizeProbeCandidate(findMailComposeCandidate(worldState)),
       sendCandidate: summarizeProbeCandidate(findMailSendCandidate(worldState)),
       topUnreadCandidates: rankProbeCandidates(worldState, scoreMailCandidate, candidates)
-    };
+    });
   }
 
   if (normalizedPackName === "generic-mail-browser") {
     const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
-    return {
+    return withAnalysisSemantics({
       packName: normalizedPackName,
       foreground: true,
       unreadCandidate: summarizeProbeCandidate(findMailUnreadCandidate(worldState)),
       composeCandidate: summarizeProbeCandidate(findMailComposeCandidate(worldState)),
       sendCandidate: summarizeProbeCandidate(findMailSendCandidate(worldState)),
       topUnreadCandidates: rankProbeCandidates(worldState, scoreMailCandidate, candidates)
-    };
+    });
   }
 
   if (normalizedPackName === "boss-browser") {
     const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
-    return {
+    return withAnalysisSemantics({
       packName: normalizedPackName,
       foreground: true,
       unreadCandidate: summarizeProbeCandidate(findBossCandidate(worldState)),
       composeCandidate: null,
       sendCandidate: null,
       topUnreadCandidates: rankProbeCandidates(worldState, scoreBossCandidate, candidates)
-    };
+    });
   }
 
   return null;
@@ -3315,14 +3465,16 @@ export async function analyzeDesktopConversationPackWithVision({
     worldState
   }).catch(() => null);
   if (!vision) {
-    return {
+    return withAnalysisSemantics({
       packName: "wechat-desktop",
       foreground: base?.foreground ?? isWeChatDesktopForeground(worldState),
       unreadCandidate: null,
       composeCandidate: null,
       sendCandidate: null,
       topUnreadCandidates: []
-    };
+    }, {
+      runnerType: "desktop_vlm"
+    });
   }
 
   const wechatVisionFrame = await resolveDesktopVisionFrame(worldState, "WeChat");
@@ -3394,7 +3546,7 @@ export async function analyzeDesktopConversationPackWithVision({
     ].filter(Boolean)
   })) satisfies DesktopProbeCandidateSummary[];
 
-  return {
+  return withAnalysisSemantics({
     packName: "wechat-desktop",
     foreground: base?.foreground ?? isWeChatDesktopForeground(worldState),
     unreadCandidate: unreadMatch
@@ -3413,7 +3565,13 @@ export async function analyzeDesktopConversationPackWithVision({
     composeCandidate,
     sendCandidate: base?.sendCandidate ?? null,
     topUnreadCandidates: visionThreadCandidates
-  };
+  }, {
+    runnerType: "desktop_vlm",
+    scene: vision.scene,
+    selectedTarget: unreadMatch?.openTarget ?? vision.openThread ?? null,
+    skipReasons: deriveWeChatSkipReasons({ vision, unreadMatch }),
+    recoveryAction: vision.recommendedRecoveryAction
+  });
 }
 
 function createDocumentPack({

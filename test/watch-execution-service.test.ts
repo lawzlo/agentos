@@ -515,6 +515,9 @@ test("scan records no-trigger details for wechat desktop scans", async () => {
   assert.equal(storedRule.status, "watching");
   assert.equal(storedRule.dedupeState.lastNoTriggerReason, "no_detection");
   assert.equal(storedRule.dedupeState.lastNoTriggerStage, "detect_items");
+  assert.equal(storedRule.dedupeState.lastNoTriggerRunnerType, "desktop_vlm");
+  assert.equal(storedRule.dedupeState.lastNoTriggerScene, "unknown");
+  assert.deepEqual(storedRule.dedupeState.lastNoTriggerSkipReasons, ["no_visible_thread"]);
   assert.equal(storedRule.dedupeState.lastNoTriggerUnreadCandidate, null);
   assert.deepEqual(storedRule.dedupeState.lastNoTriggerTopUnread, []);
 });
@@ -629,4 +632,7 @@ test("scan records stage details when a watch stage times out", async () => {
   assert.equal(health?.scanStage, "detect_items");
   assert.equal(health?.scanStageStatus, "failed");
   assert.equal(health?.scanStageTimeoutMs, 10);
+  assert.equal(health?.runnerType, null);
+  assert.equal(health?.scene, null);
+  assert.deepEqual(health?.lastSkipReasons, []);
 });

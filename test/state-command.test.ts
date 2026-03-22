@@ -82,6 +82,11 @@ test("collectSurfaceState reports a ready desktop conversation surface with cand
   assert.equal(report.ready, true);
   assert.equal(report.readinessState, "ready");
   assert.deepEqual(report.blockers, []);
+  assert.equal(report.runnerType, "desktop_vlm");
+  assert.equal(report.scene, "thread");
+  assert.equal(report.selectedTarget, "Official Accounts");
+  assert.deepEqual(report.skipReasons, []);
+  assert.equal(report.recoverySuggested, null);
   assert.equal(report.threadCandidates[0]?.text, "Official Accounts");
   assert.equal(report.composeCandidate?.text, "输入");
 });
@@ -130,5 +135,9 @@ test("collectSurfaceState maps browser sign-in pages into explicit blockers", as
   assert.equal(report.ready, false);
   assert.equal(report.readinessState, "blocked_signin");
   assert.deepEqual(report.blockers, ["blocked_signin"]);
+  assert.equal(report.runnerType, "browser_native");
+  assert.equal(report.scene, "signin");
+  assert.equal(report.recoverySuggested, "complete_signin");
+  assert.deepEqual(report.skipReasons, ["blocked_signin"]);
   assert.equal(report.manualIntervention?.kind, "login");
 });
