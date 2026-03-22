@@ -2,9 +2,10 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 import { boolOption, config, print, type CliOptions } from "../cli-utils.js";
+import { AgentModelClient } from "../../src/runtime/model-client.js";
 import { DesktopSurfaceAdapter, type DesktopSurfaceTimeoutConfig } from "../../src/runtime/adapters/desktop-surface.js";
 import {
-  analyzeDesktopConversationPack,
+  analyzeDesktopConversationPackWithVision,
   type DesktopConversationPackAnalysis,
   type DesktopProbeCandidateSummary
 } from "../../src/runtime/live-pack-registry.js";
@@ -76,6 +77,7 @@ export interface DesktopProbeDeps {
   adapter?: DesktopProbeAdapter;
   workspace?: WorkspaceProfile;
   nowIso?: () => string;
+  modelClient?: Pick<AgentModelClient, "supportsImageJson" | "analyzeImageJson">;
 }
 
 function safeName(value: string) {
@@ -186,6 +188,7 @@ function createProbeTimeouts(request: DesktopProbeRequest): Partial<DesktopSurfa
 function createProbeAdapter(request: DesktopProbeRequest): DesktopProbeAdapter {
   return new DesktopSurfaceAdapter({
     dataDir: config.dataDir,
+    visualModelClient: new AgentModelClient(config.model),
     timeouts: createProbeTimeouts(request),
     artifactStore: {
       async registerExistingFile({
@@ -291,6 +294,7 @@ export async function collectDesktopProbe(request: DesktopProbeRequest, deps: De
   const nowIso = deps.nowIso ?? (() => new Date().toISOString());
   const adapter = deps.adapter ?? createProbeAdapter(request);
   const workspace = deps.workspace ?? (await createProbeWorkspace(request.appName, request.workspaceName, nowIso));
+  const modelClient = deps.modelClient ?? new AgentModelClient(config.model);
   const task = buildProbeTask(request.appName, nowIso);
 
   try {
@@ -363,7 +367,11 @@ export async function collectDesktopProbe(request: DesktopProbeRequest, deps: De
           } as WorldState)
         : worldState;
     const packAnalysis = request.packName
-      ? analyzeDesktopConversationPack(request.packName, packAnalysisWorldState)
+      ? await analyzeDesktopConversationPackWithVision({
+          packName: request.packName,
+          worldState: packAnalysisWorldState,
+          modelClient
+        })
       : null;
     const appContext = (worldState.appContext ?? {}) as Record<string, unknown>;
     const accessibility = (appContext.accessibility ?? null) as { elements?: unknown[] } | null;

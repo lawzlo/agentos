@@ -149,7 +149,8 @@ export class ControlPlane {
       }),
       desktop: new DesktopSurfaceAdapter({
         artifactStore: this.artifactStore,
-        dataDir: config.dataDir
+        dataDir: config.dataDir,
+        visualModelClient: this.modelClient
       })
     });
     this.sentinel = new SentinelAgent();

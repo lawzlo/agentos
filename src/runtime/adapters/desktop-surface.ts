@@ -7,6 +7,7 @@ import { WindowsHostBridge } from "../host-bridges/windows-bridge.js";
 import { createInteractionCandidate, createWorldState, normalizeBounds, normalizeOcrBlocks, summarizeRecentActions } from "../world-state.js";
 import type { BoundsLike } from "../world-state.js";
 import type { SidecarAccessibilityElementInfo, SidecarAccessibilitySnapshotResult } from "../../types/native-sidecar.js";
+import type { AgentModelClient } from "../model-client.js";
 
 export interface DesktopSurfaceTimeoutConfig {
   focusMs: number;
@@ -400,7 +401,8 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
   artifactStore: any;
   bridge: any;
   timeouts: DesktopSurfaceTimeoutConfig;
-  constructor({ artifactStore, dataDir, timeouts = {} }) {
+  visualModelClient: Pick<AgentModelClient, "supportsImageJson" | "analyzeImageJson"> | null;
+  constructor({ artifactStore, dataDir, timeouts = {}, visualModelClient = null }) {
     super("desktop");
     this.artifactStore = artifactStore;
     this.bridge = pickBridge({ dataDir });
@@ -408,6 +410,7 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
       ...DEFAULT_DESKTOP_SURFACE_TIMEOUTS,
       ...(timeouts ?? {})
     };
+    this.visualModelClient = visualModelClient;
   }
 
   #requireBridge() {
@@ -1047,6 +1050,56 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
         return { ok: false, details };
       }
       details.regionTextAnyMatch = matchedCheck;
+    }
+
+    const visualCheck = (check.visualCheck ?? null) as
+      | { type?: string; targetThread?: string; replyPreview?: string }
+      | null;
+    if (visualCheck?.type && this.visualModelClient?.supportsImageJson?.()) {
+      capture ??= await this.capture({ task, workspace, traceId, label: "verify-vision" });
+      const targetThread = String(visualCheck.targetThread ?? "").trim();
+      const replyPreview = String(visualCheck.replyPreview ?? "").trim();
+      const result = await this.visualModelClient.analyzeImageJson<{
+        openThread: string | null;
+        targetThreadOpen?: boolean | null;
+        prefillVisible?: boolean | null;
+      }>({
+        schemaName: `agentos_${String(visualCheck.type)}_verify`,
+        schema: {
+          type: "object",
+          properties: {
+            openThread: { type: ["string", "null"] },
+            targetThreadOpen: { type: ["boolean", "null"] },
+            prefillVisible: { type: ["boolean", "null"] }
+          },
+          required: ["openThread"],
+          additionalProperties: false
+        },
+        systemPrompt:
+          "You are a strict desktop UI verifier for AgentOS. Inspect the WeChat desktop screenshot and return JSON only.",
+        userPrompt:
+          visualCheck.type === "wechat_prefill"
+            ? [
+                "Verify whether the current WeChat thread matches the target thread and whether the reply preview is visible in the bottom composer.",
+                `Target thread: ${targetThread}`,
+                `Reply preview: ${replyPreview}`
+              ].join("\n")
+            : [
+                "Verify whether the current WeChat screenshot is showing the target thread as the active open conversation.",
+                `Target thread: ${targetThread}`
+              ].join("\n"),
+        imagePath: capture.path,
+        temperature: 0
+      });
+      details.visualCheck = result;
+      if (visualCheck.type === "wechat_thread" && result.targetThreadOpen === false) {
+        return { ok: false, details };
+      }
+      if (visualCheck.type === "wechat_prefill") {
+        if (result.targetThreadOpen === false || result.prefillVisible === false) {
+          return { ok: false, details };
+        }
+      }
     }
 
     const targetText = check.textVisible ?? check.targetVisible?.text;

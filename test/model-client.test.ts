@@ -2,6 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import { AddressInfo } from "node:net";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
 import { AgentModelClient } from "../src/runtime/model-client.js";
 
@@ -146,6 +149,82 @@ test("anthropic model client uses the Messages API", async () => {
     assert.match(String((body.messages as Array<{ content?: string }>)?.[0]?.content ?? ""), /JSON Schema:/);
   } finally {
     await server.close();
+  }
+});
+
+test("anthropic model client can analyze an image into structured JSON", async () => {
+  let captured: Record<string, unknown> | null = null;
+  const server = await startCaptureServer((request) => {
+    captured = request as Record<string, unknown>;
+    return {
+      payload: {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              openThread: "Tan",
+              visibleUnreadThreads: [{ name: "Tan", evidence: "badge", approxSidebarY: 0.2 }],
+              composer: {
+                present: true,
+                evidence: "bottom input",
+                approxBox: { x: 0.3, y: 0.84, width: 0.6, height: 0.12 }
+              }
+            })
+          }
+        ]
+      }
+    };
+  });
+
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agentos-model-image-"));
+  const imagePath = path.join(tempDir, "wechat.png");
+
+  try {
+    await fs.writeFile(imagePath, Buffer.from("89504e470d0a1a0a", "hex"));
+    const client = new AgentModelClient({
+      provider: "anthropic",
+      baseUrl: server.baseUrl,
+      apiKey: "sk-ant-test",
+      name: "claude-opus-4-6",
+      tier: "strong",
+      timeoutMs: 5000
+    });
+
+    const payload = await client.analyzeImageJson<{
+      openThread: string | null;
+      visibleUnreadThreads: unknown[];
+      composer: Record<string, unknown>;
+    }>({
+      schemaName: "agentos_wechat_visual",
+      schema: {
+        type: "object",
+        properties: {
+          openThread: { type: ["string", "null"] },
+          visibleUnreadThreads: { type: "array" },
+          composer: { type: "object" }
+        },
+        required: ["openThread", "visibleUnreadThreads", "composer"],
+        additionalProperties: false
+      },
+      systemPrompt: "Analyze the image and return structured UI data.",
+      userPrompt: "Find the unread thread and composer.",
+      imagePath
+    });
+
+    assert.equal(payload.openThread, "Tan");
+    assert.equal(Array.isArray(payload.visibleUnreadThreads), true);
+    const body = captured?.body as Record<string, unknown>;
+    const messages = (body.messages as Array<{ content?: Array<Record<string, unknown>> }>) ?? [];
+    const content = messages[0]?.content ?? [];
+    const imageBlock = content.find((entry) => entry.type === "image") as
+      | { source?: { media_type?: string; data?: string } }
+      | undefined;
+    assert.equal(body.model, "claude-opus-4-6");
+    assert.equal(imageBlock?.source?.media_type, "image/png");
+    assert.equal(typeof imageBlock?.source?.data, "string");
+  } finally {
+    await server.close();
+    await fs.rm(tempDir, { recursive: true, force: true });
   }
 });
 

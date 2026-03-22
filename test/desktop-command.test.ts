@@ -5,6 +5,15 @@ import { createTempDir } from "./helpers.js";
 import { collectDesktopProbe, type DesktopProbeRequest } from "../bin/commands/desktop-command.js";
 import type { WorkspaceProfile, WorldState } from "../src/types/runtime-schema.js";
 
+const noVisionModelClient = {
+  supportsImageJson() {
+    return false;
+  },
+  async analyzeImageJson() {
+    throw new Error("vision should not run in this test");
+  }
+};
+
 function createWorkspace(rootPath: string): WorkspaceProfile {
   const timestamp = new Date().toISOString();
   return {
@@ -125,6 +134,7 @@ test("collectDesktopProbe summarizes a WeChat world state and pack analysis", as
 
   const report = await collectDesktopProbe(request, {
     workspace,
+    modelClient: noVisionModelClient,
     adapter: {
       async focus({ step }) {
         focusCalls.push(String(step?.params?.name ?? ""));
@@ -193,6 +203,7 @@ test("collectDesktopProbe can inspect raw desktop state without a pack analysis"
     },
     {
       workspace,
+      modelClient: noVisionModelClient,
       adapter: {
         async focus() {
           return { focused: "Terminal" };
@@ -212,6 +223,103 @@ test("collectDesktopProbe can inspect raw desktop state without a pack analysis"
   assert.equal(report.visibleTextPreview[0], "Terminal");
 });
 
+test("collectDesktopProbe can use vision analysis to identify WeChat unread threads and composer", async () => {
+  const rootPath = await createTempDir("agentos-desktop-probe-");
+  const workspace = createWorkspace(rootPath);
+  const worldState: WorldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: workspace.id,
+    appContext: {
+      appName: "WeChat",
+      windows: [
+        {
+          ownerName: "WeChat",
+          windowName: "WeChat",
+          bounds: { x: 100, y: 40, width: 900, height: 700, centerX: 550, centerY: 390 }
+        }
+      ],
+      accessibilityCandidateCount: 0,
+      ocrAvailable: true,
+      ocrError: null
+    },
+    capture: {
+      id: "artifact-1",
+      taskId: "probe-1",
+      traceId: null,
+      kind: "screenshot",
+      label: "Desktop probe",
+      path: `${rootPath}/artifacts/probe.png`,
+      metadata: {},
+      createdAt: new Date().toISOString()
+    },
+    ocrBlocks: [],
+    interactionCandidates: [
+      {
+        id: "thread-wechat-pay",
+        surface: "desktop",
+        kind: "text",
+        text: "WeChat Pay...",
+        role: "text",
+        bounds: { x: 220, y: 400, width: 120, height: 24, centerX: 280, centerY: 412 },
+        confidence: 0.9,
+        sourceHints: { source: "ocr-wechat-list" },
+        isInteractive: true
+      }
+    ],
+    visibleText: "WeChat\nWeChat Pay...",
+    recentActions: [],
+    summary: "WeChat",
+    timestamp: new Date().toISOString()
+  };
+
+  const report = await collectDesktopProbe(
+    {
+      appName: "WeChat",
+      packName: "wechat-desktop",
+      workspaceName: workspace.name,
+      sampleLimit: 4,
+      timeoutMs: 800,
+      requireAccessibility: false,
+      waitReady: false
+    },
+    {
+      workspace,
+      modelClient: {
+        supportsImageJson() {
+          return true;
+        },
+        async analyzeImageJson() {
+          return {
+            openThread: "[25P5] 自娱自乐群 (52)",
+            visibleUnreadThreads: [
+              { name: "WeChat Pay...", evidence: "badge", approxSidebarY: 0.54 }
+            ],
+            composer: {
+              present: true,
+              evidence: "bottom input area",
+              approxBox: { x: 0.31, y: 0.85, width: 0.66, height: 0.12 }
+            }
+          };
+        }
+      } as never,
+      adapter: {
+        async focus() {
+          return { focused: "WeChat" };
+        },
+        async observe() {
+          return worldState;
+        },
+        async shutdown() {}
+      }
+    }
+  );
+
+  assert.equal(report.packAnalysis?.unreadCandidate?.text, "WeChat Pay...");
+  assert.equal(report.packAnalysis?.unreadCandidate?.source, "ocr-wechat-list");
+  assert.equal(report.packAnalysis?.composeCandidate?.source, "vision");
+});
+
 test("collectDesktopProbe can analyze a target app even when the current frontmost app is different", async () => {
   const rootPath = await createTempDir("agentos-desktop-probe-");
   const workspace = createWorkspace(rootPath);
@@ -227,6 +335,7 @@ test("collectDesktopProbe can analyze a target app even when the current frontmo
     },
     {
       workspace,
+      modelClient: noVisionModelClient,
       adapter: {
         async focus() {
           return { focused: "WeChat" };
@@ -330,6 +439,7 @@ test("collectDesktopProbe falls back to OCR world state when target app inspecti
     },
     {
       workspace,
+      modelClient: noVisionModelClient,
       adapter: {
         async focus() {
           return { focused: "WeChat" };
@@ -419,6 +529,7 @@ test("collectDesktopProbe does not treat message-count body text as a WeChat com
     },
     {
       workspace,
+      modelClient: noVisionModelClient,
       adapter: {
         async focus() {
           return { focused: "WeChat" };
@@ -511,6 +622,7 @@ test("collectDesktopProbe does not report a WeChat unread candidate without unre
     },
     {
       workspace,
+      modelClient: noVisionModelClient,
       adapter: {
         async focus() {
           return { focused: "WeChat" };

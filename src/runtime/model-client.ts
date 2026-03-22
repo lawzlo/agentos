@@ -1,3 +1,6 @@
+import fs from "node:fs/promises";
+import path from "node:path";
+
 import type {
   AgentModelConfig,
   AgentModelProvider,
@@ -11,6 +14,15 @@ interface JsonSchemaRequest<TPayload> {
   schema: Record<string, unknown>;
   systemPrompt: string;
   userPayload: TPayload;
+  temperature?: number;
+}
+
+interface ImageJsonSchemaRequest<TResponse> {
+  schemaName: string;
+  schema: Record<string, unknown>;
+  systemPrompt: string;
+  userPrompt: string;
+  imagePath: string;
   temperature?: number;
 }
 
@@ -100,6 +112,19 @@ function anthropicJsonPrompt(schemaName: string, schema: Record<string, unknown>
   ].join("\n\n");
 }
 
+function imageMediaType(filePath: string): string {
+  const extension = path.extname(String(filePath ?? "")).trim().toLowerCase();
+  switch (extension) {
+    case ".jpg":
+    case ".jpeg":
+      return "image/jpeg";
+    case ".webp":
+      return "image/webp";
+    default:
+      return "image/png";
+  }
+}
+
 export class AgentModelClient {
   config: AgentModelConfig;
   constructor(config: AgentModelConfig) {
@@ -108,6 +133,10 @@ export class AgentModelClient {
 
   isConfigured(): boolean {
     return Boolean(this.config.apiKey && this.config.name && this.config.baseUrl);
+  }
+
+  supportsImageJson(): boolean {
+    return this.isConfigured() && this.config.provider === "anthropic";
   }
 
   describe(): ModelClientStatus {
@@ -159,6 +188,79 @@ export class AgentModelClient {
       userPayload,
       temperature
     });
+  }
+
+  async analyzeImageJson<TResponse>({
+    schemaName,
+    schema,
+    systemPrompt,
+    userPrompt,
+    imagePath,
+    temperature = 0
+  }: ImageJsonSchemaRequest<TResponse>): Promise<TResponse> {
+    if (!this.isConfigured()) {
+      throw new Error("Model client is not configured.");
+    }
+
+    if (this.config.provider !== "anthropic") {
+      throw new Error(`Image JSON analysis is not supported for provider ${this.config.provider}.`);
+    }
+
+    const imageData = await fs.readFile(imagePath, { encoding: "base64" });
+    const response = await fetch(`${String(this.config.baseUrl).replace(/\/$/, "")}/v1/messages`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": String(this.config.apiKey),
+        "anthropic-version": "2023-06-01"
+      },
+      body: JSON.stringify({
+        model: this.config.name,
+        max_tokens: 2048,
+        temperature,
+        system: systemPrompt,
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: [
+                  `Schema name: ${schemaName}`,
+                  "Return only valid JSON that matches this JSON Schema exactly.",
+                  "Do not include markdown fences, prose, or extra keys.",
+                  `JSON Schema:\n${JSON.stringify(schema)}`,
+                  userPrompt
+                ].join("\n\n")
+              },
+              {
+                type: "image",
+                source: {
+                  type: "base64",
+                  media_type: imageMediaType(imagePath),
+                  data: imageData
+                }
+              }
+            ]
+          }
+        ]
+      }),
+      signal: AbortSignal.timeout(this.config.timeoutMs)
+    });
+
+    if (!response.ok) {
+      throw new Error(`image model request failed: ${response.status}`);
+    }
+
+    const payload = (await response.json()) as {
+      content?: Array<{ type?: string; text?: string }>;
+    };
+    const content = joinAnthropicText(payload);
+    if (!content) {
+      throw new Error(`${schemaName} model returned no content`);
+    }
+
+    return parseJsonPayload<TResponse>(content, schemaName);
   }
 
   async #requestOpenAICompatibleJson<TPayload, TResponse>({

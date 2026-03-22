@@ -500,6 +500,79 @@ test("desktop capture falls back to a full-screen capture when window capture fa
   assert.equal(worldState.appContext?.captureWindowNumber ?? null, null);
 });
 
+test("desktop verify can use visual checks for WeChat thread and prefill validation", async () => {
+  const adapter = new DesktopSurfaceAdapter({
+    artifactStore: {
+      registerExistingFile(payload: Record<string, unknown>) {
+        return {
+          id: "artifact_test",
+          taskId: String(payload.taskId ?? "task_test"),
+          traceId: payload.traceId ?? null,
+          kind: "screenshot",
+          label: String(payload.label ?? "desktop-capture"),
+          path: String(payload.filePath),
+          metadata: payload.metadata ?? {},
+          createdAt: new Date().toISOString()
+        };
+      }
+    },
+    dataDir: "/tmp/agentos-test",
+    visualModelClient: {
+      supportsImageJson() {
+        return true;
+      },
+      async analyzeImageJson() {
+        return {
+          openThread: "Tan",
+          targetThreadOpen: true,
+          prefillVisible: true
+        };
+      }
+    } as never
+  }) as DesktopSurfaceAdapter & { bridge: Record<string, unknown> };
+
+  adapter.bridge = {
+    async captureScreen() {
+      return { ok: true };
+    },
+    async getFrontmostApp() {
+      return { appName: "WeChat" };
+    },
+    async listWindows() {
+      return { windows: [] };
+    },
+    async getPermissionsStatus() {
+      return { accessibility: true, screenRecording: true };
+    },
+    async ocrImage() {
+      return { observations: [] };
+    }
+  };
+
+  const result = await adapter.verify({
+    task: { id: "task_test" },
+    workspace: {
+      id: "workspace_test",
+      artifactsPath: "/tmp",
+      rootPath: "/tmp"
+    },
+    traceId: "trace_test",
+    expectation: {
+      frontmostApp: "WeChat",
+      visualCheck: {
+        type: "wechat_prefill",
+        targetThread: "Tan",
+        replyPreview: "好的，我来处理"
+      }
+    }
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.details.frontmostApp, "WeChat");
+  assert.equal(result.details.visualCheck?.targetThreadOpen, true);
+  assert.equal(result.details.visualCheck?.prefillVisible, true);
+});
+
 test("desktop waitForAppReady waits for a stable frontmost app with accessibility candidates", async () => {
   const { adapter } = createObserveAdapter();
   let frontmostReads = 0;

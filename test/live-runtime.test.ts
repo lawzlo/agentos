@@ -2077,17 +2077,21 @@ test("wechat desktop pack can detect unread conversations and build reply steps 
   assert.equal(Array.isArray(context?.taskSpec?.steps), true);
   const firstStepTarget = context?.taskSpec?.steps?.[0]?.params?.target as { id?: string } | undefined;
   const firstStepExpect = context?.taskSpec?.steps?.[0]?.expect as {
-    regionTextAnyVisible?: Array<{ text?: string }>;
+    visualCheck?: { type?: string; targetThread?: string };
   } | undefined;
   const typeStepTarget = context?.taskSpec?.steps?.[2]?.params?.target as { id?: string } | undefined;
-  const typeStepExpect = context?.taskSpec?.steps?.[2]?.expect as { regionTextVisible?: { text?: string } } | undefined;
+  const typeStepExpect = context?.taskSpec?.steps?.[2]?.expect as {
+    visualCheck?: { type?: string; replyPreview?: string };
+  } | undefined;
   const sendStepTarget = context?.taskSpec?.steps?.[3]?.params?.target as { id?: string } | undefined;
   assert.equal(context?.taskSpec?.steps?.[0]?.action, "clickTarget");
   assert.equal(firstStepTarget?.id, "thread-zhangsan");
-  assert.equal(firstStepExpect?.regionTextAnyVisible?.[0]?.text, "{{threadTitle}}");
+  assert.equal(firstStepExpect?.visualCheck?.type, "wechat_thread");
+  assert.equal(firstStepExpect?.visualCheck?.targetThread, "{{threadTitle}}");
   assert.equal(context?.taskSpec?.steps?.[2]?.params?.text, "{{typeText}}");
   assert.equal(typeStepTarget?.id, "compose");
-  assert.equal(typeStepExpect?.regionTextVisible?.text, "{{typeTextPreview}}");
+  assert.equal(typeStepExpect?.visualCheck?.type, "wechat_prefill");
+  assert.equal(typeStepExpect?.visualCheck?.replyPreview, "{{typeTextPreview}}");
   assert.equal(sendStepTarget?.id, "send");
 });
 
@@ -2257,14 +2261,18 @@ test("wechat desktop pack can fall back to clicking the composer area when no co
   assert.equal(context?.inputs?.threadTitle, "Tan");
   const fallbackFirstStepTarget = context?.taskSpec?.steps?.[0]?.params?.target as { id?: string } | undefined;
   const fallbackFirstStepExpect = context?.taskSpec?.steps?.[0]?.expect as {
-    regionTextAnyVisible?: Array<{ text?: string }>;
+    visualCheck?: { type?: string; targetThread?: string };
   } | undefined;
-  const fallbackTypeStepExpect = context?.taskSpec?.steps?.[2]?.expect as { regionTextVisible?: { text?: string } } | undefined;
+  const fallbackTypeStepExpect = context?.taskSpec?.steps?.[2]?.expect as {
+    visualCheck?: { type?: string; replyPreview?: string };
+  } | undefined;
   assert.equal(fallbackFirstStepTarget?.id, "thread-tan");
-  assert.equal(fallbackFirstStepExpect?.regionTextAnyVisible?.[0]?.text, "{{threadTitle}}");
+  assert.equal(fallbackFirstStepExpect?.visualCheck?.type, "wechat_thread");
+  assert.equal(fallbackFirstStepExpect?.visualCheck?.targetThread, "{{threadTitle}}");
   assert.equal(context?.taskSpec?.steps?.[1]?.action, "clickAt");
   assert.equal(context?.taskSpec?.steps?.[2]?.action, "typeText");
-  assert.equal(fallbackTypeStepExpect?.regionTextVisible?.text, "{{typeTextPreview}}");
+  assert.equal(fallbackTypeStepExpect?.visualCheck?.type, "wechat_prefill");
+  assert.equal(fallbackTypeStepExpect?.visualCheck?.replyPreview, "{{typeTextPreview}}");
 });
 
 test("wechat desktop pack can fall back to OCR-only detections when accessibility candidates are unavailable", async () => {
@@ -2449,6 +2457,118 @@ test("wechat desktop pack can fall back to OCR-only detections when accessibilit
   assert.equal(Number(context?.inputs?.composeY ?? 0) > 0, true);
   assert.equal(context?.inputs?.sendTarget, "发送");
   assert.equal(context?.metadata?.threadKey, "李四");
+});
+
+test("wechat desktop pack can use visual model analysis to identify unread threads", async () => {
+  const worldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-wechat-vision",
+    appContext: {
+      appName: "WeChat",
+      windows: [
+        {
+          ownerName: "WeChat",
+          windowName: "WeChat",
+          bounds: { x: 100, y: 40, width: 900, height: 700, centerX: 550, centerY: 390 }
+        }
+      ]
+    },
+    capture: {
+      id: "artifact-vision",
+      taskId: "task-vision",
+      traceId: null,
+      kind: "screenshot",
+      label: "WeChat vision state",
+      path: "/tmp/wechat-vision.png",
+      metadata: {},
+      createdAt: new Date().toISOString()
+    },
+    ocrBlocks: [],
+    interactionCandidates: [
+      {
+        id: "thread-wechat-pay",
+        surface: "desktop",
+        kind: "text",
+        text: "WeChat Pay...",
+        role: "text",
+        bounds: { x: 210, y: 398, width: 120, height: 24, centerX: 270, centerY: 410 },
+        confidence: 0.9,
+        sourceHints: { source: "ocr-wechat-list" },
+        isInteractive: true
+      }
+    ],
+    visibleText: "WeChat\nWeChat Pay...",
+    recentActions: [],
+    summary: "WeChat",
+    timestamp: new Date().toISOString()
+  };
+
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({})
+  });
+  const pack = registry.get("wechat-desktop");
+  const rule: WatchRule = {
+    id: "watch-wechat-vision-detect",
+    goal: "Always watch WeChat and reply to unread conversations",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "wechat-desktop-main",
+    skillName: null,
+    appTarget: "WeChat",
+    livePack: "wechat-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-wechat-vision",
+    name: "wechat-desktop-main",
+    rootPath: "/tmp/wechat-desktop-main",
+    profilePath: "/tmp/wechat-desktop-main/profile",
+    downloadsPath: "/tmp/wechat-desktop-main/downloads",
+    artifactsPath: "/tmp/wechat-desktop-main/artifacts",
+    scratchPath: "/tmp/wechat-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: worldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        analyzeImageJson: async () => ({
+          openThread: "[25P5] 自娱自乐群 (52)",
+          visibleUnreadThreads: [{ name: "WeChat Pay...", evidence: "badge", approxSidebarY: 0.54 }],
+          composer: {
+            present: true,
+            evidence: "bottom input area",
+            approxBox: { x: 0.31, y: 0.85, width: 0.66, height: 0.12 }
+          }
+        })
+      }
+    } as never
+  });
+
+  assert.equal(detection?.summary, "WeChat Pay...");
+  assert.equal(detection?.inputs?.openTarget, "WeChat Pay...");
+  assert.equal(
+    Array.isArray((detection?.metadata?.visualAnalysis as { visibleUnreadThreads?: unknown[] } | undefined)?.visibleUnreadThreads),
+    true
+  );
 });
 
 test("wechat desktop OCR scoring downranks dates and URL snippets in the conversation list", async () => {
