@@ -1000,6 +1000,55 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
       details.regionTextMatch = match;
     }
 
+    const regionTextAnyVisible = Array.isArray(check.regionTextAnyVisible)
+      ? (check.regionTextAnyVisible as Array<{
+          text?: string;
+          region?: { x?: number; y?: number; width?: number; height?: number };
+          scale?: number;
+        }>)
+      : [];
+    if (regionTextAnyVisible.length > 0) {
+      capture ??= await this.capture({ task, workspace, traceId, label: "verify-region-text-any" });
+      const attemptedChecks: Array<Record<string, unknown>> = [];
+      let matchedCheck: Record<string, unknown> | null = null;
+      for (const entry of regionTextAnyVisible) {
+        const text = String(entry?.text ?? "").trim();
+        if (!text) {
+          continue;
+        }
+        const region = entry.region ?? null;
+        const scale = Number(entry.scale ?? 0);
+        const result = await bridge.ocrImage(capture.path, {
+          ...(region ? { region } : {}),
+          ...(Number.isFinite(scale) && scale > 0 ? { scale } : {})
+        });
+        const observations = Array.isArray(result?.observations) ? result.observations : [];
+        const match = observations.find((observation) => observationMatchesQuery(observation?.text, text)) ?? null;
+        attemptedChecks.push({
+          text,
+          ...(region ? { region } : {}),
+          ...(Number.isFinite(scale) && scale > 0 ? { scale } : {}),
+          preview: uniqueStrings(observations.map((observation) => observation?.text)).slice(0, 8),
+          matched: Boolean(match)
+        });
+        if (match) {
+          matchedCheck = {
+            text,
+            ...(region ? { region } : {}),
+            ...(Number.isFinite(scale) && scale > 0 ? { scale } : {}),
+            match
+          };
+          break;
+        }
+      }
+      details.regionTextAnyVisible = Boolean(matchedCheck);
+      details.regionTextAnyChecks = attemptedChecks;
+      if (!matchedCheck) {
+        return { ok: false, details };
+      }
+      details.regionTextAnyMatch = matchedCheck;
+    }
+
     const targetText = check.textVisible ?? check.targetVisible?.text;
     if (targetText) {
       capture ??= await this.capture({ task, workspace, traceId, label: "verify-text" });

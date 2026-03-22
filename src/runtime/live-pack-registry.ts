@@ -752,11 +752,18 @@ const WECHAT_COMPOSER_REGION = {
 function wechatThreadOpenedExpectation(): Record<string, unknown> {
   return {
     frontmostApp: "WeChat",
-    regionTextVisible: {
-      text: "{{threadTitle}}",
-      region: WECHAT_THREAD_HEADER_REGION,
-      scale: 2.2
-    }
+    regionTextAnyVisible: [
+      {
+        text: "{{threadTitle}}",
+        region: WECHAT_THREAD_HEADER_REGION,
+        scale: 2.2
+      },
+      {
+        text: "{{threadTitle}}",
+        region: WECHAT_THREAD_PANE_REGION,
+        scale: 2.2
+      }
+    ]
   };
 }
 

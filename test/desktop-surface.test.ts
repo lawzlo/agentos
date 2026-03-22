@@ -397,6 +397,68 @@ test("desktop verify fails when region text is not visible in the requested area
   assert.deepEqual(result.details.regionTextPreview, ["Official Accounts"]);
 });
 
+test("desktop verify supports matching region text across multiple candidate regions", async () => {
+  const { adapter } = createObserveAdapter();
+  adapter.bridge.getFrontmostApp = async () => ({ appName: "WeChat" });
+  adapter.bridge.ocrImage = async (
+    _path: string,
+    options?: { region?: { x?: number; y?: number; width?: number; height?: number } }
+  ) => {
+    const regionHeight = Number(options?.region?.height ?? 0);
+    if (regionHeight <= 0.2) {
+      return {
+        observations: [
+          {
+            text: "Official Accounts",
+            confidence: 0.95,
+            box: { x: 120, y: 140, width: 180, height: 28, centerX: 210, centerY: 154 }
+          }
+        ]
+      };
+    }
+    return {
+      observations: [
+        {
+          text: "Tan",
+          confidence: 0.96,
+          box: { x: 620, y: 84, width: 60, height: 24, centerX: 650, centerY: 96 }
+        }
+      ]
+    };
+  };
+
+  const result = await adapter.verify({
+    task: { id: "task_test" },
+    workspace: {
+      id: "workspace_test",
+      artifactsPath: "/tmp",
+      rootPath: "/tmp"
+    },
+    traceId: "trace_test",
+    expectation: {
+      frontmostApp: "WeChat",
+      regionTextAnyVisible: [
+        {
+          text: "Tan",
+          region: { x: 0.34, y: 0.02, width: 0.6, height: 0.16 },
+          scale: 2.2
+        },
+        {
+          text: "Tan",
+          region: { x: 0.34, y: 0.02, width: 0.62, height: 0.72 },
+          scale: 2.2
+        }
+      ]
+    }
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.details.frontmostApp, "WeChat");
+  assert.equal(result.details.regionTextAnyVisible, true);
+  assert.equal(result.details.regionTextAnyChecks[0]?.matched, false);
+  assert.equal(result.details.regionTextAnyChecks[1]?.matched, true);
+});
+
 test("desktop capture falls back to a full-screen capture when window capture fails", async () => {
   const { adapter, registeredArtifacts } = createObserveAdapter({
     captureMs: 50

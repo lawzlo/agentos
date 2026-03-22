@@ -2076,13 +2076,15 @@ test("wechat desktop pack can detect unread conversations and build reply steps 
   assert.equal(context?.metadata?.sender, "客户");
   assert.equal(Array.isArray(context?.taskSpec?.steps), true);
   const firstStepTarget = context?.taskSpec?.steps?.[0]?.params?.target as { id?: string } | undefined;
-  const firstStepExpect = context?.taskSpec?.steps?.[0]?.expect as { regionTextVisible?: { text?: string } } | undefined;
+  const firstStepExpect = context?.taskSpec?.steps?.[0]?.expect as {
+    regionTextAnyVisible?: Array<{ text?: string }>;
+  } | undefined;
   const typeStepTarget = context?.taskSpec?.steps?.[2]?.params?.target as { id?: string } | undefined;
   const typeStepExpect = context?.taskSpec?.steps?.[2]?.expect as { regionTextVisible?: { text?: string } } | undefined;
   const sendStepTarget = context?.taskSpec?.steps?.[3]?.params?.target as { id?: string } | undefined;
   assert.equal(context?.taskSpec?.steps?.[0]?.action, "clickTarget");
   assert.equal(firstStepTarget?.id, "thread-zhangsan");
-  assert.equal(firstStepExpect?.regionTextVisible?.text, "{{threadTitle}}");
+  assert.equal(firstStepExpect?.regionTextAnyVisible?.[0]?.text, "{{threadTitle}}");
   assert.equal(context?.taskSpec?.steps?.[2]?.params?.text, "{{typeText}}");
   assert.equal(typeStepTarget?.id, "compose");
   assert.equal(typeStepExpect?.regionTextVisible?.text, "{{typeTextPreview}}");
@@ -2243,10 +2245,12 @@ test("wechat desktop pack can fall back to clicking the composer area when no co
   assert.equal(Number(context?.inputs?.composeY ?? 0) > 0, true);
   assert.equal(context?.inputs?.threadTitle, "Tan");
   const fallbackFirstStepTarget = context?.taskSpec?.steps?.[0]?.params?.target as { id?: string } | undefined;
-  const fallbackFirstStepExpect = context?.taskSpec?.steps?.[0]?.expect as { regionTextVisible?: { text?: string } } | undefined;
+  const fallbackFirstStepExpect = context?.taskSpec?.steps?.[0]?.expect as {
+    regionTextAnyVisible?: Array<{ text?: string }>;
+  } | undefined;
   const fallbackTypeStepExpect = context?.taskSpec?.steps?.[2]?.expect as { regionTextVisible?: { text?: string } } | undefined;
   assert.equal(fallbackFirstStepTarget?.id, "thread-tan");
-  assert.equal(fallbackFirstStepExpect?.regionTextVisible?.text, "{{threadTitle}}");
+  assert.equal(fallbackFirstStepExpect?.regionTextAnyVisible?.[0]?.text, "{{threadTitle}}");
   assert.equal(context?.taskSpec?.steps?.[1]?.action, "clickAt");
   assert.equal(context?.taskSpec?.steps?.[2]?.action, "typeText");
   assert.equal(fallbackTypeStepExpect?.regionTextVisible?.text, "{{typeTextPreview}}");
