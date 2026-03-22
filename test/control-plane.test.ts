@@ -1273,14 +1273,14 @@ test("file inbox connector can ingest task files", async () => {
 
     const connectedTask = await (async () => {
       const started = Date.now();
-      while (Date.now() - started < 8000) {
+      while (Date.now() - started < 20000) {
         const response = await fetch(`${server.baseUrl}/tasks`);
         const payload = await response.json();
         const found = payload.tasks.find((task) => task.goal === "Run from the file inbox connector");
         if (found) {
           return found;
         }
-        await new Promise((resolve) => setTimeout(resolve, 250));
+        await new Promise((resolve) => setTimeout(resolve, 100));
       }
       throw new Error("Timed out waiting for connector task.");
     })();

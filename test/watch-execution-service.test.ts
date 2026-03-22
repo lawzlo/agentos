@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { WatchExecutionService } from "../src/runtime/watch-execution-service.js";
+import { buildWatchHealth } from "../src/runtime/watch-presenters.js";
 import type { WatchRule } from "../src/types/runtime-schema.js";
 
 function createService() {
@@ -286,4 +287,116 @@ test("scan skips a watch trigger when extractContext cannot produce a stable rep
   assert.equal(createTaskCalls, 0);
   assert.equal(storedRule.status, "watching");
   assert.equal(storedRule.lastError, null);
+});
+
+test("scan records stage details when a watch stage times out", async () => {
+  const timestamp = new Date().toISOString();
+  let storedRule = createWatchRule();
+
+  const service = new WatchExecutionService({
+    controlPlane: {
+      modelClient: {
+        isConfigured() {
+          return true;
+        }
+      },
+      surfaceRegistry: {},
+      workspaceManager: {
+        async prepareProfile() {
+          return {
+            id: "profile-watch",
+            name: "desktop-main",
+            rootPath: "/tmp/desktop-main",
+            profilePath: "/tmp/desktop-main/profile",
+            downloadsPath: "/tmp/desktop-main/downloads",
+            artifactsPath: "/tmp/desktop-main/artifacts",
+            scratchPath: "/tmp/desktop-main/scratch",
+            metadata: {},
+            createdAt: timestamp,
+            updatedAt: timestamp
+          };
+        }
+      },
+      watchService: {
+        decorate(rule: WatchRule) {
+          return {
+            ...rule,
+            health: buildWatchHealth(rule)
+          };
+        }
+      },
+      policyEngine: {
+        evaluateAutomation() {
+          return {
+            action: "draft",
+            policy: "draft_only",
+            riskLevel: "normal",
+            reasons: []
+          };
+        }
+      },
+      createTask() {
+        throw new Error("createTask should not be called when detectNewItems times out");
+      }
+    } as never,
+    store: {
+      getWatchRule() {
+        return storedRule;
+      },
+      getTask() {
+        return null;
+      },
+      getDraft() {
+        return null;
+      },
+      putWatchRule(rule: WatchRule) {
+        storedRule = rule;
+        return rule;
+      }
+    } as never,
+    eventBus: {
+      broadcast() {}
+    } as never,
+    livePackRegistry: {
+      get() {
+        return {
+          name: "slack-desktop",
+          async observeInbox() {
+            return {
+              version: 1,
+              surface: "desktop",
+              workspaceId: "workspace-watch",
+              appContext: { appName: "Slack" },
+              capture: null,
+              ocrBlocks: [],
+              interactionCandidates: [],
+              visibleText: "Slack",
+              recentActions: [],
+              summary: "Slack",
+              timestamp
+            };
+          },
+          async detectNewItems() {
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            return null;
+          }
+        };
+      }
+    } as never,
+    scanStageTimeoutMs: {
+      detect_items: 10
+    }
+  });
+
+  await service.scan(storedRule.id);
+
+  assert.equal(storedRule.status, "backoff");
+  assert.match(String(storedRule.lastError ?? ""), /detect_items timed out/i);
+  assert.equal(storedRule.dedupeState.scanStage, "detect_items");
+  assert.equal(storedRule.dedupeState.scanStageStatus, "failed");
+
+  const health = buildWatchHealth(storedRule);
+  assert.equal(health?.scanStage, "detect_items");
+  assert.equal(health?.scanStageStatus, "failed");
+  assert.equal(health?.scanStageTimeoutMs, 10);
 });

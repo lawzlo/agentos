@@ -241,6 +241,18 @@ export interface WatchHealth {
   lastInboundMessageId?: string | null;
   lastInboundReceivedAt?: string | null;
   lastAgentActionAt?: string | null;
+  scanStage?:
+    | "prepare_workspace"
+    | "activate_pack"
+    | "observe_inbox"
+    | "detect_items"
+    | "extract_context"
+    | "draft_reply"
+    | "create_task"
+    | null;
+  scanStageStatus?: "running" | "failed" | null;
+  scanStageStartedAt?: string | null;
+  scanStageTimeoutMs?: number | null;
 }
 
 export interface ConversationThreadState {

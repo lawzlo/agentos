@@ -2,6 +2,7 @@ interface WatchRuleLike {
   id: string;
   enabled: boolean;
   pollIntervalMs: number;
+  dedupeState?: Record<string, unknown>;
 }
 
 interface WatchExecutionService {
@@ -55,7 +56,11 @@ export class WatchScheduler {
     const started = Date.now();
     while (this.inFlight.size > 0) {
       if (Date.now() - started >= 5000) {
-        throw new Error("Timed out waiting for watch scans to finish during shutdown");
+        const sampleRuleId = this.inFlight.values().next().value as string | undefined;
+        const sampleStage = sampleRuleId
+          ? String(this.store.getWatchRule(sampleRuleId)?.dedupeState?.scanStage ?? "").trim() || "unknown"
+          : "unknown";
+        throw new Error(`Timed out waiting for watch scans to finish during shutdown (stage: ${sampleStage})`);
       }
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
@@ -71,7 +76,8 @@ export class WatchScheduler {
     const started = Date.now();
     while (this.inFlight.has(ruleId)) {
       if (Date.now() - started >= timeoutMs) {
-        throw new Error(`Timed out waiting for watch scan to finish for ${ruleId}`);
+        const stage = String(this.store.getWatchRule(ruleId)?.dedupeState?.scanStage ?? "").trim() || "unknown";
+        throw new Error(`Timed out waiting for watch scan to finish for ${ruleId} (stage: ${stage})`);
       }
       await new Promise((resolve) => setTimeout(resolve, 10));
     }

@@ -26,7 +26,8 @@ import type {
   TeachTemplateInput,
   WatchDetection,
   WatchGovernance,
-  WatchRule
+  WatchRule,
+  WorldState
 } from "../types/runtime-schema.js";
 
 interface TaskLike {
@@ -154,6 +155,62 @@ interface WatchExecutionServiceOptions {
   store: Pick<ControlPlaneStore, "getWatchRule" | "putWatchRule" | "getTask" | "getDraft">;
   eventBus: EventBus;
   livePackRegistry: LivePackRegistry;
+  scanStageTimeoutMs?: Partial<Record<WatchScanStage, number>>;
+}
+
+type WatchScanStage =
+  | "prepare_workspace"
+  | "activate_pack"
+  | "observe_inbox"
+  | "detect_items"
+  | "extract_context"
+  | "draft_reply"
+  | "create_task";
+
+const DEFAULT_SCAN_STAGE_TIMEOUT_MS: Record<WatchScanStage, number> = {
+  prepare_workspace: 5000,
+  activate_pack: 5000,
+  observe_inbox: 8000,
+  detect_items: 12000,
+  extract_context: 12000,
+  draft_reply: 8000,
+  create_task: 5000
+};
+
+function clearScanStageState(dedupeState: Record<string, unknown> = {}) {
+  return {
+    ...dedupeState,
+    scanStage: null,
+    scanStageStatus: null,
+    scanStageStartedAt: null,
+    scanStageTimeoutMs: null
+  };
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, errorMessage: string): Promise<T> {
+  let timer: NodeJS.Timeout | null = null;
+  return new Promise<T>((resolve, reject) => {
+    timer = setTimeout(() => {
+      timer = null;
+      reject(new Error(errorMessage));
+    }, timeoutMs);
+    void promise.then(
+      (value) => {
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
+        resolve(value);
+      },
+      (error) => {
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
+        reject(error);
+      }
+    );
+  });
 }
 
 function shouldDraftReply(rule: WatchRule, detection: WatchDetection = {}) {
@@ -228,17 +285,52 @@ export class WatchExecutionService {
   store: WatchExecutionServiceOptions["store"];
   eventBus: WatchExecutionServiceOptions["eventBus"];
   livePackRegistry: WatchExecutionServiceOptions["livePackRegistry"];
+  scanStageTimeoutMs: Record<WatchScanStage, number>;
 
   constructor({
     controlPlane,
     store,
     eventBus,
-    livePackRegistry
+    livePackRegistry,
+    scanStageTimeoutMs = {}
   }: WatchExecutionServiceOptions) {
     this.controlPlane = controlPlane;
     this.store = store;
     this.eventBus = eventBus;
     this.livePackRegistry = livePackRegistry;
+    this.scanStageTimeoutMs = {
+      ...DEFAULT_SCAN_STAGE_TIMEOUT_MS,
+      ...scanStageTimeoutMs
+    };
+  }
+
+  beginScanStage(rule: WatchRule, stage: WatchScanStage): WatchRule {
+    const updated = this.store.putWatchRule({
+      ...rule,
+      dedupeState: {
+        ...(rule.dedupeState ?? {}),
+        scanStage: stage,
+        scanStageStatus: "running",
+        scanStageStartedAt: nowIso(),
+        scanStageTimeoutMs: this.scanStageTimeoutMs[stage]
+      }
+    });
+    this.eventBus.broadcast("watch.updated", this.controlPlane.watchService.decorate(updated));
+    return updated;
+  }
+
+  finishScanState(rule: WatchRule, dedupeState: Record<string, unknown>) {
+    return clearScanStageState({
+      ...(rule.dedupeState ?? {}),
+      ...dedupeState
+    });
+  }
+
+  async runScanStage<T>(rule: WatchRule, stage: WatchScanStage, action: () => Promise<T>): Promise<[WatchRule, T]> {
+    const stagedRule = this.beginScanStage(rule, stage);
+    const timeoutMs = this.scanStageTimeoutMs[stage];
+    const result = await withTimeout(action(), timeoutMs, `Watch scan stage ${stage} timed out after ${timeoutMs}ms`);
+    return [stagedRule, result];
   }
 
   buildTaskSpecFromWatchRule(
@@ -372,6 +464,7 @@ export class WatchExecutionService {
       : rule;
     let activeRule = hydratedRule ?? rule;
     let scanConversationThreadKey: string | null = null;
+    let currentScanStage: WatchScanStage | null = null;
 
     const retryAfter = Number(activeRule.dedupeState?.retryAfter ?? 0);
     if (retryAfter && retryAfter > Date.now()) {
@@ -400,10 +493,10 @@ export class WatchExecutionService {
           lastObservedAt: nowIso(),
           lastError: null,
           status: "watching",
-          dedupeState: clearWatchFailureState({
+          dedupeState: this.finishScanState(activeRule, clearWatchFailureState({
             ...(activeRule.dedupeState ?? {}),
             activeTaskId
-          })
+          }))
         });
         this.eventBus.broadcast("watch.updated", this.controlPlane.watchService.decorate(updated));
         return;
@@ -415,10 +508,10 @@ export class WatchExecutionService {
           lastObservedAt: nowIso(),
           lastError: null,
           status: "awaiting_approval",
-          dedupeState: clearWatchFailureState({
+          dedupeState: this.finishScanState(activeRule, clearWatchFailureState({
             ...(activeRule.dedupeState ?? {}),
             activeDraftId
-          })
+          }))
         });
         this.eventBus.broadcast("watch.updated", this.controlPlane.watchService.decorate(updated));
         return;
@@ -427,10 +520,10 @@ export class WatchExecutionService {
       if (activeDraftId && activeDraft && ["approved", "rejected", "expired"].includes(activeDraft.status)) {
         activeRule = this.store.putWatchRule({
           ...activeRule,
-          dedupeState: {
+          dedupeState: this.finishScanState(activeRule, {
             ...(activeRule.dedupeState ?? {}),
             activeDraftId: null
-          }
+          })
         });
         this.eventBus.broadcast("watch.updated", this.controlPlane.watchService.decorate(activeRule));
       }
@@ -457,7 +550,7 @@ export class WatchExecutionService {
 
         activeRule = this.store.putWatchRule({
           ...activeRule,
-          dedupeState
+          dedupeState: this.finishScanState(activeRule, dedupeState)
         });
         this.eventBus.broadcast("watch.updated", this.controlPlane.watchService.decorate(activeRule));
       }
@@ -512,69 +605,89 @@ export class WatchExecutionService {
       }
 
       const workspaceName = activeRule.workspaceName ?? `${activeRule.livePack}-live`;
-      const workspace = await this.controlPlane.workspaceManager.prepareProfile(workspaceName, {
-        purpose: "live-watch",
-        livePack: activeRule.livePack,
-        appTarget: activeRule.appTarget ?? null
+      currentScanStage = "prepare_workspace";
+      let workspace: Awaited<ReturnType<typeof this.controlPlane.workspaceManager.prepareProfile>>;
+      [activeRule, workspace] = await this.runScanStage(activeRule, currentScanStage, async () =>
+        this.controlPlane.workspaceManager.prepareProfile(workspaceName, {
+          purpose: "live-watch",
+          livePack: activeRule.livePack,
+          appTarget: activeRule.appTarget ?? null
+        })
+      );
+
+      currentScanStage = "activate_pack";
+      [activeRule] = await this.runScanStage(activeRule, currentScanStage, async () => {
+        await pack.activate?.({
+          rule: activeRule,
+          workspace,
+          surfaceRegistry: this.controlPlane.surfaceRegistry,
+          controlPlane: this.controlPlane
+        });
+        return true;
       });
 
-      await pack.activate?.({
-        rule: activeRule,
-        workspace,
-        surfaceRegistry: this.controlPlane.surfaceRegistry,
-        controlPlane: this.controlPlane
-      });
-
-      const worldState = pack.observeInbox
-        ? await pack.observeInbox({
+      let worldState: WorldState | null = null;
+      if (pack.observeInbox) {
+        currentScanStage = "observe_inbox";
+        [activeRule, worldState] = await this.runScanStage(activeRule, currentScanStage, async () =>
+          pack.observeInbox?.({
             rule: activeRule,
             workspace,
             surfaceRegistry: this.controlPlane.surfaceRegistry,
             controlPlane: this.controlPlane
-          })
-        : null;
+          }) ?? null
+        );
+      }
 
-      let detection = await pack.detectNewItems?.({
-        rule: activeRule,
-        worldState,
-        dedupeState: activeRule.dedupeState ?? {},
-        workspace,
-        surfaceRegistry: this.controlPlane.surfaceRegistry,
-        controlPlane: this.controlPlane
-      });
+      currentScanStage = "detect_items";
+      let detection: WatchDetection | null;
+      [activeRule, detection] = await this.runScanStage(activeRule, currentScanStage, async () =>
+        pack.detectNewItems?.({
+          rule: activeRule,
+          worldState,
+          dedupeState: activeRule.dedupeState ?? {},
+          workspace,
+          surfaceRegistry: this.controlPlane.surfaceRegistry,
+          controlPlane: this.controlPlane
+        }) ?? null
+      );
 
       if (detection && pack.extractContext) {
-        const context = await pack.extractContext({
-          rule: activeRule,
-          detection,
-          worldState,
-          workspace,
-          controlPlane: this.controlPlane,
-          surfaceRegistry: this.controlPlane.surfaceRegistry
-        });
+        currentScanStage = "extract_context";
+        let context: Awaited<ReturnType<NonNullable<typeof pack.extractContext>>>;
+        [activeRule, context] = await this.runScanStage(activeRule, currentScanStage, async () =>
+          pack.extractContext?.({
+            rule: activeRule,
+            detection,
+            worldState,
+            workspace,
+            controlPlane: this.controlPlane,
+            surfaceRegistry: this.controlPlane.surfaceRegistry
+          }) ?? null
+        );
         if (!context) {
           detection = null;
         } else {
-        const mergedTaskSpec =
-          detection.taskSpec || context?.taskSpec
-            ? {
-                ...(detection.taskSpec ?? {}),
-                ...(context?.taskSpec ?? {})
-              }
-            : undefined;
-        detection = {
-          ...detection,
-          ...context,
-          inputs: {
-            ...(detection.inputs ?? {}),
-            ...(context?.inputs ?? {})
-          },
-          metadata: {
-            ...(detection.metadata ?? {}),
-            ...(context?.metadata ?? {})
-          },
-          ...(mergedTaskSpec ? { taskSpec: mergedTaskSpec } : {})
-        };
+          const mergedTaskSpec =
+            detection.taskSpec || context?.taskSpec
+              ? {
+                  ...(detection.taskSpec ?? {}),
+                  ...(context?.taskSpec ?? {})
+                }
+              : undefined;
+          detection = {
+            ...detection,
+            ...context,
+            inputs: {
+              ...(detection.inputs ?? {}),
+              ...(context?.inputs ?? {})
+            },
+            metadata: {
+              ...(detection.metadata ?? {}),
+              ...(context?.metadata ?? {})
+            },
+            ...(mergedTaskSpec ? { taskSpec: mergedTaskSpec } : {})
+          };
         }
       }
 
@@ -584,11 +697,11 @@ export class WatchExecutionService {
           lastObservedAt: nowIso(),
           lastError: null,
           status: "watching",
-          dedupeState: clearWatchFailureState({
+          dedupeState: this.finishScanState(activeRule, clearWatchFailureState({
             ...(activeRule.dedupeState ?? {}),
             failureCount: 0,
             activeTaskId: null
-          })
+          }))
         });
         this.eventBus.broadcast("watch.updated", this.controlPlane.watchService.decorate(updated));
         return;
@@ -603,7 +716,7 @@ export class WatchExecutionService {
           lastObservedAt: nowIso(),
           lastError: manualInterventionDetail || detection.summary || "manual intervention required",
           status: "degraded",
-          dedupeState: {
+          dedupeState: this.finishScanState(activeRule, {
             ...clearWatchFailureState({
               ...(activeRule.dedupeState ?? {}),
               lastFingerprint: detection.fingerprint ?? detection.summary ?? null,
@@ -615,7 +728,7 @@ export class WatchExecutionService {
             attentionKind: manualInterventionKind,
             attentionDetail: manualInterventionDetail || null,
             attentionAction: manualInterventionAction || null
-          }
+          })
         });
         this.eventBus.broadcast("watch.updated", this.controlPlane.watchService.decorate(updated));
         this.eventBus.broadcast("watch.blocked", {
@@ -637,13 +750,17 @@ export class WatchExecutionService {
             updatedAt: observedAt
           })
         : (activeRule.dedupeState ?? {});
-      const replyDraft = shouldDraftReply(activeRule, detection)
-        ? await this.draftReply({
+      let replyDraft: LivePackDraftResponse | null = null;
+      if (shouldDraftReply(activeRule, detection)) {
+        currentScanStage = "draft_reply";
+        [activeRule, replyDraft] = await this.runScanStage(activeRule, currentScanStage, async () =>
+          this.draftReply({
             watchRule: activeRule,
             detection,
             pack
           })
-        : null;
+        );
+      }
       const sendTaskSpec = this.buildTaskSpecFromWatchRule(activeRule, detection, {
         replyText: replyDraft?.replyText ?? null,
         autoSend: true
@@ -672,7 +789,7 @@ export class WatchExecutionService {
           lastObservedAt: observedAt,
           lastError: null,
           status: "watching",
-          dedupeState: observedDedupeState
+          dedupeState: this.finishScanState(activeRule, observedDedupeState)
         });
         this.eventBus.broadcast("watch.skipped", {
           rule: updated,
@@ -708,14 +825,14 @@ export class WatchExecutionService {
           lastObservedAt: observedAt,
           lastError: governedAutomation.reasons.join("; ") || "automation blocked",
           status: "degraded",
-          dedupeState: clearWatchFailureState({
+          dedupeState: this.finishScanState(activeRule, clearWatchFailureState({
             ...observedDedupeState,
             lastFingerprint: detection.fingerprint ?? detection.summary ?? null,
             lastSummary: detection.summary ?? null,
             lastContext: detection.context ?? [],
             activeTaskId: null,
             activeDraftId: null
-          })
+          }))
         });
         this.eventBus.broadcast("watch.updated", this.controlPlane.watchService.decorate(updated));
         this.eventBus.broadcast("watch.blocked", {
@@ -770,7 +887,7 @@ export class WatchExecutionService {
           lastTriggeredAt: observedAt,
           lastError: null,
           status: "awaiting_approval",
-          dedupeState
+          dedupeState: this.finishScanState(activeRule, dedupeState)
         });
         this.eventBus.broadcast("watch.drafted", {
           rule: updated,
@@ -788,7 +905,11 @@ export class WatchExecutionService {
               autoSend: false
             })
           : sendTaskSpec;
-      const task = await this.controlPlane.createTask(taskSpec);
+      currentScanStage = "create_task";
+      let task: TaskRecord;
+      [activeRule, task] = await this.runScanStage(activeRule, currentScanStage, async () =>
+        this.controlPlane.createTask(taskSpec)
+      );
       let dedupeState: Record<string, unknown> = clearWatchFailureState({
         ...recordAutoAction(observedDedupeState),
         lastFingerprint: detection.fingerprint ?? detection.summary ?? task.id,
@@ -809,7 +930,7 @@ export class WatchExecutionService {
         lastTriggeredAt: observedAt,
         lastError: null,
         status: "watching",
-        dedupeState
+        dedupeState: this.finishScanState(activeRule, dedupeState)
       });
       this.eventBus.broadcast("watch.triggered", {
         rule: updated,
@@ -833,7 +954,14 @@ export class WatchExecutionService {
         ...((current ?? rule).dedupeState ?? {}),
         failureCount,
         backoffMs,
-        retryAfter: retryAt
+        retryAfter: retryAt,
+        scanStage: currentScanStage,
+        scanStageStatus: currentScanStage ? "failed" : null,
+        scanStageStartedAt:
+          String((current ?? rule).dedupeState?.scanStageStartedAt ?? "").trim() ||
+          (currentScanStage ? nowIso() : null),
+        scanStageTimeoutMs:
+          currentScanStage != null ? this.scanStageTimeoutMs[currentScanStage] : null
       };
       if (scanConversationThreadKey) {
         dedupeState = recordConversationFailure(dedupeState, {

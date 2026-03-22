@@ -43,6 +43,15 @@ export function buildWatchHealth(rule: WatchRule | null): WatchHealth | null {
     lastInboundMessageId: threadState?.lastInboundMessageId ?? null,
     lastInboundReceivedAt: threadState?.lastInboundReceivedAt ?? null,
     lastAgentActionAt: threadState?.lastAgentActionAt ?? null,
+    scanStage:
+      (String(rule.dedupeState?.scanStage ?? "").trim() || null) as WatchHealth["scanStage"],
+    scanStageStatus:
+      (String(rule.dedupeState?.scanStageStatus ?? "").trim() || null) as WatchHealth["scanStageStatus"],
+    scanStageStartedAt: String(rule.dedupeState?.scanStageStartedAt ?? "").trim() || null,
+    scanStageTimeoutMs:
+      Number.isFinite(Number(rule.dedupeState?.scanStageTimeoutMs))
+        ? Number(rule.dedupeState?.scanStageTimeoutMs)
+        : null,
     summary:
       rule.lastError ??
       (String(rule.dedupeState?.lastSummary ?? "").trim() || null) ??
