@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import { ControlPlaneStore } from "../src/runtime/store.js";
 import { LivePackRegistry } from "../src/runtime/live-pack-registry.js";
 import { SurfaceRegistry } from "../src/runtime/surface-registry.js";
-import type { WatchRule, WorkspaceProfile } from "../src/types/runtime-schema.js";
+import type { RuntimeStep, WatchRule, WorkspaceProfile } from "../src/types/runtime-schema.js";
 import {
   createTempDir,
   startAgentServer,
@@ -2061,6 +2061,325 @@ test("wechat desktop pack can detect unread conversations and build reply steps 
   assert.equal(context?.taskSpec?.steps?.[6]?.action, "wait");
   assert.equal(verifyPrefillExpectShifted?.visualCheck?.type, "wechat_prefill");
   assert.equal(verifyPrefillExpectShifted?.visualCheck?.replyPreview, "{{typeTextPreview}}");
+});
+
+test("wechat desktop pack recovers foreign views with a visible recovery control before scanning unread conversations", async () => {
+  let recovered = false;
+  const actions: string[] = [];
+  const foreignWorldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-wechat-foreign-view",
+    appContext: {
+      appName: "WeChat",
+      windows: [
+        {
+          ownerName: "WeChat",
+          windowName: "WeChat",
+          bounds: { x: 100, y: 40, width: 900, height: 700, centerX: 550, centerY: 390 }
+        }
+      ]
+    },
+    capture: { path: "/tmp/wechat-foreign-view.png" },
+    ocrBlocks: [],
+    interactionCandidates: [],
+    visibleText: "WeChat\nMinimized Groups",
+    recentActions: [],
+    summary: "WeChat minimized groups",
+    timestamp: new Date().toISOString()
+  };
+  const chatListWorldState = {
+    ...foreignWorldState,
+    capture: { path: "/tmp/wechat-chat-list.png" },
+    visibleText: "WeChat\n张三\n未读\n客户: 明天下午方便吗？",
+    summary: "WeChat unread list"
+  };
+  const fakeSurface = {
+    async observe() {
+      return recovered ? chatListWorldState : foreignWorldState;
+    },
+    async act({ step }: { step: RuntimeStep }) {
+      actions.push(`${step.action}:${String(step.label ?? step.id ?? "")}`);
+      if (step.action === "clickAt" && String(step.label ?? "").includes("Recover WeChat to chat list")) {
+        recovered = true;
+      }
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("wechat-desktop");
+  const rule: WatchRule = {
+    id: "watch-wechat-recover-click",
+    goal: "Always watch WeChat and reply to unread conversations",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "wechat-desktop-main",
+    skillName: null,
+    appTarget: "WeChat",
+    livePack: "wechat-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-wechat-recover-click",
+    name: "wechat-desktop-main",
+    rootPath: "/tmp/wechat-desktop-main",
+    profilePath: "/tmp/wechat-desktop-main/profile",
+    downloadsPath: "/tmp/wechat-desktop-main/downloads",
+    artifactsPath: "/tmp/wechat-desktop-main/artifacts",
+    scratchPath: "/tmp/wechat-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: foreignWorldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        analyzeImageJson: async ({ schemaName }: { schemaName?: string }) => {
+          if (schemaName === "agentos_wechat_thread_grounding") {
+            return {
+              targetVisible: true,
+              evidence: "Exact 张三 row visible in left sidebar",
+              clickPoint: { x: 0.15, y: 0.18 },
+              rowBox: { x: 0.06, y: 0.14, width: 0.26, height: 0.08 }
+            };
+          }
+          if (!recovered) {
+            return {
+              scene: "foreign_view",
+              sceneEvidence: "Minimized Groups page",
+              recommendedRecoveryAction: "recover_to_list",
+              recoveryControl: {
+                present: true,
+                evidence: "top-left back arrow",
+                approxBox: { x: 0.03, y: 0.06, width: 0.05, height: 0.05 }
+              },
+              openThread: null,
+              visibleUnreadThreads: [],
+              composer: {
+                present: false,
+                evidence: "",
+                approxBox: null
+              }
+            };
+          }
+          return {
+            scene: "chat_list",
+            sceneEvidence: "left chat list visible",
+            recommendedRecoveryAction: "none",
+            recoveryControl: {
+              present: false,
+              evidence: "",
+              approxBox: null
+            },
+            openThread: null,
+            visibleUnreadThreads: [
+              {
+                name: "张三",
+                evidence: "red unread badge",
+                approxSidebarY: 0.18,
+                replyable: true,
+                threadKind: "chat",
+                conversationKind: "direct",
+                shouldReply: true,
+                replyReason: "Direct question from contact",
+                latestSnippet: "明天下午方便吗？",
+                priority: "high",
+                approxBox: { x: 0.08, y: 0.16, width: 0.26, height: 0.08 }
+              }
+            ],
+            composer: {
+              present: true,
+              evidence: "bottom input area",
+              approxBox: { x: 0.33, y: 0.82, width: 0.56, height: 0.12 }
+            }
+          };
+        }
+      }
+    } as never
+  });
+
+  assert.equal(detection?.summary, "张三");
+  assert.equal((detection?.metadata as { recoveryAttempts?: unknown } | undefined)?.recoveryAttempts, 1);
+  assert.equal(actions.includes("clickAt:Recover WeChat to chat list"), true);
+});
+
+test("wechat desktop pack falls back to Escape recovery when no recovery control is visible", async () => {
+  let recovered = false;
+  const actions: string[] = [];
+  const foreignWorldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-wechat-foreign-view-escape",
+    appContext: {
+      appName: "WeChat",
+      windows: [
+        {
+          ownerName: "WeChat",
+          windowName: "WeChat",
+          bounds: { x: 100, y: 40, width: 900, height: 700, centerX: 550, centerY: 390 }
+        }
+      ]
+    },
+    capture: { path: "/tmp/wechat-foreign-view-escape.png" },
+    ocrBlocks: [],
+    interactionCandidates: [],
+    visibleText: "WeChat\nOfficial Accounts article",
+    recentActions: [],
+    summary: "WeChat official account article",
+    timestamp: new Date().toISOString()
+  };
+  const chatListWorldState = {
+    ...foreignWorldState,
+    capture: { path: "/tmp/wechat-chat-list-escape.png" },
+    visibleText: "WeChat\n李四\n未读\n在吗？",
+    summary: "WeChat unread list"
+  };
+  const fakeSurface = {
+    async observe() {
+      return recovered ? chatListWorldState : foreignWorldState;
+    },
+    async act({ step }: { step: RuntimeStep }) {
+      actions.push(`${step.action}:${String(step.label ?? step.id ?? "")}`);
+      if (step.action === "pressKey" && String(step.params?.key ?? "") === "Escape") {
+        recovered = true;
+      }
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("wechat-desktop");
+  const rule: WatchRule = {
+    id: "watch-wechat-recover-escape",
+    goal: "Always watch WeChat and reply to unread conversations",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "wechat-desktop-main",
+    skillName: null,
+    appTarget: "WeChat",
+    livePack: "wechat-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-wechat-recover-escape",
+    name: "wechat-desktop-main",
+    rootPath: "/tmp/wechat-desktop-main",
+    profilePath: "/tmp/wechat-desktop-main/profile",
+    downloadsPath: "/tmp/wechat-desktop-main/downloads",
+    artifactsPath: "/tmp/wechat-desktop-main/artifacts",
+    scratchPath: "/tmp/wechat-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: foreignWorldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        analyzeImageJson: async ({ schemaName }: { schemaName?: string }) => {
+          if (schemaName === "agentos_wechat_thread_grounding") {
+            return {
+              targetVisible: true,
+              evidence: "Exact 李四 row visible in left sidebar",
+              clickPoint: { x: 0.15, y: 0.24 },
+              rowBox: { x: 0.06, y: 0.2, width: 0.26, height: 0.08 }
+            };
+          }
+          if (!recovered) {
+            return {
+              scene: "foreign_view",
+              sceneEvidence: "Official account article",
+              recommendedRecoveryAction: "recover_to_list",
+              recoveryControl: {
+                present: false,
+                evidence: "",
+                approxBox: null
+              },
+              openThread: null,
+              visibleUnreadThreads: [],
+              composer: {
+                present: false,
+                evidence: "",
+                approxBox: null
+              }
+            };
+          }
+          return {
+            scene: "chat_list",
+            sceneEvidence: "left chat list visible",
+            recommendedRecoveryAction: "none",
+            recoveryControl: {
+              present: false,
+              evidence: "",
+              approxBox: null
+            },
+            openThread: null,
+            visibleUnreadThreads: [
+              {
+                name: "李四",
+                evidence: "red unread badge",
+                approxSidebarY: 0.24,
+                replyable: true,
+                threadKind: "chat",
+                conversationKind: "direct",
+                shouldReply: true,
+                replyReason: "Direct message asking a question",
+                latestSnippet: "在吗？",
+                priority: "high",
+                approxBox: { x: 0.08, y: 0.22, width: 0.26, height: 0.08 }
+              }
+            ],
+            composer: {
+              present: true,
+              evidence: "bottom input area",
+              approxBox: { x: 0.33, y: 0.82, width: 0.56, height: 0.12 }
+            }
+          };
+        }
+      }
+    } as never
+  });
+
+  assert.equal(detection?.summary, "李四");
+  assert.equal(actions.includes("pressKey:Dismiss WeChat foreign view"), true);
 });
 
 test("wechat desktop pack can fall back to the window composer region when vision sees no composer box", async () => {

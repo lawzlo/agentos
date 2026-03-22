@@ -93,6 +93,11 @@ interface WeChatVisualAnalysis {
   scene: SceneType;
   sceneEvidence: string;
   recommendedRecoveryAction: SurfaceRecoveryAction | null;
+  recoveryControl: {
+    present: boolean;
+    evidence: string;
+    approxBox: WeChatVisualComposerBox | null;
+  };
   targetThreadOpen?: boolean | null;
   prefillVisible?: boolean | null;
 }
@@ -1283,6 +1288,18 @@ function normalizeWeChatVisualAnalysis(raw: Record<string, unknown> | null | und
           height: clampUnit(composerBoxRaw.height, 0)
         }
       : null;
+  const recoveryRaw = (raw.recoveryControl ?? null) as Record<string, unknown> | null;
+  const recoveryBoxRaw = (recoveryRaw?.approxBox ?? null) as Record<string, unknown> | null;
+  const recoveryBox =
+    recoveryBoxRaw &&
+    ["x", "y", "width", "height"].every((key) => Number.isFinite(Number(recoveryBoxRaw[key])))
+      ? {
+          x: clampUnit(recoveryBoxRaw.x, 0),
+          y: clampUnit(recoveryBoxRaw.y, 0),
+          width: clampUnit(recoveryBoxRaw.width, 0),
+          height: clampUnit(recoveryBoxRaw.height, 0)
+        }
+      : null;
 
   const normalizedScene = (() => {
     const scene = String(raw.scene ?? "").trim().toLowerCase();
@@ -1334,6 +1351,11 @@ function normalizeWeChatVisualAnalysis(raw: Record<string, unknown> | null | und
     scene: normalizedScene,
     sceneEvidence: String(raw.sceneEvidence ?? raw.openThread ?? composerRaw?.evidence ?? "").trim(),
     recommendedRecoveryAction,
+    recoveryControl: {
+      present: Boolean(recoveryRaw?.present) || Boolean(recoveryBox),
+      evidence: String(recoveryRaw?.evidence ?? "").trim(),
+      approxBox: recoveryBox
+    },
     targetThreadOpen:
       typeof raw.targetThreadOpen === "boolean"
         ? raw.targetThreadOpen
@@ -1524,6 +1546,7 @@ async function analyzeWeChatDesktopVisualState({
     "Only rely on what is visible in the image.",
     "First classify the overall scene as one of: chat_list, thread_open, foreign_view, or unknown.",
     "Use foreign_view for article readers, file previews, browser-like detail pages, minimized group views, official-account browsing views, or any screen where AgentOS should recover back to the chat list before replying.",
+    "When the scene is foreign_view or unknown, identify the best visible back or close control that would return to the main chat list.",
     "Focus on the left conversation sidebar for unread rows and the bottom-right composer area for reply input.",
     "Treat red unread count badges, red mention pills such as [@AI], red dots, or red unread markers on a row as unread evidence.",
     "Do not return a standalone red badge number like 33 as the thread name. Always return the conversation title text from the row.",
@@ -1564,6 +1587,26 @@ async function analyzeWeChatDesktopVisualState({
             recommendedRecoveryAction: {
               type: "string",
               enum: ["recover_to_list", "complete_signin", "complete_verification", "takeover", "none"]
+            },
+            recoveryControl: {
+              type: "object",
+              properties: {
+                present: { type: "boolean" },
+                evidence: { type: "string" },
+                approxBox: {
+                  type: ["object", "null"],
+                  properties: {
+                    x: { type: "number" },
+                    y: { type: "number" },
+                    width: { type: "number" },
+                    height: { type: "number" }
+                  },
+                  required: ["x", "y", "width", "height"],
+                  additionalProperties: false
+                }
+              },
+              required: ["present", "evidence", "approxBox"],
+              additionalProperties: false
             },
             openThread: { type: ["string", "null"] },
             visibleUnreadThreads: {
@@ -1632,11 +1675,11 @@ async function analyzeWeChatDesktopVisualState({
             targetThreadOpen: { type: ["boolean", "null"] },
             prefillVisible: { type: ["boolean", "null"] }
           },
-          required: ["scene", "sceneEvidence", "recommendedRecoveryAction", "openThread", "visibleUnreadThreads", "composer"],
+          required: ["scene", "sceneEvidence", "recommendedRecoveryAction", "recoveryControl", "openThread", "visibleUnreadThreads", "composer"],
           additionalProperties: false
         },
         systemPrompt:
-          "You are a strict UI grounding model for AgentOS. First classify the overall WeChat scene as chat_list, thread_open, foreign_view, or unknown. foreign_view means the agent is inside an article reader, file preview, browser-like detail page, minimized groups page, or any non-reply surface that should be recovered back to the chat list. Then identify the currently open WeChat thread, any clearly visible unread conversation rows in the left sidebar, and the bottom composer area. Only mark a thread as unread when there is visible red badge, red mention tag, red unread count, or red highlight evidence on that row. For each unread row, estimate the clickable row box in normalized screenshot coordinates, classify the conversation, and decide whether AgentOS should reply right now. Return JSON only.",
+          "You are a strict UI grounding model for AgentOS. First classify the overall WeChat scene as chat_list, thread_open, foreign_view, or unknown. foreign_view means the agent is inside an article reader, file preview, browser-like detail page, minimized groups page, or any non-reply surface that should be recovered back to the chat list. When the scene is foreign_view or unknown, identify the best visible recovery control that would return AgentOS to the main chat list. Then identify the currently open WeChat thread, any clearly visible unread conversation rows in the left sidebar, and the bottom composer area. Only mark a thread as unread when there is visible red badge, red mention tag, red unread count, or red highlight evidence on that row. For each unread row, estimate the clickable row box in normalized screenshot coordinates, classify the conversation, and decide whether AgentOS should reply right now. Return JSON only.",
         userPrompt: payload,
         imagePath,
         temperature: 0
@@ -2226,6 +2269,37 @@ function buildWorldStateFingerprint(worldState: WorldState | null): string {
   return fingerprint(`${String(worldState?.visibleText ?? "").trim()}|${candidateSignature}`);
 }
 
+function isWeChatRecoveryScene(vision: WeChatVisualAnalysis | null): boolean {
+  if (!vision) {
+    return false;
+  }
+  return vision.scene === "foreign_view" || vision.recommendedRecoveryAction === "recover_to_list";
+}
+
+function resolveWeChatVisionBoxPoint({
+  bounds,
+  box,
+  anchorX = 0.5,
+  anchorY = 0.5
+}: {
+  bounds: InteractionCandidate["bounds"] | null;
+  box: WeChatVisualComposerBox | null | undefined;
+  anchorX?: number;
+  anchorY?: number;
+}): { x: number; y: number } | null {
+  if (!bounds || !box) {
+    return null;
+  }
+
+  const x = Number(bounds.x ?? 0) + Number(bounds.width ?? 0) * (box.x + box.width * anchorX);
+  const y = Number(bounds.y ?? 0) + Number(bounds.height ?? 0) * (box.y + box.height * anchorY);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) {
+    return null;
+  }
+
+  return { x, y };
+}
+
 function deriveWeChatConversationListPoint(worldState: WorldState | null): { x: number; y: number } | null {
   const windowBounds = findDesktopWindowBounds(worldState, "WeChat");
   if (windowBounds) {
@@ -2361,6 +2435,122 @@ async function scanWeChatVisionUnreadConversation({
     vision: currentVision,
     match: null,
     scrollPasses: seenStates.size
+  };
+}
+
+async function recoverWeChatSceneToChatList({
+  rule,
+  workspace,
+  surfaceRegistry,
+  controlPlane,
+  worldState,
+  vision
+}: LivePackDetectionArgs & {
+  worldState: WorldState | null;
+  vision: WeChatVisualAnalysis | null;
+}): Promise<{
+  worldState: WorldState | null;
+  vision: WeChatVisualAnalysis | null;
+  recoveryAttempts: number;
+}> {
+  if (!isWeChatRecoveryScene(vision)) {
+    return {
+      worldState,
+      vision,
+      recoveryAttempts: 0
+    };
+  }
+
+  const adapter = surfaceRegistry.get("desktop");
+  if (!adapter || typeof (adapter as { act?: unknown }).act !== "function") {
+    return {
+      worldState,
+      vision,
+      recoveryAttempts: 0
+    };
+  }
+
+  const watchTask = createWatchTask(rule);
+  const watchWorkspace = profileAsWorkspace(rule, workspace);
+  const act = (adapter as { act: (args: unknown) => Promise<unknown> }).act.bind(adapter);
+  let currentState = worldState;
+  let currentVision = vision;
+
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    if (!isWeChatRecoveryScene(currentVision)) {
+      return {
+        worldState: currentState,
+        vision: currentVision,
+        recoveryAttempts: attempt - 1
+      };
+    }
+
+    await act({
+      task: watchTask,
+      workspace: watchWorkspace,
+      traceId: null,
+      outputs: {},
+      step: {
+        id: `watch-wechat-recover-focus-${rule.id}-${attempt}`,
+        label: "Focus WeChat",
+        surface: "desktop",
+        action: "focusApp",
+        params: { name: rule.appTarget ?? "WeChat" },
+        checkpoint: false
+      }
+    } as never).catch(() => null);
+
+    const recoveryPoint = await resolveWeChatRecoveryPoint(currentState, currentVision);
+    if (recoveryPoint) {
+      await act({
+        task: watchTask,
+        workspace: watchWorkspace,
+        traceId: null,
+        outputs: {},
+        step: {
+          id: `watch-wechat-recover-click-${rule.id}-${attempt}`,
+          label: "Recover WeChat to chat list",
+          surface: "desktop",
+          action: "clickAt",
+          params: recoveryPoint,
+          checkpoint: false
+        }
+      } as never).catch(() => null);
+    } else {
+      await act({
+        task: watchTask,
+        workspace: watchWorkspace,
+        traceId: null,
+        outputs: {},
+        step: {
+          id: `watch-wechat-recover-escape-${rule.id}-${attempt}`,
+          label: "Dismiss WeChat foreign view",
+          surface: "desktop",
+          action: "pressKey",
+          params: { key: "Escape" },
+          checkpoint: false
+        }
+      } as never).catch(() => null);
+    }
+
+    currentState = await observeWatchSurface({
+      rule,
+      workspace,
+      surfaceRegistry,
+      controlPlane,
+      surface: "desktop",
+      desktopRequireAccessibility: false
+    }).catch(() => currentState);
+    currentVision = await analyzeWeChatDesktopVisualState({
+      modelClient: controlPlane.modelClient,
+      worldState: currentState
+    }).catch(() => null);
+  }
+
+  return {
+    worldState: currentState,
+    vision: currentVision,
+    recoveryAttempts: 2
   };
 }
 
@@ -3435,6 +3625,21 @@ export function analyzeConversationPack(
   return null;
 }
 
+async function resolveWeChatRecoveryPoint(
+  worldState: WorldState | null,
+  vision: WeChatVisualAnalysis | null
+): Promise<{ x: number; y: number } | null> {
+  if (!vision?.recoveryControl?.present || !vision.recoveryControl.approxBox) {
+    return null;
+  }
+
+  const bounds = await resolveDesktopVisionFrame(worldState, "WeChat");
+  return resolveWeChatVisionBoxPoint({
+    bounds,
+    box: vision.recoveryControl.approxBox
+  });
+}
+
 export function analyzeDesktopConversationPack(
   packName: string,
   worldState: WorldState | null
@@ -4096,11 +4301,29 @@ function createWeChatPack(): LivePack {
       });
     },
     async detectNewItems({ rule, worldState, dedupeState = {}, workspace, surfaceRegistry, controlPlane }) {
-      const initialVision = await analyzeWeChatDesktopVisualState({
+      let initialVision = await analyzeWeChatDesktopVisualState({
         modelClient: controlPlane.modelClient,
         worldState
       }).catch(() => null);
       if (!initialVision) {
+        return null;
+      }
+      let effectiveInitialWorldState = worldState;
+      let recoveryAttempts = 0;
+      if (isWeChatRecoveryScene(initialVision)) {
+        const recovered = await recoverWeChatSceneToChatList({
+          rule,
+          worldState,
+          workspace,
+          surfaceRegistry,
+          controlPlane,
+          vision: initialVision
+        });
+        effectiveInitialWorldState = recovered.worldState ?? worldState;
+        initialVision = recovered.vision;
+        recoveryAttempts = recovered.recoveryAttempts;
+      }
+      if (!initialVision || isWeChatRecoveryScene(initialVision)) {
         return null;
       }
       const {
@@ -4110,11 +4333,11 @@ function createWeChatPack(): LivePack {
         scrollPasses
       } = await scanWeChatVisionUnreadConversation({
         rule,
-        worldState,
+        worldState: effectiveInitialWorldState,
         workspace,
         surfaceRegistry,
         controlPlane,
-        initialWorldState: worldState,
+        initialWorldState: effectiveInitialWorldState,
         initialVision
       });
       if (!vision || !visualMatch) {
@@ -4209,6 +4432,7 @@ function createWeChatPack(): LivePack {
           ...(groundedTarget ? { threadGrounding: groundedTarget } : {}),
           ...(visualThread ? { visualThread } : {}),
           ...(vision ? { visualAnalysis: vision } : {}),
+          recoveryAttempts,
           scrollPasses,
           threadVerificationDeferred: true,
           ...metadata
