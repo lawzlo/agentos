@@ -356,6 +356,17 @@ test("collectDesktopProbe falls back to OCR world state when target app inspecti
             ocrBlocks: [],
             interactionCandidates: [
               {
+                id: "wechat-badge",
+                surface: "desktop",
+                kind: "text",
+                text: "2",
+                role: "text",
+                bounds: { x: 90, y: 140, width: 18, height: 18, centerX: 99, centerY: 149 },
+                confidence: 0.93,
+                sourceHints: { source: "ocr" },
+                isInteractive: true
+              },
+              {
                 id: "wechat-thread-ocr",
                 surface: "desktop",
                 kind: "text",
@@ -367,7 +378,7 @@ test("collectDesktopProbe falls back to OCR world state when target app inspecti
                 isInteractive: true
               }
             ],
-            visibleText: "Official Accounts\n03/11\nhttps://apps.apple.co..\n",
+            visibleText: "未读\nOfficial Accounts\n03/11\nhttps://apps.apple.co..\n",
             recentActions: [],
             summary: "WeChat OCR capture",
             timestamp: new Date().toISOString()
@@ -436,6 +447,17 @@ test("collectDesktopProbe does not treat message-count body text as a WeChat com
             ocrBlocks: [],
             interactionCandidates: [
               {
+                id: "wechat-badge",
+                surface: "desktop",
+                kind: "text",
+                text: "1",
+                role: "text",
+                bounds: { x: 190, y: 170, width: 18, height: 18, centerX: 199, centerY: 179 },
+                confidence: 0.94,
+                sourceHints: { source: "ocr" },
+                isInteractive: true
+              },
+              {
                 id: "wechat-thread",
                 surface: "desktop",
                 kind: "text",
@@ -458,7 +480,7 @@ test("collectDesktopProbe does not treat message-count body text as a WeChat com
                 isInteractive: true
               }
             ],
-            visibleText: "Tan\n25P5 #Jit: [Video] 4 message(s)",
+            visibleText: "未读\nTan\n25P5 #Jit: [Video] 4 message(s)",
             recentActions: [],
             summary: "WeChat body text without visible composer",
             timestamp: new Date().toISOString()
@@ -472,4 +494,84 @@ test("collectDesktopProbe does not treat message-count body text as a WeChat com
   assert.equal(report.packAnalysis?.foreground, true);
   assert.equal(report.packAnalysis?.unreadCandidate?.text, "Tan");
   assert.equal(report.packAnalysis?.composeCandidate, null);
+});
+
+test("collectDesktopProbe does not report a WeChat unread candidate without unread evidence", async () => {
+  const rootPath = await createTempDir("agentos-desktop-probe-");
+  const workspace = createWorkspace(rootPath);
+  const report = await collectDesktopProbe(
+    {
+      appName: "WeChat",
+      packName: "wechat-desktop",
+      workspaceName: workspace.name,
+      sampleLimit: 8,
+      timeoutMs: 800,
+      requireAccessibility: false,
+      waitReady: false
+    },
+    {
+      workspace,
+      adapter: {
+        async focus() {
+          return { focused: "WeChat" };
+        },
+        async observe() {
+          return {
+            version: 1,
+            surface: "desktop",
+            workspaceId: workspace.id,
+            appContext: {
+              appName: "WeChat",
+              windows: [
+                {
+                  ownerName: "WeChat",
+                  windowName: "WeChat",
+                  windowNumber: 11,
+                  bounds: { x: 0, y: 0, width: 900, height: 700, centerX: 450, centerY: 350 }
+                }
+              ],
+              captureWindowNumber: 11,
+              accessibilityCandidateCount: 0,
+              ocrAvailable: true,
+              ocrError: null
+            },
+            capture: null,
+            ocrBlocks: [],
+            interactionCandidates: [
+              {
+                id: "global-badge",
+                surface: "desktop",
+                kind: "text",
+                text: "36",
+                role: "text",
+                bounds: { x: 30, y: 90, width: 26, height: 20, centerX: 43, centerY: 100 },
+                confidence: 0.91,
+                sourceHints: { source: "ocr" },
+                isInteractive: true
+              },
+              {
+                id: "thread-tan",
+                surface: "desktop",
+                kind: "text",
+                text: "Tan",
+                role: "text",
+                bounds: { x: 220, y: 160, width: 80, height: 24, centerX: 260, centerY: 172 },
+                confidence: 0.95,
+                sourceHints: { source: "ocr-wechat-list" },
+                isInteractive: true
+              }
+            ],
+            visibleText: "36\nSearch\nTan\n03/11\nhttps://apps.apple.co...",
+            recentActions: [],
+            summary: "WeChat list",
+            timestamp: new Date().toISOString()
+          };
+        },
+        async shutdown() {}
+      }
+    }
+  );
+
+  assert.equal(report.packAnalysis?.unreadCandidate, null);
+  assert.deepEqual(report.packAnalysis?.topUnreadCandidates ?? [], []);
 });

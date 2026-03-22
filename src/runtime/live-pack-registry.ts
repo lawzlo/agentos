@@ -1102,8 +1102,14 @@ function scoreWeChatCandidate({
   if (source.includes("ocr-wechat-compose")) {
     score -= 32;
   }
+  const unreadEvidence = hasWeChatUnreadEvidence(candidate, worldState);
   if (UNREAD_PATTERN.test(hintText)) {
     score += 28;
+  }
+  if (unreadEvidence) {
+    score += 18;
+  } else {
+    score -= 18;
   }
 
   const lines = visibleLines(worldState);
@@ -1193,12 +1199,68 @@ function rankWeChatUnreadCandidates(worldState: WorldState | null): Array<{
   const candidates = conversationCandidates(worldState);
   return candidates
     .map((candidate) => ({ candidate, score: scoreWeChatCandidate({ candidate, worldState }) }))
-    .filter((entry): entry is { candidate: InteractionCandidate; score: number } => Number.isFinite(entry.score))
+    .filter(
+      (entry): entry is { candidate: InteractionCandidate; score: number } =>
+        Number.isFinite(entry.score) && hasWeChatUnreadEvidence(entry.candidate, worldState)
+    )
     .sort((left, right) => right.score - left.score);
 }
 
 function findWeChatUnreadCandidate(worldState: WorldState | null): InteractionCandidate | null {
   return rankWeChatUnreadCandidates(worldState)[0]?.candidate ?? null;
+}
+
+function isWeChatBadgeLikeText(value: unknown): boolean {
+  return /^(?:\d{1,3}|\d{1,3}\+)$/.test(String(value ?? "").trim());
+}
+
+function hasWeChatUnreadBadgeNearCandidate(candidate: InteractionCandidate, worldState: WorldState | null): boolean {
+  const position = relativeWeChatCandidatePosition(candidate, worldState);
+  if (!position) {
+    return false;
+  }
+
+  return wechatCandidates(worldState).some((other) => {
+    if (!other || other.id === candidate.id || !isWeChatBadgeLikeText(other.text)) {
+      return false;
+    }
+    const otherPosition = relativeWeChatCandidatePosition(other, worldState);
+    if (!otherPosition) {
+      return false;
+    }
+    const rowAligned = Math.abs(otherPosition.y - position.y) <= Math.max(28, position.height * 0.9);
+    const nearLeft = otherPosition.x >= 0 && otherPosition.x < position.x && position.x - otherPosition.x <= 96;
+    return rowAligned && nearLeft;
+  });
+}
+
+function hasWeChatUnreadEvidence(candidate: InteractionCandidate, worldState: WorldState | null): boolean {
+  const hintText = candidateHintText(candidate);
+  const summary = normalizeWeChatSummary(candidate.text || hintText);
+  if (!summary) {
+    return false;
+  }
+  if (UNREAD_PATTERN.test(hintText) || UNREAD_PATTERN.test(candidate.text)) {
+    return true;
+  }
+  if (hasWeChatUnreadBadgeNearCandidate(candidate, worldState)) {
+    return true;
+  }
+
+  const lines = visibleLines(worldState);
+  for (const [index, line] of lines.entries()) {
+    if (!UNREAD_PATTERN.test(line)) {
+      continue;
+    }
+    const nearby = lines
+      .slice(Math.max(0, index - 2), index + 6)
+      .some((entry) => entry.includes(summary) || summary.includes(normalizeWeChatSummary(entry)));
+    if (nearby) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 function findWeChatWindowGeometry(worldState: WorldState | null): {

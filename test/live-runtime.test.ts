@@ -2111,6 +2111,17 @@ test("wechat desktop pack can fall back to clicking the composer area when no co
     ocrBlocks: [],
     interactionCandidates: [
       {
+        id: "thread-tan-badge",
+        surface: "desktop",
+        kind: "text",
+        text: "2",
+        role: "text",
+        bounds: { x: 150, y: 160, width: 20, height: 20, centerX: 160, centerY: 170 },
+        confidence: 0.95,
+        sourceHints: { source: "ocr" },
+        isInteractive: true
+      },
+      {
         id: "thread-tan",
         surface: "desktop",
         kind: "text",
@@ -2122,7 +2133,7 @@ test("wechat desktop pack can fall back to clicking the composer area when no co
         isInteractive: true
       }
     ],
-    visibleText: "WeChat\nTan\n11:15",
+    visibleText: "WeChat\n未读\nTan\n11:15",
     recentActions: [],
     summary: "WeChat inbox",
     timestamp: new Date().toISOString()
@@ -2276,6 +2287,17 @@ test("wechat desktop pack can fall back to OCR-only detections when accessibilit
     capture: null,
     ocrBlocks: [],
     interactionCandidates: [
+      {
+        id: "ocr-badge-lisi",
+        surface: "desktop",
+        kind: "text",
+        text: "1",
+        role: "text",
+        bounds: { x: 36, y: 140, width: 18, height: 18, centerX: 45, centerY: 149 },
+        confidence: 0.94,
+        sourceHints: { source: "ocr" },
+        isInteractive: true
+      },
       {
         id: "ocr-thread-lisi",
         surface: "desktop",
@@ -2489,6 +2511,17 @@ test("wechat desktop OCR scoring downranks dates and URL snippets in the convers
     ocrBlocks: [],
     interactionCandidates: [
       {
+        id: "ocr-badge-official-accounts",
+        surface: "desktop",
+        kind: "text",
+        text: "2",
+        role: "text",
+        bounds: { x: 80, y: 120, width: 18, height: 18, centerX: 89, centerY: 129 },
+        confidence: 0.95,
+        sourceHints: { source: "ocr" },
+        isInteractive: true
+      },
+      {
         id: "ocr-thread-official-accounts",
         surface: "desktop",
         kind: "text",
@@ -2522,7 +2555,7 @@ test("wechat desktop OCR scoring downranks dates and URL snippets in the convers
         isInteractive: true
       }
     ],
-    visibleText: "Official Accounts\n03/11\nhttps://apps.apple.co..\n",
+    visibleText: "未读\nOfficial Accounts\n03/11\nhttps://apps.apple.co..\n",
     recentActions: [],
     summary: "WeChat OCR capture",
     timestamp: new Date().toISOString()
@@ -2600,6 +2633,17 @@ test("wechat desktop OCR scoring prefers list-region candidates over compose-reg
     ocrBlocks: [],
     interactionCandidates: [
       {
+        id: "ocr-badge-official-accounts",
+        surface: "desktop",
+        kind: "text",
+        text: "1",
+        role: "text",
+        bounds: { x: 150, y: 140, width: 18, height: 18, centerX: 159, centerY: 149 },
+        confidence: 0.95,
+        sourceHints: { source: "ocr" },
+        isInteractive: true
+      },
+      {
         id: "ocr-thread-official-accounts",
         surface: "desktop",
         kind: "text",
@@ -2622,7 +2666,7 @@ test("wechat desktop OCR scoring prefers list-region candidates over compose-reg
         isInteractive: true
       }
     ],
-    visibleText: "Official Accounts\n输入\n",
+    visibleText: "未读\nOfficial Accounts\n输入\n",
     recentActions: [],
     summary: "WeChat OCR capture",
     timestamp: new Date().toISOString()
@@ -2669,6 +2713,17 @@ test("wechat desktop pack can scroll the conversation list to find off-screen un
     ...initialWorldState,
     interactionCandidates: [
       {
+        id: "ocr-badge-official-accounts",
+        surface: "desktop",
+        kind: "text",
+        text: "3",
+        role: "text",
+        bounds: { x: 140, y: 210, width: 18, height: 18, centerX: 149, centerY: 219 },
+        confidence: 0.95,
+        sourceHints: { source: "ocr" },
+        isInteractive: true
+      },
+      {
         id: "ocr-thread-official-accounts",
         surface: "desktop",
         kind: "text",
@@ -2680,7 +2735,7 @@ test("wechat desktop pack can scroll the conversation list to find off-screen un
         isInteractive: true
       }
     ],
-    visibleText: "微信\nOfficial Accounts\n03/11\nhttps://apps.apple.co..\n"
+    visibleText: "微信\n未读\nOfficial Accounts\n03/11\nhttps://apps.apple.co..\n"
   };
   const fakeSurface = {
     async observe() {
