@@ -725,7 +725,21 @@ const WECHAT_THREAD_HEADER_REGION = {
   x: 0.34,
   y: 0.02,
   width: 0.6,
-  height: 0.16
+  height: 0.26
+} as const;
+
+const WECHAT_THREAD_PANE_REGION = {
+  x: 0.34,
+  y: 0.02,
+  width: 0.62,
+  height: 0.72
+} as const;
+
+const WECHAT_THREAD_BODY_REGION = {
+  x: 0.34,
+  y: 0.14,
+  width: 0.62,
+  height: 0.58
 } as const;
 
 const WECHAT_COMPOSER_REGION = {
@@ -851,6 +865,11 @@ function conversationCandidates(
   }
 
   return accessibilityCandidates.length ? accessibilityCandidates : candidates.filter((candidate) => !isDesktopWindowControlCandidate(candidate));
+}
+
+function wechatCandidates(worldState: WorldState | null): InteractionCandidate[] {
+  const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
+  return candidates.filter((candidate) => !isDesktopWindowControlCandidate(candidate));
 }
 
 function scoreSlackCandidate({
@@ -1233,17 +1252,55 @@ function relativeWeChatCandidatePosition(
   return { x, y, width, height };
 }
 
-function isWeChatCandidateInComposeRegion(candidate: InteractionCandidate | null, worldState: WorldState | null): boolean {
+function isWeChatCandidateInRegion(
+  candidate: InteractionCandidate | null,
+  worldState: WorldState | null,
+  region: { x: number; y: number; width: number; height: number }
+): boolean {
   const position = relativeWeChatCandidatePosition(candidate, worldState);
   if (!position) {
     return false;
   }
 
   return (
-    position.x >= position.width * 0.34 &&
-    position.x <= position.width * 0.96 &&
-    position.y >= position.height * 0.72 &&
-    position.y <= position.height * 0.98
+    position.x >= position.width * region.x &&
+    position.x <= position.width * (region.x + region.width) &&
+    position.y >= position.height * region.y &&
+    position.y <= position.height * (region.y + region.height)
+  );
+}
+
+function isWeChatCandidateInComposeRegion(candidate: InteractionCandidate | null, worldState: WorldState | null): boolean {
+  return isWeChatCandidateInRegion(candidate, worldState, WECHAT_COMPOSER_REGION);
+}
+
+function isWeChatCandidateInThreadPane(candidate: InteractionCandidate | null, worldState: WorldState | null): boolean {
+  return isWeChatCandidateInRegion(candidate, worldState, WECHAT_THREAD_PANE_REGION);
+}
+
+function isWeChatCandidateInThreadBody(candidate: InteractionCandidate | null, worldState: WorldState | null): boolean {
+  return isWeChatCandidateInRegion(candidate, worldState, WECHAT_THREAD_BODY_REGION);
+}
+
+function findWeChatThreadTargetCandidate(worldState: WorldState | null, summary: string): InteractionCandidate | null {
+  const normalizedSummary = normalizeWeChatSummary(summary);
+  if (!normalizedSummary) {
+    return null;
+  }
+
+  const candidates = wechatCandidates(worldState);
+  return (
+    candidates.find((candidate) => {
+      if (!isWeChatCandidateInThreadPane(candidate, worldState)) {
+        return false;
+      }
+      const candidateSummary = normalizeWeChatSummary(candidate.text || candidateHintText(candidate));
+      return (
+        candidateSummary === normalizedSummary
+        || candidateSummary.includes(normalizedSummary)
+        || normalizedSummary.includes(candidateSummary)
+      );
+    }) ?? null
   );
 }
 
@@ -1459,7 +1516,13 @@ async function scanWeChatUnreadConversation({
 }
 
 function extractWeChatThreadContext(worldState: WorldState | null, summary: string): string[] {
-  const lines = visibleLines(worldState).filter((line) => !isWeChatUiChrome(line));
+  const threadRegionLines = wechatCandidates(worldState)
+    .filter((candidate) => isWeChatCandidateInThreadBody(candidate, worldState))
+    .map((candidate) => String(candidate.text ?? "").trim())
+    .filter(Boolean);
+  const lines = uniqueStrings(threadRegionLines.length >= 2 ? threadRegionLines : visibleLines(worldState)).filter(
+    (line) => !isWeChatUiChrome(line)
+  );
   const normalizedSummary = normalizeWeChatSummary(summary);
   const summaryIndex = lines.findIndex((line) => normalizeWeChatSummary(line) === normalizedSummary);
   const pool = summaryIndex === -1 ? lines : lines.slice(summaryIndex + 1);
@@ -3028,13 +3091,16 @@ function createWeChatPack(): LivePack {
         surface: "desktop",
         desktopRequireAccessibility: false
       });
+      const summary = String(detection.summary ?? "").trim();
+      if (!findWeChatThreadTargetCandidate(threadState, summary)) {
+        return null;
+      }
       const composeCandidate = findWeChatComposeCandidate(threadState);
       const sendCandidate = findWeChatSendCandidate(threadState);
       const composerFallback = composeCandidate ? null : deriveWeChatComposerFallback(threadState);
       if (!composeCandidate && !composerFallback) {
         return null;
       }
-      const summary = String(detection.summary ?? "").trim();
       const context = extractWeChatThreadContext(threadState, summary);
       const openTarget = String(detection.inputs?.openTarget ?? summary).trim() || summary;
       const openCandidate = (detection.metadata?.openCandidate ?? null) as InteractionCandidate | Record<string, unknown> | null;

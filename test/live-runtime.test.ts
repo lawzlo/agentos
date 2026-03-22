@@ -1971,6 +1971,17 @@ test("wechat desktop pack can detect unread conversations and build reply steps 
         isInteractive: true
       },
       {
+        id: "thread-title",
+        surface: "desktop",
+        kind: "text",
+        text: "张三",
+        role: "text",
+        bounds: { x: 520, y: 96, width: 90, height: 24, centerX: 565, centerY: 108 },
+        confidence: 0.97,
+        sourceHints: { source: "ocr" },
+        isInteractive: true
+      },
+      {
         id: "send",
         surface: "desktop",
         kind: "text",
@@ -2125,6 +2136,17 @@ test("wechat desktop pack can fall back to clicking the composer area when no co
         role: "text",
         bounds: { x: 620, y: 150, width: 320, height: 28, centerX: 780, centerY: 164 },
         confidence: 0.92,
+        sourceHints: { source: "ocr" },
+        isInteractive: true
+      },
+      {
+        id: "thread-title",
+        surface: "desktop",
+        kind: "text",
+        text: "Tan",
+        role: "text",
+        bounds: { x: 520, y: 96, width: 80, height: 24, centerX: 560, centerY: 108 },
+        confidence: 0.95,
         sourceHints: { source: "ocr" },
         isInteractive: true
       },
@@ -2289,6 +2311,17 @@ test("wechat desktop pack can fall back to OCR-only detections when accessibilit
         role: "text",
         bounds: { x: 280, y: 630, width: 100, height: 24, centerX: 330, centerY: 642 },
         confidence: 0.92,
+        sourceHints: { source: "ocr" },
+        isInteractive: true
+      },
+      {
+        id: "ocr-thread-title",
+        surface: "desktop",
+        kind: "text",
+        text: "李四",
+        role: "text",
+        bounds: { x: 500, y: 96, width: 80, height: 24, centerX: 540, centerY: 108 },
+        confidence: 0.94,
         sourceHints: { source: "ocr" },
         isInteractive: true
       },
