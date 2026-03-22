@@ -540,9 +540,29 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
           )
         : null;
     const accessibilityCandidates = createAccessibilityCandidates(accessibility, "desktop");
+    const windows =
+      typeof bridge.listWindows === "function"
+        ? await this.#withTimeout(
+            bridge
+              .listWindows()
+              .then((result) =>
+                Array.isArray(result?.windows)
+                  ? result.windows.filter((entry) => {
+                      const owner = String(entry?.ownerName ?? "").trim().toLowerCase();
+                      const target = targetAppName.toLowerCase();
+                      return owner === target || owner.includes(target);
+                    })
+                  : []
+              )
+              .catch(() => []),
+            this.timeouts.windowsMs,
+            () => []
+          )
+        : [];
     return {
       targetAppName,
       frontmostApp: String(frontmostApp?.appName ?? "").trim() || null,
+      windows,
       accessibility,
       accessibilityCandidateCount: accessibilityCandidates.length,
       interactionCandidates: accessibilityCandidates,

@@ -31,6 +31,7 @@ interface DesktopProbeAdapter {
     targetAppName: string;
     frontmostApp: string | null;
     accessibility: { elements?: unknown[] } | null;
+    windows?: Array<Record<string, unknown>>;
     accessibilityCandidateCount: number;
     interactionCandidates: InteractionCandidate[];
     visibleText: string;
@@ -345,6 +346,10 @@ export async function collectDesktopProbe(request: DesktopProbeRequest, deps: De
               ...(worldState.appContext ?? {}),
               appName: targetInspection.frontmostApp ?? null,
               targetAppName: request.appName,
+              windows:
+                Array.isArray(targetInspection.windows) && targetInspection.windows.length
+                  ? targetInspection.windows
+                  : ((worldState.appContext ?? {}) as Record<string, unknown>).windows,
               accessibility: targetInspection.accessibility,
               accessibilityCandidateCount: targetInspection.accessibilityCandidateCount
             },

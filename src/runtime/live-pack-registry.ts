@@ -1175,17 +1175,107 @@ function findWeChatUnreadCandidate(worldState: WorldState | null): InteractionCa
   return rankWeChatUnreadCandidates(worldState)[0]?.candidate ?? null;
 }
 
+function findWeChatWindowGeometry(worldState: WorldState | null): {
+  windowBounds: InteractionCandidate["bounds"] | null;
+  captureWindowNumber: number | null;
+  windowNumber: number | null;
+} {
+  const appContext = (worldState?.appContext ?? null) as Record<string, unknown> | null;
+  const windows = Array.isArray(appContext?.windows)
+    ? (appContext.windows as Array<Record<string, unknown>>).filter((entry) => {
+        const owner = String(entry?.ownerName ?? "").toLowerCase();
+        return owner.includes("wechat") || owner.includes("微信");
+      })
+    : [];
+  const primaryWindow = windows[0] ?? null;
+  return {
+    windowBounds: (primaryWindow?.bounds ?? null) as InteractionCandidate["bounds"] | null,
+    captureWindowNumber: Number.isFinite(Number(appContext?.captureWindowNumber ?? NaN))
+      ? Number(appContext?.captureWindowNumber ?? NaN)
+      : null,
+    windowNumber: Number.isFinite(Number((primaryWindow as Record<string, unknown> | null)?.windowNumber ?? NaN))
+      ? Number((primaryWindow as Record<string, unknown> | null)?.windowNumber ?? NaN)
+      : null
+  };
+}
+
+function relativeWeChatCandidatePosition(
+  candidate: InteractionCandidate | null,
+  worldState: WorldState | null
+): { x: number; y: number; width: number; height: number } | null {
+  if (!candidate?.bounds) {
+    return null;
+  }
+
+  const { windowBounds, captureWindowNumber, windowNumber } = findWeChatWindowGeometry(worldState);
+  if (!windowBounds) {
+    return null;
+  }
+
+  const width = Math.max(1, Number(windowBounds.width ?? 1));
+  const height = Math.max(1, Number(windowBounds.height ?? 1));
+  const usingWindowLocalCoordinates =
+    Number.isFinite(Number(captureWindowNumber))
+    && Number(captureWindowNumber) > 0
+    && Number.isFinite(Number(windowNumber))
+    && Number(captureWindowNumber) === Number(windowNumber);
+  const x = usingWindowLocalCoordinates
+    ? Number(candidate.bounds.centerX ?? 0)
+    : Number(candidate.bounds.centerX ?? 0) - Number(windowBounds.x ?? 0);
+  const y = usingWindowLocalCoordinates
+    ? Number(candidate.bounds.centerY ?? 0)
+    : Number(candidate.bounds.centerY ?? 0) - Number(windowBounds.y ?? 0);
+
+  if (!Number.isFinite(x) || !Number.isFinite(y)) {
+    return null;
+  }
+
+  return { x, y, width, height };
+}
+
+function isWeChatCandidateInComposeRegion(candidate: InteractionCandidate | null, worldState: WorldState | null): boolean {
+  const position = relativeWeChatCandidatePosition(candidate, worldState);
+  if (!position) {
+    return false;
+  }
+
+  return (
+    position.x >= position.width * 0.34 &&
+    position.x <= position.width * 0.96 &&
+    position.y >= position.height * 0.72 &&
+    position.y <= position.height * 0.98
+  );
+}
+
+function looksLikeWeChatComposePlaceholder(value: unknown): boolean {
+  return /(input message|type a message|message input|enter message|write a message|输入消息|请输入|发消息|回复)/iu.test(
+    String(value ?? "")
+  );
+}
+
+function looksLikeWeChatComposeNoise(value: unknown): boolean {
+  return /(\b\d+\s+message(?:\(s\)|s)?\b|\[(video|link|photo|image)\]|https?:\/\/|official accounts|公众号)/iu.test(
+    String(value ?? "")
+  );
+}
+
 function findWeChatComposeCandidate(worldState: WorldState | null): InteractionCandidate | null {
   const candidates = conversationCandidates(worldState);
   return (
     candidates.find((candidate) => {
       const source = String((candidate.sourceHints ?? {}).source ?? "").toLowerCase();
       const hintText = candidateHintText(candidate);
+      const inComposeRegion = isWeChatCandidateInComposeRegion(candidate, worldState);
+      const placeholderSignal =
+        looksLikeWeChatComposePlaceholder(hintText) || looksLikeWeChatComposePlaceholder(candidate.text);
+      const sourceIsComposeRegion = source.includes("ocr-wechat-compose");
+      if (looksLikeWeChatComposeNoise(hintText) || looksLikeWeChatComposeNoise(candidate.text)) {
+        return false;
+      }
       return (
-        source.includes("ocr-wechat-compose") ||
-        candidate.role === "textbox" ||
-        /(message|reply|input|chat|消息|回复|输入|请输入)/iu.test(hintText) ||
-        /(message|reply|input|chat|消息|回复|输入|请输入)/iu.test(candidate.text)
+        (candidate.role === "textbox" && inComposeRegion) ||
+        (sourceIsComposeRegion && placeholderSignal && inComposeRegion) ||
+        (placeholderSignal && inComposeRegion)
       );
     }) ?? null
   );

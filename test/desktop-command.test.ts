@@ -32,10 +32,22 @@ test("collectDesktopProbe summarizes a WeChat world state and pack analysis", as
     workspaceId: workspace.id,
     appContext: {
       appName: "WeChat",
-      windows: [{ title: "WeChat" }],
+      windows: [
+        {
+          ownerName: "WeChat",
+          windowName: "WeChat",
+          bounds: { x: 100, y: 40, width: 900, height: 700, centerX: 550, centerY: 390 }
+        }
+      ],
       accessibility: {
         appName: "WeChat",
-        windows: [{ title: "WeChat" }],
+        windows: [
+          {
+            ownerName: "WeChat",
+            windowName: "WeChat",
+            bounds: { x: 100, y: 40, width: 900, height: 700, centerX: 550, centerY: 390 }
+          }
+        ],
         elements: [{ id: "ax-1" }, { id: "ax-2" }, { id: "ax-3" }]
       },
       accessibilityCandidateCount: 3,
@@ -78,7 +90,7 @@ test("collectDesktopProbe summarizes a WeChat world state and pack analysis", as
         kind: "text",
         text: "输入消息",
         role: "textbox",
-        bounds: { x: 10, y: 210, width: 240, height: 32, centerX: 130, centerY: 226 },
+        bounds: { x: 420, y: 640, width: 260, height: 32, centerX: 550, centerY: 656 },
         confidence: 0.98,
         sourceHints: { source: "accessibility", placeholder: "输入消息", actions: ["AXPress"] },
         isInteractive: true
@@ -89,7 +101,7 @@ test("collectDesktopProbe summarizes a WeChat world state and pack analysis", as
         kind: "text",
         text: "发送",
         role: "button",
-        bounds: { x: 260, y: 210, width: 60, height: 32, centerX: 290, centerY: 226 },
+        bounds: { x: 760, y: 640, width: 70, height: 32, centerX: 795, centerY: 656 },
         confidence: 0.98,
         sourceHints: { source: "accessibility", actions: ["AXPress"] },
         isInteractive: true
@@ -244,7 +256,22 @@ test("collectDesktopProbe can analyze a target app even when the current frontmo
           return {
             targetAppName: "WeChat",
             frontmostApp: "Terminal",
+            windows: [
+              {
+                ownerName: "WeChat",
+                windowName: "WeChat",
+                bounds: { x: 100, y: 40, width: 900, height: 700, centerX: 550, centerY: 390 }
+              }
+            ],
             accessibility: {
+              appName: "WeChat",
+              windows: [
+                {
+                  ownerName: "WeChat",
+                  windowName: "WeChat",
+                  bounds: { x: 100, y: 40, width: 900, height: 700, centerX: 550, centerY: 390 }
+                }
+              ],
               elements: [{ id: "ax-1" }, { id: "ax-2" }]
             },
             accessibilityCandidateCount: 2,
@@ -266,7 +293,7 @@ test("collectDesktopProbe can analyze a target app even when the current frontmo
                 kind: "text",
                 text: "输入消息",
                 role: "textbox",
-                bounds: { x: 10, y: 220, width: 200, height: 30, centerX: 110, centerY: 235 },
+                bounds: { x: 420, y: 640, width: 260, height: 32, centerX: 550, centerY: 656 },
                 confidence: 0.98,
                 sourceHints: { source: "accessibility", placeholder: "输入消息" },
                 isInteractive: true
@@ -364,4 +391,85 @@ test("collectDesktopProbe falls back to OCR world state when target app inspecti
   assert.equal(report.packAnalysis?.foreground, true);
   assert.equal(report.packAnalysis?.unreadCandidate?.text, "Official Accounts");
   assert.equal(report.packAnalysis?.topUnreadCandidates[0]?.text, "Official Accounts");
+});
+
+test("collectDesktopProbe does not treat message-count body text as a WeChat composer candidate", async () => {
+  const rootPath = await createTempDir("agentos-desktop-probe-");
+  const workspace = createWorkspace(rootPath);
+  const report = await collectDesktopProbe(
+    {
+      appName: "WeChat",
+      packName: "wechat-desktop",
+      workspaceName: workspace.name,
+      sampleLimit: 4,
+      timeoutMs: 800,
+      requireAccessibility: false,
+      waitReady: false
+    },
+    {
+      workspace,
+      adapter: {
+        async focus() {
+          return { focused: "WeChat" };
+        },
+        async observe() {
+          return {
+            version: 1,
+            surface: "desktop",
+            workspaceId: workspace.id,
+            appContext: {
+              appName: "WeChat",
+              windows: [
+                {
+                  ownerName: "WeChat",
+                  windowName: "WeChat",
+                  windowNumber: 11,
+                  bounds: { x: 0, y: 0, width: 900, height: 700, centerX: 450, centerY: 350 }
+                }
+              ],
+              captureWindowNumber: 11,
+              accessibilityCandidateCount: 0,
+              ocrAvailable: true,
+              ocrError: null
+            },
+            capture: null,
+            ocrBlocks: [],
+            interactionCandidates: [
+              {
+                id: "wechat-thread",
+                surface: "desktop",
+                kind: "text",
+                text: "Tan",
+                role: "text",
+                bounds: { x: 220, y: 170, width: 60, height: 24, centerX: 250, centerY: 182 },
+                confidence: 0.96,
+                sourceHints: { source: "ocr-wechat-list" },
+                isInteractive: true
+              },
+              {
+                id: "wechat-body-summary",
+                surface: "desktop",
+                kind: "text",
+                text: "25P5 #Jit: [Video] 4 message(s)",
+                role: "text",
+                bounds: { x: 620, y: 150, width: 320, height: 28, centerX: 780, centerY: 164 },
+                confidence: 0.92,
+                sourceHints: { source: "ocr" },
+                isInteractive: true
+              }
+            ],
+            visibleText: "Tan\n25P5 #Jit: [Video] 4 message(s)",
+            recentActions: [],
+            summary: "WeChat body text without visible composer",
+            timestamp: new Date().toISOString()
+          };
+        },
+        async shutdown() {}
+      }
+    }
+  );
+
+  assert.equal(report.packAnalysis?.foreground, true);
+  assert.equal(report.packAnalysis?.unreadCandidate?.text, "Tan");
+  assert.equal(report.packAnalysis?.composeCandidate, null);
 });

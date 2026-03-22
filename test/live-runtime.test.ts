@@ -1917,7 +1917,13 @@ test("wechat desktop pack can detect unread conversations and build reply steps 
     workspaceId: "workspace-wechat",
     appContext: {
       appName: "WeChat",
-      windows: [{ title: "WeChat" }]
+      windows: [
+        {
+          ownerName: "WeChat",
+          windowName: "WeChat",
+          bounds: { x: 100, y: 40, width: 900, height: 700, centerX: 550, centerY: 390 }
+        }
+      ]
     },
     capture: null,
     ocrBlocks: [],
@@ -1959,7 +1965,7 @@ test("wechat desktop pack can detect unread conversations and build reply steps 
         kind: "text",
         text: "输入消息",
         role: "textbox",
-        bounds: { x: 10, y: 210, width: 240, height: 32, centerX: 130, centerY: 226 },
+        bounds: { x: 420, y: 640, width: 260, height: 32, centerX: 550, centerY: 656 },
         confidence: 0.98,
         sourceHints: { source: "accessibility", placeholder: "输入消息", actions: ["AXPress"] },
         isInteractive: true
@@ -1970,7 +1976,7 @@ test("wechat desktop pack can detect unread conversations and build reply steps 
         kind: "text",
         text: "发送",
         role: "button",
-        bounds: { x: 260, y: 210, width: 60, height: 32, centerX: 290, centerY: 226 },
+        bounds: { x: 760, y: 640, width: 70, height: 32, centerX: 795, centerY: 656 },
         confidence: 0.98,
         sourceHints: { source: "accessibility", actions: ["AXPress"] },
         isInteractive: true
@@ -2111,6 +2117,17 @@ test("wechat desktop pack can fall back to clicking the composer area when no co
   const threadWorldState = {
     ...initialWorldState,
     interactionCandidates: [
+      {
+        id: "message-summary",
+        surface: "desktop",
+        kind: "text",
+        text: "25P5 #Jit: [Video] 4 message(s)",
+        role: "text",
+        bounds: { x: 620, y: 150, width: 320, height: 28, centerX: 780, centerY: 164 },
+        confidence: 0.92,
+        sourceHints: { source: "ocr" },
+        isInteractive: true
+      },
       {
         id: "message-1",
         surface: "desktop",
@@ -2369,7 +2386,8 @@ test("wechat desktop pack can fall back to OCR-only detections when accessibilit
       modelClient: { isConfigured: () => false }
     } as never
   });
-  assert.equal(context?.inputs?.typeTarget, "输入");
+  assert.equal(Number(context?.inputs?.composeX ?? 0) > 0, true);
+  assert.equal(Number(context?.inputs?.composeY ?? 0) > 0, true);
   assert.equal(context?.inputs?.sendTarget, "发送");
   assert.equal(context?.metadata?.threadKey, "李四");
 });
