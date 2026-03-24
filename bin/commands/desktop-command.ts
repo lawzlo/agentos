@@ -102,6 +102,10 @@ function inferDesktopProbePackName(appName: string): string | null {
   return null;
 }
 
+function visionTimeoutFloorForPack(packName: string | null): number {
+  return packName === "outlook-desktop" ? 25000 : 5000;
+}
+
 function summarizeCandidate(candidate: InteractionCandidate): DesktopProbeCandidateSummary {
   return {
     id: String(candidate.id ?? ""),
@@ -373,7 +377,7 @@ export async function collectDesktopProbe(request: DesktopProbeRequest, deps: De
           packName: request.packName,
           worldState: packAnalysisWorldState,
           modelClient,
-          timeoutMs: Math.max(5000, request.timeoutMs)
+          timeoutMs: Math.max(visionTimeoutFloorForPack(request.packName), request.timeoutMs)
         })
       : null;
     const appContext = (worldState.appContext ?? {}) as Record<string, unknown>;

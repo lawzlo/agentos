@@ -171,7 +171,8 @@ export function formatWatch(
 
 export function formatPack(pack: LivePackInfo) {
   const health = pack.ready === false ? "blocked" : pack.healthChecks?.some((check) => check.status === "warning") ? "warn" : "ready";
-  return `${pack.name.padEnd(20)}  ${String(pack.category ?? pack.family).padEnd(13)}  ${pack.surface.padEnd(7)}  ${health.padEnd(7)}  ${pack.description}`;
+  const tier = String(pack.minimumLicenseTier ?? "free").toUpperCase();
+  return `${pack.name.padEnd(20)}  ${String(pack.category ?? pack.family).padEnd(13)}  ${pack.surface.padEnd(7)}  ${tier.padEnd(4)}  ${health.padEnd(7)}  ${pack.description}`;
 }
 
 export function formatDraft(draft: Pick<DraftRecord, "id" | "status" | "livePack" | "summary">) {

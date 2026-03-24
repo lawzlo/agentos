@@ -20,7 +20,7 @@ export interface DesktopSurfaceTimeoutConfig {
 }
 
 const DEFAULT_DESKTOP_SURFACE_TIMEOUTS: DesktopSurfaceTimeoutConfig = {
-  focusMs: 1800,
+  focusMs: 3200,
   frontmostMs: 1400,
   captureMs: 4500,
   ocrMs: 3500,
@@ -92,11 +92,151 @@ function normalizeSearchText(value: unknown) {
 function observationMatchesQuery(text: unknown, query: string) {
   const normalizedText = normalizeSearchText(text);
   const normalizedQuery = normalizeSearchText(query);
-  if (!normalizedText || !normalizedQuery) {
+  const compactText = normalizeCompactSearchText(text);
+  const compactQuery = normalizeCompactSearchText(query);
+  if ((!normalizedText && !compactText) || (!normalizedQuery && !compactQuery)) {
     return false;
   }
 
-  return normalizedText.includes(normalizedQuery) || normalizedQuery.includes(normalizedText);
+  return (
+    (normalizedText && normalizedQuery && normalizedText.includes(normalizedQuery))
+    || (compactText && compactQuery && compactText.includes(compactQuery))
+  );
+}
+
+function normalizeCompactSearchText(value: unknown) {
+  return String(value ?? "")
+    .replace(/[\s\p{P}\p{S}]+/gu, "")
+    .trim()
+    .toLowerCase();
+}
+
+function candidateSearchTexts(candidate: Record<string, unknown>) {
+  const sourceHints = ((candidate.sourceHints ?? {}) as Record<string, unknown>) ?? {};
+  return uniqueStrings([
+    candidate.text,
+    sourceHints.ariaLabel,
+    sourceHints.placeholder,
+    sourceHints.value,
+    sourceHints.roleDescription
+  ]);
+}
+
+function boundsProximityScore(
+  candidateBounds: Record<string, unknown> | null | undefined,
+  preferredBounds: Record<string, unknown> | null | undefined
+) {
+  if (!candidateBounds || !preferredBounds) {
+    return 0;
+  }
+
+  const candidateCenterX = Number(candidateBounds.centerX ?? NaN);
+  const candidateCenterY = Number(candidateBounds.centerY ?? NaN);
+  const preferredCenterX = Number(preferredBounds.centerX ?? NaN);
+  const preferredCenterY = Number(preferredBounds.centerY ?? NaN);
+  if (
+    !Number.isFinite(candidateCenterX) ||
+    !Number.isFinite(candidateCenterY) ||
+    !Number.isFinite(preferredCenterX) ||
+    !Number.isFinite(preferredCenterY)
+  ) {
+    return 0;
+  }
+
+  const dx = candidateCenterX - preferredCenterX;
+  const dy = candidateCenterY - preferredCenterY;
+  const distance = Math.sqrt(dx * dx + dy * dy);
+  if (!Number.isFinite(distance)) {
+    return 0;
+  }
+  if (distance <= 12) {
+    return 30;
+  }
+  if (distance <= 48) {
+    return 18;
+  }
+  if (distance <= 96) {
+    return 8;
+  }
+  return 0;
+}
+
+function scoreInteractionCandidateForQuery(
+  candidate: Record<string, unknown>,
+  query: string,
+  preferredBounds: Record<string, unknown> | null | undefined = null
+) {
+  const normalizedQuery = normalizeSearchText(query);
+  const compactQuery = normalizeCompactSearchText(query);
+  if (!normalizedQuery && !compactQuery) {
+    return null;
+  }
+
+  let textScore = 0;
+  for (const text of candidateSearchTexts(candidate)) {
+    const normalizedText = normalizeSearchText(text);
+    const compactText = normalizeCompactSearchText(text);
+    if (!normalizedText && !compactText) {
+      continue;
+    }
+
+    if (normalizedText && normalizedText === normalizedQuery) {
+      textScore = Math.max(textScore, 120);
+      continue;
+    }
+    if (compactText && compactQuery && compactText === compactQuery) {
+      textScore = Math.max(textScore, 118);
+      continue;
+    }
+    if (normalizedText && normalizedText.includes(normalizedQuery)) {
+      textScore = Math.max(textScore, 108);
+      continue;
+    }
+    if (compactText && compactQuery && compactText.includes(compactQuery)) {
+      textScore = Math.max(textScore, 104);
+      continue;
+    }
+    if (normalizedText && normalizedQuery.includes(normalizedText) && normalizedText.length >= 3) {
+      textScore = Math.max(textScore, 96);
+      continue;
+    }
+    if (compactText && compactQuery && compactQuery.includes(compactText) && compactText.length >= 3) {
+      textScore = Math.max(textScore, 92);
+    }
+  }
+
+  if (textScore === 0) {
+    return null;
+  }
+
+  let score = textScore;
+  if (candidate.isInteractive !== false) {
+    score += 12;
+  }
+  const role = String(candidate.role ?? "").trim().toLowerCase();
+  if (["row", "textbox", "button", "link", "text"].includes(role)) {
+    score += 8;
+  }
+  if (String(((candidate.sourceHints ?? {}) as Record<string, unknown>).source ?? "").toLowerCase() === "accessibility") {
+    score += 8;
+  }
+  score += boundsProximityScore((candidate.bounds ?? null) as Record<string, unknown> | null, preferredBounds);
+  return score;
+}
+
+function findBestInteractionCandidateForQuery(
+  candidates: Array<Record<string, unknown>>,
+  query: string,
+  preferredBounds: Record<string, unknown> | null | undefined = null
+) {
+  const ranked = candidates
+    .map((candidate) => ({
+      candidate,
+      score: scoreInteractionCandidateForQuery(candidate, query, preferredBounds)
+    }))
+    .filter((entry): entry is { candidate: Record<string, unknown>; score: number } => Number.isFinite(entry.score))
+    .sort((left, right) => right.score - left.score);
+  return ranked[0]?.candidate ?? null;
 }
 
 function normalizeAppKey(value: unknown) {
@@ -518,6 +658,31 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
     }
   }
 
+  async #focusAppWithVerification(bridge, appName: string) {
+    const result = await this.#withTimeout(
+      bridge.focusApp(appName).catch(() => ({ focused: false })),
+      this.timeouts.focusMs,
+      () => ({ focused: false, timedOut: true })
+    );
+    if (typeof bridge.getFrontmostApp !== "function") {
+      return result;
+    }
+    const frontmost = await this.#withTimeout(
+      bridge.getFrontmostApp().catch(() => ({ appName: "" })),
+      this.timeouts.frontmostMs,
+      () => ({ appName: "" })
+    );
+    if (appMatchesTargetName(String(frontmost?.appName ?? ""), appName)) {
+      return {
+        ...(typeof result === "object" && result ? result : {}),
+        focused: true,
+        frontmostApp: String(frontmost?.appName ?? "").trim(),
+        timedOut: false
+      };
+    }
+    return result;
+  }
+
   async discover() {
     return this.#withTimeout(
       this.#requireBridge().getFrontmostApp(),
@@ -806,6 +971,7 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
     }
     const actualWindowNumber = Number(captureResult?.windowNumber ?? NaN);
     return this.artifactStore.registerExistingFile({
+      workspace,
       taskId: task.id,
       traceId,
       kind: "screenshot",
@@ -823,10 +989,92 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
     const step = args.step;
     const appName = step?.params ? resolveAppName(step.params) : null;
     if (appName) {
-      return this.#withTimeout(bridge.focusApp(appName), this.timeouts.focusMs, () => ({ focused: false, timedOut: true }));
+      return this.#focusAppWithVerification(bridge, appName);
     }
 
     return { focused: false };
+  }
+
+  async #resolveTargetPoint({
+    task,
+    workspace,
+    traceId,
+    step,
+    label,
+    allowBoundsFallback = true
+  }: {
+    task: any;
+    workspace: any;
+    traceId: any;
+    step: { id?: string; params?: Record<string, unknown> };
+    label: string;
+    allowBoundsFallback?: boolean;
+  }): Promise<
+    | {
+        kind: "interaction" | "ocr" | "bounds";
+        point: { x: number; y: number };
+        candidate?: Record<string, unknown> | null;
+        ocrResult?: Record<string, unknown> | null;
+      }
+    | null
+  > {
+    const bridge = this.#requireBridge();
+    const params = step.params ?? {};
+    const target = params.target as Record<string, unknown> | undefined;
+    const targetText = String(params.targetQuery ?? target?.text ?? "").trim();
+    const preferredBounds = (target?.bounds ?? null) as Record<string, unknown> | null;
+
+    const observation = await this.observe({
+      task,
+      workspace,
+      traceId,
+      label,
+      recentActions: [],
+      targetAppName: resolveAppName(params) ?? ""
+    }).catch(() => null);
+
+    if (targetText) {
+      const interactionCandidates = Array.isArray((observation as { interactionCandidates?: unknown[] } | null)?.interactionCandidates)
+        ? ((observation as { interactionCandidates?: Array<Record<string, unknown>> }).interactionCandidates ?? [])
+        : [];
+      const interactionMatch = findBestInteractionCandidateForQuery(interactionCandidates, targetText, preferredBounds);
+      if (interactionMatch?.bounds) {
+        return {
+          kind: "interaction",
+          point: {
+            x: Number((interactionMatch.bounds as Record<string, unknown>).centerX ?? 0),
+            y: Number((interactionMatch.bounds as Record<string, unknown>).centerY ?? 0)
+          },
+          candidate: interactionMatch
+        };
+      }
+
+      const capturePath = String((observation as { capture?: { path?: string } } | null)?.capture?.path ?? "").trim();
+      if (capturePath) {
+        const result = await bridge.findText(capturePath, targetText).catch(() => ({ found: false }));
+        if (result.found && result.match?.box) {
+          const box = result.match.box;
+          return {
+            kind: "ocr",
+            point: { x: Number(box.centerX ?? 0), y: Number(box.centerY ?? 0) },
+            ocrResult: result
+          };
+        }
+      }
+    }
+
+    if (allowBoundsFallback && preferredBounds) {
+      return {
+        kind: "bounds",
+        point: {
+          x: Number(preferredBounds.centerX ?? 0),
+          y: Number(preferredBounds.centerY ?? 0)
+        },
+        candidate: target ?? null
+      };
+    }
+
+    return null;
   }
 
   async act({ task, step, workspace, traceId }) {
@@ -877,14 +1125,18 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
         if (!appName) {
           throw new Error("launchApp requires a name or appName parameter.");
         }
-        return bridge.launchApp(appName);
+        return this.#withTimeout(
+          bridge.launchApp(appName),
+          this.timeouts.focusMs,
+          () => ({ launched: false, timedOut: true })
+        );
       }
       case "focusApp": {
         const appName = resolveAppName(params);
         if (!appName) {
           throw new Error("focusApp requires a name or appName parameter.");
         }
-        return bridge.focusApp(appName);
+        return this.#focusAppWithVerification(bridge, appName);
       }
       case "typeText":
         return bridge.typeText(params.text ?? "");
@@ -929,30 +1181,63 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
       }
       case "clickTarget":
       case "focusTarget": {
-        const target = params.target;
-        if (!target?.bounds) {
+        const target = params.target as Record<string, unknown> | undefined;
+        const resolved = await this.#resolveTargetPoint({
+          task,
+          workspace,
+          traceId,
+          step,
+          label: `target-${step.id}`,
+          allowBoundsFallback: params.allowBoundsFallback !== false
+        });
+        if (!resolved) {
           throw new Error(`Target ${target?.id ?? "unknown"} is missing bounds.`);
         }
-        return bridge.clickAt(target.bounds.centerX, target.bounds.centerY);
+        return bridge.clickAt(resolved.point.x, resolved.point.y);
       }
       case "typeIntoTarget": {
-        const target = params.target;
-        if (target?.bounds) {
-          await bridge.clickAt(target.bounds.centerX, target.bounds.centerY);
+        const resolved = await this.#resolveTargetPoint({
+          task,
+          workspace,
+          traceId,
+          step,
+          label: `type-target-${step.id}`,
+          allowBoundsFallback: params.allowBoundsFallback !== false
+        });
+        if (resolved) {
+          await bridge.clickAt(resolved.point.x, resolved.point.y);
+        }
+        const inputMethod = String(params.inputMethod ?? "type").trim().toLowerCase();
+        if (params.clear !== false) {
+          await bridge.pressKey("a", ["cmd"]);
+          await new Promise((resolve) => setTimeout(resolve, inputMethod === "paste" ? 100 : 60));
+          if (inputMethod !== "paste") {
+            await bridge.pressKey("delete", []);
+            await new Promise((resolve) => setTimeout(resolve, 80));
+          }
+        }
+        if (inputMethod === "paste" && typeof bridge.pasteText === "function") {
+          return bridge.pasteText(params.text ?? "");
         }
         return bridge.typeText(params.text ?? "");
       }
       case "waitForTarget": {
         const timeoutMs = params.timeoutMs ?? 10000;
         const pollMs = params.pollMs ?? 500;
-        const targetText = params.target?.text ?? params.targetQuery;
+        const targetText = String(params.target?.text ?? params.targetQuery ?? "").trim();
         const started = Date.now();
 
         while (Date.now() - started < timeoutMs) {
-          const capture = await this.capture({ task, workspace, traceId, label: `wait-target-${step.id}` });
-          const result = await bridge.findText(capture.path, targetText);
-          if (result.found) {
-            return result;
+          const resolved = await this.#resolveTargetPoint({
+            task,
+            workspace,
+            traceId,
+            step,
+            label: `wait-target-${step.id}`,
+            allowBoundsFallback: false
+          });
+          if (resolved) {
+            return resolved.ocrResult ?? { found: true, method: resolved.kind, match: { text: targetText } };
           }
           await new Promise((resolve) => setTimeout(resolve, pollMs));
         }
@@ -980,10 +1265,30 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
     let capture: { path: string } | null = null;
 
     if (check.frontmostApp) {
-      const frontmost = await bridge.getFrontmostApp();
+      const expectedApp = String(check.frontmostApp ?? "").trim();
+      const frontmost = await this.#withTimeout(
+        bridge.getFrontmostApp().catch(() => ({ appName: "" })),
+        this.timeouts.frontmostMs,
+        () => ({ appName: "" })
+      );
       details.frontmostApp = frontmost.appName;
-      if (!frontmost.appName.includes(check.frontmostApp)) {
-        return { ok: false, details };
+      if (!appMatchesTargetName(frontmost.appName, expectedApp)) {
+        const listedWindows = typeof bridge.listWindows === "function"
+          ? await this.#withTimeout(
+              bridge.listWindows().catch(() => ({ windows: [] })),
+              this.timeouts.windowsMs,
+              () => ({ windows: [] })
+            )
+          : { windows: [] };
+        const matchingWindows = matchingDesktopWindowsForApp(
+          Array.isArray(listedWindows?.windows) ? listedWindows.windows as Array<Record<string, unknown>> : [],
+          expectedApp
+        );
+        details.frontmostAppFallback = matchingWindows.length > 0;
+        details.frontmostAppWindowMatchCount = matchingWindows.length;
+        if (!matchingWindows.length) {
+          return { ok: false, details };
+        }
       }
     }
 
@@ -1074,9 +1379,22 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
     const visualCheck = (check.visualCheck ?? null) as
       | { type?: string; targetThread?: string; replyPreview?: string }
       | null;
+    const visualAppName = (() => {
+      const type = String(visualCheck?.type ?? "").trim().toLowerCase();
+      if (type.startsWith("wechat_")) {
+        return "WeChat";
+      }
+      if (type.startsWith("slack_")) {
+        return "Slack";
+      }
+      if (type.startsWith("outlook_")) {
+        return "Microsoft Outlook";
+      }
+      return "";
+    })();
     const captureTargetAppName =
-      String(check.frontmostApp ?? "").trim()
-      || (visualCheck?.type?.startsWith("wechat_") ? "WeChat" : "");
+      visualAppName
+      || String(check.frontmostApp ?? "").trim();
     if (visualCheck?.type && this.visualModelClient?.supportsImageJson?.()) {
       if (!capture && captureTargetAppName) {
         const observedState = await this.observe({
@@ -1117,27 +1435,27 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
           additionalProperties: false
         },
         systemPrompt:
-          "You are a strict desktop UI verifier for AgentOS. Inspect the WeChat desktop screenshot and return JSON only.",
+          `You are a strict desktop UI verifier for AgentOS. Inspect the ${visualAppName || "desktop"} screenshot and return JSON only.`,
         userPrompt:
-          visualCheck.type === "wechat_prefill"
+          /_prefill$/u.test(visualCheck.type)
             ? [
-                "Verify whether the current WeChat thread matches the target thread and whether the reply preview is visible in the bottom composer.",
+                `Verify whether the current ${visualAppName || "desktop"} thread matches the target thread and whether the reply preview is visible in the active composer or draft area.`,
                 `Target thread: ${targetThread}`,
                 `Reply preview: ${replyPreview}`
               ].join("\n")
             : [
-                "Verify whether the current WeChat screenshot is showing the target thread as the active open conversation.",
+                `Verify whether the current ${visualAppName || "desktop"} screenshot is showing the target thread as the active open conversation.`,
                 `Target thread: ${targetThread}`
               ].join("\n"),
         imagePath: capture.path,
         temperature: 0
       });
       details.visualCheck = result;
-      if (visualCheck.type === "wechat_thread" && result.targetThreadOpen === false) {
+      if (/_thread$/u.test(visualCheck.type) && result.targetThreadOpen !== true) {
         return { ok: false, details };
       }
-      if (visualCheck.type === "wechat_prefill") {
-        if (result.targetThreadOpen === false || result.prefillVisible === false) {
+      if (/_prefill$/u.test(visualCheck.type)) {
+        if (result.targetThreadOpen !== true || result.prefillVisible !== true) {
           return { ok: false, details };
         }
       }

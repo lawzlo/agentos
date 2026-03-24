@@ -24,6 +24,8 @@ const TARGET_ACTIONS = new Set([
   "upload"
 ]);
 
+const MIN_DESKTOP_PRE_GROUNDING_CONFIDENCE = 0.5;
+
 interface ControlGatePayload {
   phase: string;
   step?: RuntimeStep | null;
@@ -164,6 +166,36 @@ export class OperatorAgent {
       targetQuery,
       worldState: observation as WorldState
     });
+
+    const shouldBypassDesktopPreGrounding =
+      step.surface === "desktop"
+      && grounded.resolutionMode === "fuzzy_text"
+      && grounded.confidence < MIN_DESKTOP_PRE_GROUNDING_CONFIDENCE;
+
+    if (shouldBypassDesktopPreGrounding) {
+      this.traceStore.log({
+        traceId,
+        taskId: task.id,
+        role: "operator",
+        type: "target.grounding_skipped",
+        stepId: step.id,
+        message: `Skipped low-confidence pre-grounding for ${step.label}.`,
+        payload: {
+          targetQuery,
+          targetId: grounded.targetId,
+          confidence: grounded.confidence,
+          resolutionMode: grounded.resolutionMode
+        }
+      });
+
+      return {
+        ...step,
+        params: {
+          ...step.params,
+          targetQuery
+        }
+      };
+    }
 
     this.traceStore.log({
       traceId,

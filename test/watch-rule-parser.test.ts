@@ -76,7 +76,7 @@ test("normalizeWatchRule keeps explicit livePack and clamps poll interval", asyn
   assert.equal(watch.livePack, "google-docs-browser");
   assert.equal(watch.preferredSurface, "browser");
   assert.equal(watch.pollIntervalMs, 1000);
-  assert.equal(watch.appTarget, null);
+  assert.equal(watch.appTarget, "https://docs.google.com");
   assert.equal(watch.id, undefined);
 });
 
@@ -133,8 +133,24 @@ test("normalizeWatchRule maps preferred browser mail goal to browser live pack",
 
   assert.equal(watch.livePack, "generic-mail-browser");
   assert.equal(watch.preferredSurface, "browser");
-  assert.equal(watch.appTarget, null);
+  assert.equal(watch.appTarget, "https://outlook.office.com/mail/");
   assert.equal(watch.watchProfile.executionMode, "planned");
+});
+
+test("normalizeWatchRule assigns default browser start urls for explicit browser live packs", async () => {
+  const slack = normalizeWatchRule({
+    goal: "Keep an eye on Slack web",
+    livePack: "slack-browser"
+  });
+  const mail = normalizeWatchRule({
+    goal: "Keep an eye on web mail",
+    livePack: "generic-mail-browser"
+  });
+
+  assert.equal(slack.preferredSurface, "browser");
+  assert.equal(slack.appTarget, "https://app.slack.com/client");
+  assert.equal(mail.preferredSurface, "browser");
+  assert.equal(mail.appTarget, "https://outlook.office.com/mail/");
 });
 
 test("normalizeWatchRule normalizes governance settings", async () => {

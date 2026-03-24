@@ -54,6 +54,11 @@ const PROVIDER_SLOT_MATCHERS: Record<
     recommended: [],
     fast: [],
     strong: []
+  },
+  claude_code_cli: {
+    recommended: [/^sonnet$/u, /^claude-sonnet-/u],
+    fast: [/^sonnet$/u, /^claude-haiku-/u, /^claude-sonnet-/u],
+    strong: [/^opus$/u, /^claude-opus-/u, /^claude-sonnet-/u]
   }
 };
 
@@ -334,6 +339,15 @@ export async function fetchProviderModelCatalog({
   apiKey: string;
   timeoutMs: number;
 }): Promise<ProviderModelCatalogResult> {
+  if (provider === "claude_code_cli") {
+    return {
+      source: "unavailable",
+      models: [],
+      choices: [],
+      warning: "Claude Code CLI uses your local Claude session, so live model discovery is not available."
+    };
+  }
+
   if (!apiKey || !baseUrl) {
     return {
       source: "unavailable",

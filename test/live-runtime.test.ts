@@ -5,7 +5,11 @@ import fs from "node:fs/promises";
 import { promisify } from "node:util";
 
 import { ControlPlaneStore } from "../src/runtime/store.js";
-import { LivePackRegistry } from "../src/runtime/live-pack-registry.js";
+import {
+  LivePackRegistry,
+  analyzeConversationPack,
+  analyzeDesktopConversationPackWithVision
+} from "../src/runtime/live-pack-registry.js";
 import { SurfaceRegistry } from "../src/runtime/surface-registry.js";
 import type { RuntimeStep, WatchRule, WorkspaceProfile } from "../src/types/runtime-schema.js";
 import {
@@ -19,6 +23,14 @@ import {
 } from "./helpers.js";
 
 const execFileAsync = promisify(execFile);
+
+function createPngHeaderBuffer(width: number, height: number) {
+  const header = Buffer.alloc(24);
+  Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(header, 0);
+  header.writeUInt32BE(width, 16);
+  header.writeUInt32BE(height, 20);
+  return header;
+}
 
 async function waitForWatchTask(baseUrl, watchRuleId, timeoutMs = 10000) {
   const started = Date.now();
@@ -1628,7 +1640,7 @@ test("slack desktop pack ignores detections when Slack is not the foreground app
   assert.equal(detection, null);
 });
 
-test("slack desktop pack skips inbox observation until the app is accessibility-ready", async () => {
+test("slack desktop pack continues inbox observation even when AX readiness is unavailable", async () => {
   let observeCalls = 0;
   const fakeSurface = {
     async waitForAppReady() {
@@ -1707,8 +1719,8 @@ test("slack desktop pack skips inbox observation until the app is accessibility-
     controlPlane: {} as never
   });
 
-  assert.equal(worldState, null);
-  assert.equal(observeCalls, 0);
+  assert.equal(worldState?.appContext?.appName, "Slack");
+  assert.equal(observeCalls, 1);
 });
 
 test("slack desktop pack ignores OCR-only detections when no accessibility candidates are available", async () => {
@@ -1916,6 +1928,279 @@ test("slack desktop pack skips reply context extraction when composer is missing
   });
 
   assert.equal(context, null);
+});
+
+test("slack desktop pack can use visual model analysis to build a prefill task without AX candidates", async () => {
+  const worldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-slack-vision",
+    appContext: {
+      appName: "Slack",
+      windows: [
+        {
+          ownerName: "Slack",
+          windowName: "Slack",
+          bounds: { x: 80, y: 20, width: 1200, height: 820, centerX: 680, centerY: 430 }
+        }
+      ]
+    },
+    capture: {
+      id: "artifact-slack-vision",
+      taskId: "task-slack-vision",
+      traceId: null,
+      kind: "screenshot",
+      label: "Slack vision state",
+      path: "/tmp/slack-vision.png",
+      metadata: {},
+      createdAt: new Date().toISOString()
+    },
+    ocrBlocks: [],
+    interactionCandidates: [],
+    visibleText: "Slack\nHome\nDMs\nBonkr v\nMessage Jingwen Sun",
+    recentActions: [],
+    summary: "Slack",
+    timestamp: new Date().toISOString()
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({})
+  });
+  const pack = registry.get("slack-desktop");
+  const rule: WatchRule = {
+    id: "watch-slack-vision-detect",
+    goal: "Always watch Slack and prefill replies",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "slack-desktop-main",
+    skillName: null,
+    appTarget: "Slack",
+    livePack: "slack-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-slack-vision",
+    name: "slack-desktop-main",
+    rootPath: "/tmp/slack-desktop-main",
+    profilePath: "/tmp/slack-desktop-main/profile",
+    downloadsPath: "/tmp/slack-desktop-main/downloads",
+    artifactsPath: "/tmp/slack-desktop-main/artifacts",
+    scratchPath: "/tmp/slack-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: worldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        analyzeImageJson: async () => ({
+          scene: "thread",
+          sceneEvidence: "Unread direct message is visible and composer is open",
+          recommendedRecoveryAction: "none",
+          recoveryControl: { present: false, evidence: "", approxBox: null },
+          openThread: "Bonkr v",
+          visibleUnreadThreads: [
+            {
+              name: "Bonkr v",
+              evidence: "Unread highlight in DM list",
+              replyable: true,
+              conversationKind: "direct",
+              shouldReply: true,
+              replyReason: "Unread direct message awaiting a reply.",
+              latestSnippet: "Can you take a look at this?",
+              priority: "high",
+              approxBox: { x: 0.03, y: 0.2, width: 0.22, height: 0.06 }
+            }
+          ],
+          composer: {
+            present: true,
+            evidence: "Message input box at the bottom",
+            approxBox: { x: 0.28, y: 0.9, width: 0.64, height: 0.08 }
+          }
+        })
+      }
+    } as never
+  });
+
+  assert.equal(detection?.summary, "Bonkr v");
+  assert.equal(detection?.inputs?.threadTitle, "Bonkr v");
+  assert.equal(Number.isFinite(Number(detection?.inputs?.openX ?? NaN)), true);
+  assert.equal(Number.isFinite(Number(detection?.inputs?.composeX ?? NaN)), true);
+  assert.deepEqual(detection?.taskSpec?.steps.map((step) => step.label), [
+    "Focus Slack",
+    "Dismiss stray Slack overlay",
+    "Open unread Slack thread",
+    "Wait for Slack thread to open",
+    "Focus Slack composer area",
+    "Type Slack reply",
+    "Verify Slack prefill"
+  ]);
+});
+
+test("slack desktop pack recovers foreign views before selecting an unread thread", async () => {
+  let recovered = false;
+  const actions: string[] = [];
+  const foreignWorldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-slack-recover",
+    appContext: {
+      appName: "Slack",
+      windows: [
+        {
+          ownerName: "Slack",
+          windowName: "Slack",
+          bounds: { x: 80, y: 20, width: 1200, height: 820, centerX: 680, centerY: 430 }
+        }
+      ]
+    },
+    capture: { path: "/tmp/slack-foreign-view.png" },
+    ocrBlocks: [],
+    interactionCandidates: [],
+    visibleText: "Slack\nProfile\nMessage\nFiles",
+    recentActions: [],
+    summary: "Slack profile pane",
+    timestamp: new Date().toISOString()
+  };
+  const listWorldState = {
+    ...foreignWorldState,
+    capture: { path: "/tmp/slack-list-view.png" },
+    visibleText: "Slack\nDMs\nUnread\nBonkr v\nCan you take a look at this?"
+  };
+  const fakeSurface = {
+    async observe() {
+      return recovered ? listWorldState : foreignWorldState;
+    },
+    async act({ step }: { step: RuntimeStep }) {
+      actions.push(`${step.action}:${String(step.label ?? step.id ?? "")}`);
+      if (step.action === "clickAt" && String(step.label ?? "").includes("Recover Slack to conversation list")) {
+        recovered = true;
+      }
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("slack-desktop");
+  const rule: WatchRule = {
+    id: "watch-slack-recover",
+    goal: "Always watch Slack and prefill replies",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "slack-desktop-main",
+    skillName: null,
+    appTarget: "Slack",
+    livePack: "slack-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-slack-recover",
+    name: "slack-desktop-main",
+    rootPath: "/tmp/slack-desktop-main",
+    profilePath: "/tmp/slack-desktop-main/profile",
+    downloadsPath: "/tmp/slack-desktop-main/downloads",
+    artifactsPath: "/tmp/slack-desktop-main/artifacts",
+    scratchPath: "/tmp/slack-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: foreignWorldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        analyzeImageJson: async () => {
+          if (!recovered) {
+            return {
+              scene: "foreign_view",
+              sceneEvidence: "Profile pane is covering the DM list",
+              recommendedRecoveryAction: "recover_to_list",
+              recoveryControl: {
+                present: true,
+                evidence: "DM list entry is visible in the left rail",
+                approxBox: { x: 0.07, y: 0.2, width: 0.12, height: 0.04 }
+              },
+              openThread: null,
+              bestUnreadThread: {
+                present: false,
+                name: "",
+                evidence: "",
+                replyable: false,
+                conversationKind: "unknown",
+                shouldReply: false,
+                replyReason: "",
+                latestSnippet: "",
+                priority: "low",
+                approxBox: null
+              },
+              composer: { present: false, evidence: "", approxBox: null }
+            };
+          }
+          return {
+            scene: "list",
+            sceneEvidence: "Unread DM is visible in the sidebar",
+            recommendedRecoveryAction: "none",
+            recoveryControl: { present: false, evidence: "", approxBox: null },
+            openThread: null,
+            bestUnreadThread: {
+              present: true,
+              name: "Bonkr v",
+              evidence: "Unread highlight in DM list",
+              replyable: true,
+              conversationKind: "direct",
+              shouldReply: true,
+              replyReason: "Unread DM awaiting a reply",
+              latestSnippet: "Can you take a look at this?",
+              priority: "high",
+              approxBox: { x: 0.04, y: 0.22, width: 0.22, height: 0.06 }
+            },
+            composer: {
+              present: true,
+              evidence: "Message input at the bottom",
+              approxBox: { x: 0.28, y: 0.9, width: 0.64, height: 0.08 }
+            }
+          };
+        }
+      }
+    } as never
+  });
+
+  assert.equal(detection?.summary, "Bonkr v");
+  assert.equal((detection?.metadata as { recoveryAttempts?: unknown } | undefined)?.recoveryAttempts, 1);
+  assert.equal(actions.includes("clickAt:Recover Slack to conversation list"), true);
 });
 
 test("wechat desktop pack can detect unread conversations and build reply steps from a desktop world state", async () => {
@@ -4737,10 +5022,326 @@ test("outlook desktop pack can detect unread mail and build reply steps from a d
   assert.equal(context?.metadata?.threadKey, "project update");
   assert.equal(context?.metadata?.sender, "Customer");
   assert.equal(Array.isArray(context?.taskSpec?.steps), true);
-  assert.equal(context?.taskSpec?.steps?.[0]?.action, "clickTarget");
-  assert.equal(context?.taskSpec?.steps?.[1]?.action, "pressKey");
-  assert.deepEqual(context?.taskSpec?.steps?.[1]?.params, { key: "r", modifiers: ["meta"] });
-  assert.equal(context?.taskSpec?.steps?.[3]?.params?.text, "{{typeText}}");
+  assert.equal(context?.taskSpec?.steps?.[0]?.action, "focusApp");
+  assert.equal(context?.taskSpec?.steps?.[1]?.action, "focusTarget");
+  assert.equal(context?.taskSpec?.steps?.[1]?.params?.allowBoundsFallback, true);
+  assert.equal(context?.taskSpec?.steps?.[2]?.action, "typeIntoTarget");
+  assert.equal(context?.taskSpec?.steps?.[2]?.params?.text, "{{typeText}}");
+  assert.equal(context?.taskSpec?.steps?.[2]?.params?.inputMethod, "paste");
+  const verifyExpect = (context?.taskSpec?.steps?.[3]?.expect ?? null) as {
+    regionTextAnyVisible?: Array<{ region?: string; text?: string }>;
+  } | null;
+  assert.equal(Array.isArray(verifyExpect?.regionTextAnyVisible), true);
+  assert.deepEqual(
+    (verifyExpect?.regionTextAnyVisible ?? []).map((entry) => entry.region),
+    ["{{composeVerifyRegion}}", "{{composeVerifyRegion}}", "{{composeVerifyRegion}}", "{{composeVerifyRegion}}"]
+  );
+  assert.deepEqual(
+    (verifyExpect?.regionTextAnyVisible ?? []).map((entry) => entry.text),
+    ["{{typeTextPreview}}", "{{typeTextMiddlePreview}}", "{{typeTextTailPreview}}", "{{typeTextSuffixPreview}}"]
+  );
+});
+
+test("outlook desktop analysis does not treat a generic reading-pane textbox as a composer", () => {
+  const worldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-outlook-generic-textbox",
+    appContext: {
+      appName: "Microsoft Outlook",
+      windows: [{ title: "Inbox - Microsoft Outlook" }]
+    },
+    capture: null,
+    ocrBlocks: [],
+    interactionCandidates: [
+      {
+        id: "thread-project-update-open",
+        surface: "desktop",
+        kind: "text",
+        text: "Project update",
+        role: "row",
+        bounds: { x: 10, y: 10, width: 220, height: 28, centerX: 120, centerY: 24 },
+        confidence: 0.98,
+        sourceHints: {
+          source: "accessibility",
+          ariaLabel: "Project update",
+          windowTitle: "Inbox - Microsoft Outlook",
+          actions: ["AXPress"]
+        },
+        isInteractive: true
+      },
+      {
+        id: "approval-comment-field",
+        surface: "desktop",
+        kind: "element",
+        text: "",
+        role: "textbox",
+        bounds: { x: 540, y: 240, width: 260, height: 42, centerX: 670, centerY: 261 },
+        confidence: 0.98,
+        sourceHints: {
+          source: "accessibility",
+          ariaLabel: "Comment",
+          windowTitle: "Inbox - Microsoft Outlook",
+          actions: ["AXPress"]
+        },
+        isInteractive: true
+      }
+    ],
+    visibleText: "Outlook\nProject update\nCustomer: Any update?\nComment",
+    recentActions: [],
+    summary: "Microsoft Outlook thread with a generic text field",
+    timestamp: new Date().toISOString()
+  };
+
+  const analysis = analyzeConversationPack("outlook-desktop", worldState as never);
+  assert.equal(analysis?.composeCandidate, null);
+});
+
+test("outlook desktop analysis can synthesize a compose candidate from visible compose chrome when AX is missing", () => {
+  const worldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-outlook-compose-window-fallback",
+    appContext: {
+      appName: "Microsoft Outlook",
+      windows: [
+        {
+          title: "Inbox - Microsoft Outlook",
+          ownerName: "Microsoft Outlook",
+          bounds: { x: 100, y: 40, width: 1280, height: 820, centerX: 740, centerY: 450 }
+        }
+      ]
+    },
+    capture: null,
+    ocrBlocks: [],
+    interactionCandidates: [],
+    visibleText: "Outlook\nSend\nFrom:\nTo:\nSubject:\nRe: credibility guide for Tan",
+    recentActions: [],
+    summary: "Microsoft Outlook thread with visible compose chrome",
+    timestamp: new Date().toISOString()
+  };
+
+  const analysis = analyzeConversationPack("outlook-desktop", worldState as never);
+  assert.equal(analysis?.composeCandidate?.text, "Outlook reply body");
+  assert.equal(analysis?.composeCandidate?.interactive, true);
+  assert.equal(Number(analysis?.composeCandidate?.bounds?.centerY ?? 0) > 0, true);
+});
+
+test("outlook desktop pack does not discard a visible unread row just because the reading pane suggests recover_to_list", async () => {
+  const capturePath = `/tmp/outlook-detect-visible-unread-${Date.now()}.png`;
+  await fs.writeFile(capturePath, createPngHeaderBuffer(1343, 768));
+
+  const worldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-outlook-visible-unread",
+    appContext: {
+      appName: "Microsoft Outlook",
+      windows: [
+        {
+          title: "Inbox - Microsoft Outlook",
+          ownerName: "Microsoft Outlook",
+          bounds: { x: 0, y: 0, width: 1343, height: 768 }
+        }
+      ]
+    },
+    capture: { path: capturePath },
+    ocrBlocks: [],
+    interactionCandidates: [],
+    visibleText: "Outlook\nInbox\nNP\nBug 报告: 创建汇报总账...",
+    recentActions: [],
+    summary: "Microsoft Outlook reading pane with a visible unread row",
+    timestamp: new Date().toISOString()
+  };
+  const fakeSurface = {
+    async observe() {
+      return worldState;
+    },
+    async act() {
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("outlook-desktop");
+  const rule: WatchRule = {
+    id: "watch-outlook-visible-unread",
+    goal: "Always watch Outlook and prefill replies for unread mail",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "outlook-desktop-main",
+    skillName: null,
+    appTarget: "Microsoft Outlook",
+    livePack: "outlook-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-outlook-visible-unread",
+    name: "outlook-desktop-main",
+    rootPath: "/tmp/outlook-desktop-main",
+    profilePath: "/tmp/outlook-desktop-main/profile",
+    downloadsPath: "/tmp/outlook-desktop-main/downloads",
+    artifactsPath: "/tmp/outlook-desktop-main/artifacts",
+    scratchPath: "/tmp/outlook-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  let analyzeCalls = 0;
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: worldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        analyzeImageJson: async ({ schemaName }) => {
+          analyzeCalls += 1;
+          if (schemaName === "agentos_outlook_desktop_visual") {
+            return {
+              scene: "thread",
+              sceneEvidence: "Reading pane is open, but an unread row with a blue dot is still visible in the center list.",
+              recommendedRecoveryAction: "recover_to_list",
+              recoveryControl: {
+                present: false,
+                evidence: "",
+                approxBox: null
+              },
+              openThread: "Jin Wang",
+              bestUnreadThread: {
+                present: true,
+                name: "NP",
+                evidence: "Blue unread dot on the NP row in the center message list.",
+                replyable: true,
+                conversationKind: "mail",
+                shouldReply: true,
+                replyReason: "Bug report email likely needs a response.",
+                latestSnippet: "Bug 报告: 创建汇报总账...",
+                priority: "high",
+                approxBox: { x: 0.122, y: 0.525, width: 0.17, height: 0.052 }
+              },
+              composer: {
+                present: false,
+                evidence: "",
+                approxBox: null
+              }
+            };
+          }
+
+          if (schemaName === "agentos_outlook_thread_grounding") {
+            return {
+              targetVisible: false,
+              evidence: "Use the provided unread row bounds directly.",
+              clickPoint: null,
+              rowBox: null
+            };
+          }
+
+          throw new Error(`Unexpected schema: ${schemaName}`);
+        }
+      }
+    } as never
+  });
+
+  await fs.unlink(capturePath).catch(() => null);
+
+  assert.equal(detection?.summary, "NP");
+  assert.equal(String(detection?.inputs?.openTarget ?? ""), "NP");
+  assert.ok(analyzeCalls >= 1);
+});
+
+test("outlook desktop visual analysis prefers the currently open thread title over a side-list unread sender when the scene is thread", async () => {
+  const capturePath = `/tmp/outlook-thread-preferred-open-${Date.now()}.png`;
+  await fs.writeFile(capturePath, createPngHeaderBuffer(1343, 768));
+
+  const worldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-outlook-thread-preferred-open",
+    appContext: {
+      appName: "Microsoft Outlook",
+      windows: [
+        {
+          title: "Inbox - Microsoft Outlook",
+          ownerName: "Microsoft Outlook",
+          bounds: { x: 0, y: 0, width: 1343, height: 768 }
+        }
+      ]
+    },
+    capture: { path: capturePath },
+    ocrBlocks: [],
+    interactionCandidates: [],
+    visibleText: "Outlook\nSubject:\nRe: credibility guide for Tan",
+    recentActions: [],
+    summary: "Microsoft Outlook thread with visible composer and an unrelated unread row",
+    timestamp: new Date().toISOString()
+  };
+  const analysis = await analyzeDesktopConversationPackWithVision({
+    packName: "outlook-desktop",
+    worldState: worldState as never,
+    modelClient: {
+      supportsImageJson: () => true,
+      analyzeImageJson: async ({ schemaName }) => {
+        if (schemaName === "agentos_outlook_desktop_visual") {
+          return {
+            scene: "thread",
+            sceneEvidence: "A reply composer is visible for the current thread while another unread sender remains in the side list.",
+            recommendedRecoveryAction: "none",
+            recoveryControl: {
+              present: false,
+              evidence: "",
+              approxBox: null
+            },
+            openThread: "credibility guide for Tan",
+            selectedRow: "杨海燕",
+            bestUnreadThread: {
+              present: true,
+              name: "杨海燕",
+              evidence: "Blue unread dot next to 杨海燕 in the center message list.",
+              replyable: true,
+              conversationKind: "mail",
+              shouldReply: true,
+              replyReason: "Unread personal message in the list.",
+              subjectCue: "转专利办理...",
+              latestSnippet: "张蓓老师：您好！贵...",
+              priority: "medium",
+              approxBox: { x: 0.12, y: 0.48, width: 0.2, height: 0.06 }
+            },
+            composer: {
+              present: true,
+              evidence: "Reply composer is visible in the reading pane.",
+              hasDraftText: false,
+              draftPreview: null,
+              entryPoint: { x: 0.42, y: 0.46 },
+              approxBox: { x: 0.3, y: 0.18, width: 0.48, height: 0.62 }
+            }
+          };
+        }
+
+        throw new Error(`Unexpected schema: ${schemaName}`);
+      }
+    } as never
+  });
+
+  await fs.unlink(capturePath).catch(() => null);
+
+  assert.equal(analysis?.selectedTarget, "credibility guide for Tan");
+  assert.equal(String(analysis?.unreadCandidate?.text ?? ""), "杨海燕");
 });
 
 test("outlook desktop pack ignores detections when Outlook is not the foreground app", async () => {
@@ -5016,7 +5617,7 @@ test("outlook desktop pack skips reply context extraction when composer is missi
   assert.equal(context, null);
 });
 
-test("outlook desktop pack can open the reply composer with a keyboard shortcut fallback", async () => {
+test("outlook desktop pack does not use a keyboard shortcut fallback when reply controls cannot be grounded", async () => {
   let opened = false;
   let replyShortcutUsed = false;
   const initialWorldState = {
@@ -5064,41 +5665,12 @@ test("outlook desktop pack can open the reply composer with a keyboard shortcut 
     ],
     visibleText: "Outlook\nProject update\nCustomer: Any update?"
   };
-  const threadWithComposer = {
-    ...threadWithoutComposer,
-    interactionCandidates: [
-      ...threadWithoutComposer.interactionCandidates,
-      {
-        id: "reply-field",
-        surface: "desktop",
-        kind: "element",
-        text: "Reply",
-        role: "textbox",
-        bounds: { x: 20, y: 220, width: 260, height: 42, centerX: 150, centerY: 241 },
-        confidence: 0.98,
-        sourceHints: { source: "accessibility", placeholder: "Reply", focused: true, actions: ["AXPress"] },
-        isInteractive: true
-      },
-      {
-        id: "send-reply",
-        surface: "desktop",
-        kind: "element",
-        text: "Send",
-        role: "button",
-        bounds: { x: 300, y: 220, width: 80, height: 32, centerX: 340, centerY: 236 },
-        confidence: 0.98,
-        sourceHints: { source: "accessibility", ariaLabel: "Send", actions: ["AXPress"] },
-        isInteractive: true
-      }
-    ],
-    visibleText: "Outlook\nProject update\nCustomer: Any update?\nReply\nSend"
-  };
   const fakeSurface = {
     async observe() {
       if (!opened) {
         return initialWorldState;
       }
-      return replyShortcutUsed ? threadWithComposer : threadWithoutComposer;
+      return threadWithoutComposer;
     },
     async act({ step }) {
       if (step.action === "clickTarget") {
@@ -5168,9 +5740,6271 @@ test("outlook desktop pack can open the reply composer with a keyboard shortcut 
     } as never
   });
 
-  assert.equal(replyShortcutUsed, true);
+  assert.equal(replyShortcutUsed, false);
+  assert.equal(context, null);
+});
+
+test("outlook desktop pack can use visual model analysis to build a prefill task without AX candidates", async () => {
+  const worldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-outlook-vision",
+    appContext: {
+      appName: "Microsoft Outlook",
+      windows: [
+        {
+          ownerName: "Microsoft Outlook",
+          windowName: "Inbox - Outlook",
+          bounds: { x: 120, y: 40, width: 1180, height: 820, centerX: 710, centerY: 450 }
+        }
+      ]
+    },
+    capture: {
+      id: "artifact-outlook-vision",
+      taskId: "task-outlook-vision",
+      traceId: null,
+      kind: "screenshot",
+      label: "Outlook vision state",
+      path: "/tmp/outlook-vision.png",
+      metadata: {},
+      createdAt: new Date().toISOString()
+    },
+    ocrBlocks: [],
+    interactionCandidates: [],
+    visibleText: "Outlook\nInbox\nUnread\nAlice - Need your review",
+    recentActions: [],
+    summary: "Outlook",
+    timestamp: new Date().toISOString()
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({})
+  });
+  const pack = registry.get("outlook-desktop");
+  const rule: WatchRule = {
+    id: "watch-outlook-vision-detect",
+    goal: "Always watch Outlook and prefill replies",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "outlook-desktop-main",
+    skillName: null,
+    appTarget: "Microsoft Outlook",
+    livePack: "outlook-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-outlook-vision",
+    name: "outlook-desktop-main",
+    rootPath: "/tmp/outlook-desktop-main",
+    profilePath: "/tmp/outlook-desktop-main/profile",
+    downloadsPath: "/tmp/outlook-desktop-main/downloads",
+    artifactsPath: "/tmp/outlook-desktop-main/artifacts",
+    scratchPath: "/tmp/outlook-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: worldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        analyzeImageJson: async () => ({
+          scene: "list",
+          sceneEvidence: "Unread message is visible in the inbox list",
+          recommendedRecoveryAction: "none",
+          recoveryControl: { present: false, evidence: "", approxBox: null },
+          openThread: null,
+          visibleUnreadThreads: [
+            {
+              name: "Alice - Need your review",
+              evidence: "Unread bold subject row",
+              replyable: true,
+              conversationKind: "mail",
+              shouldReply: true,
+              replyReason: "Unread direct email likely needing a response.",
+              latestSnippet: "Can you review this draft today?",
+              priority: "high",
+              approxBox: { x: 0.18, y: 0.22, width: 0.28, height: 0.08 }
+            }
+          ],
+          composer: {
+            present: false,
+            evidence: "",
+            approxBox: null
+          }
+        })
+      }
+    } as never
+  });
+
+  assert.equal(detection?.summary, "Alice - Need your review");
+  assert.equal(detection?.inputs?.threadTitle, "Alice - Need your review");
+  assert.equal((detection?.inputs?.openCandidate as { text?: string } | undefined)?.text, "Alice - Need your review");
+  assert.equal(Number.isFinite(Number(detection?.inputs?.openX ?? NaN)), true);
+  assert.deepEqual(detection?.taskSpec?.steps.map((step) => step.label), [
+    "Focus Outlook",
+    "Open unread Outlook thread",
+    "Wait for Outlook thread to open",
+    "Open Outlook reply composer",
+    "Wait for Outlook composer",
+    "Type Outlook reply",
+    "Verify Outlook prefill"
+  ]);
+});
+
+test("outlook desktop pack waits for a reply button click to reveal the composer before falling back to shortcuts", async () => {
+  let opened = false;
+  let replyButtonClicked = false;
+  let replyShortcutUsed = false;
+  const initialWorldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-outlook-reply-button",
+    appContext: {
+      appName: "Microsoft Outlook",
+      windows: [{ title: "Inbox - Microsoft Outlook" }]
+    },
+    capture: null,
+    ocrBlocks: [],
+    interactionCandidates: [
+      {
+        id: "thread-project-update",
+        surface: "desktop",
+        kind: "text",
+        text: "Unread email Project update",
+        role: "row",
+        bounds: { x: 10, y: 10, width: 220, height: 28, centerX: 120, centerY: 24 },
+        confidence: 0.98,
+        sourceHints: { source: "accessibility", ariaLabel: "Unread email Project update", actions: ["AXPress"] },
+        isInteractive: true
+      }
+    ],
+    visibleText: "Outlook\nUnread\nProject update",
+    recentActions: [],
+    summary: "Microsoft Outlook unread list",
+    timestamp: new Date().toISOString()
+  };
+  const threadWithoutComposer = {
+    ...initialWorldState,
+    interactionCandidates: [
+      {
+        id: "thread-project-update-open",
+        surface: "desktop",
+        kind: "text",
+        text: "Project update",
+        role: "row",
+        bounds: { x: 10, y: 10, width: 220, height: 28, centerX: 120, centerY: 24 },
+        confidence: 0.98,
+        sourceHints: { source: "accessibility", ariaLabel: "Project update", actions: ["AXPress"] },
+        isInteractive: true
+      },
+      {
+        id: "reply-button",
+        surface: "desktop",
+        kind: "element",
+        text: "Reply",
+        role: "button",
+        bounds: { x: 20, y: 180, width: 80, height: 32, centerX: 60, centerY: 196 },
+        confidence: 0.98,
+        sourceHints: { source: "accessibility", ariaLabel: "Reply", actions: ["AXPress"] },
+        isInteractive: true
+      }
+    ],
+    visibleText: "Outlook\nProject update\nCustomer: Any update?\nReply"
+  };
+  const threadWithComposer = {
+    ...threadWithoutComposer,
+    interactionCandidates: [
+      threadWithoutComposer.interactionCandidates[0],
+      {
+        id: "reply-field",
+        surface: "desktop",
+        kind: "element",
+        text: "Reply",
+        role: "textbox",
+        bounds: { x: 20, y: 220, width: 260, height: 42, centerX: 150, centerY: 241 },
+        confidence: 0.98,
+        sourceHints: { source: "accessibility", placeholder: "Reply", focused: true, actions: ["AXPress"] },
+        isInteractive: true
+      },
+      {
+        id: "send-reply",
+        surface: "desktop",
+        kind: "element",
+        text: "Send",
+        role: "button",
+        bounds: { x: 300, y: 220, width: 80, height: 32, centerX: 340, centerY: 236 },
+        confidence: 0.98,
+        sourceHints: { source: "accessibility", ariaLabel: "Send", actions: ["AXPress"] },
+        isInteractive: true
+      }
+    ],
+    visibleText: "Outlook\nProject update\nCustomer: Any update?\nReply\nSend"
+  };
+  const fakeSurface = {
+    async observe() {
+      if (!opened) {
+        return initialWorldState;
+      }
+      return replyButtonClicked ? threadWithComposer : threadWithoutComposer;
+    },
+    async act({ step }) {
+      if ((step.action === "clickTarget" || step.action === "clickAt") && String(step.label ?? "").includes("Open mail thread")) {
+        opened = true;
+      }
+      if (step.action === "clickTarget" && String(step.label ?? "").includes("Open mail reply composer")) {
+        replyButtonClicked = true;
+      }
+      if (step.action === "pressKey" && step.params?.key === "r") {
+        replyShortcutUsed = true;
+      }
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("outlook-desktop");
+  const rule: WatchRule = {
+    id: "watch-outlook-reply-button",
+    goal: "Always watch Outlook and prefill replies for unread mail",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "outlook-desktop-main",
+    skillName: null,
+    appTarget: "Microsoft Outlook",
+    livePack: "outlook-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-outlook-reply-button",
+    name: "outlook-desktop-main",
+    rootPath: "/tmp/outlook-desktop-main",
+    profilePath: "/tmp/outlook-desktop-main/profile",
+    downloadsPath: "/tmp/outlook-desktop-main/downloads",
+    artifactsPath: "/tmp/outlook-desktop-main/artifacts",
+    scratchPath: "/tmp/outlook-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: initialWorldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {} as never
+  });
+  const context = await pack?.extractContext?.({
+    rule,
+    worldState: initialWorldState as never,
+    detection: detection as never,
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: { isConfigured: () => false }
+    } as never
+  });
+
+  assert.equal(replyButtonClicked, true);
+  assert.equal(replyShortcutUsed, false);
   assert.equal(context?.inputs?.typeTarget, "Reply");
-  assert.equal(context?.inputs?.sendTarget, "Send");
+  assert.equal(context?.inputs?.sendTargetQuery, "Send");
+  assert.equal(context?.taskSpec?.steps?.[1]?.label, "Focus Outlook composer");
+  assert.equal(context?.taskSpec?.steps?.[2]?.params?.clear, true);
+});
+
+test("outlook desktop pack retries the reply button when the composer is not visible after the first click", async () => {
+  let opened = false;
+  let replyButtonClicks = 0;
+  let replyShortcutUsed = false;
+  const initialWorldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-outlook-reply-retry",
+    appContext: {
+      appName: "Microsoft Outlook",
+      windows: [{ title: "Inbox - Microsoft Outlook" }]
+    },
+    capture: null,
+    ocrBlocks: [],
+    interactionCandidates: [
+      {
+        id: "thread-project-update",
+        surface: "desktop",
+        kind: "text",
+        text: "Unread email Project update",
+        role: "row",
+        bounds: { x: 10, y: 10, width: 220, height: 28, centerX: 120, centerY: 24 },
+        confidence: 0.98,
+        sourceHints: { source: "accessibility", ariaLabel: "Unread email Project update", actions: ["AXPress"] },
+        isInteractive: true
+      }
+    ],
+    visibleText: "Outlook\nUnread\nProject update",
+    recentActions: [],
+    summary: "Microsoft Outlook unread list",
+    timestamp: new Date().toISOString()
+  };
+  const threadWithoutComposer = {
+    ...initialWorldState,
+    interactionCandidates: [
+      {
+        id: "thread-project-update-open",
+        surface: "desktop",
+        kind: "text",
+        text: "Project update",
+        role: "row",
+        bounds: { x: 10, y: 10, width: 220, height: 28, centerX: 120, centerY: 24 },
+        confidence: 0.98,
+        sourceHints: { source: "accessibility", ariaLabel: "Project update", actions: ["AXPress"] },
+        isInteractive: true
+      },
+      {
+        id: "reply-button",
+        surface: "desktop",
+        kind: "element",
+        text: "Reply",
+        role: "button",
+        bounds: { x: 20, y: 180, width: 80, height: 32, centerX: 60, centerY: 196 },
+        confidence: 0.98,
+        sourceHints: { source: "accessibility", ariaLabel: "Reply", actions: ["AXPress"] },
+        isInteractive: true
+      }
+    ],
+    visibleText: "Outlook\nProject update\nCustomer: Any update?\nReply"
+  };
+  const threadWithComposer = {
+    ...threadWithoutComposer,
+    interactionCandidates: [
+      threadWithoutComposer.interactionCandidates[0],
+      {
+        id: "reply-field",
+        surface: "desktop",
+        kind: "element",
+        text: "Reply",
+        role: "textbox",
+        bounds: { x: 20, y: 220, width: 260, height: 42, centerX: 150, centerY: 241 },
+        confidence: 0.98,
+        sourceHints: { source: "accessibility", placeholder: "Reply", focused: true, actions: ["AXPress"] },
+        isInteractive: true
+      },
+      {
+        id: "send-reply",
+        surface: "desktop",
+        kind: "element",
+        text: "Send",
+        role: "button",
+        bounds: { x: 300, y: 220, width: 80, height: 32, centerX: 340, centerY: 236 },
+        confidence: 0.98,
+        sourceHints: { source: "accessibility", ariaLabel: "Send", actions: ["AXPress"] },
+        isInteractive: true
+      }
+    ],
+    visibleText: "Outlook\nProject update\nCustomer: Any update?\nReply\nSend"
+  };
+  const fakeSurface = {
+    async observe() {
+      if (!opened) {
+        return initialWorldState;
+      }
+      return replyButtonClicks >= 2 ? threadWithComposer : threadWithoutComposer;
+    },
+    async act({ step }) {
+      if ((step.action === "clickTarget" || step.action === "clickAt") && String(step.label ?? "").includes("Open mail thread")) {
+        opened = true;
+      }
+      if (step.action === "clickTarget" && String(step.label ?? "").includes("Open mail reply composer")) {
+        replyButtonClicks += 1;
+      }
+      if (step.action === "pressKey" && step.params?.key === "r") {
+        replyShortcutUsed = true;
+      }
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("outlook-desktop");
+  const rule: WatchRule = {
+    id: "watch-outlook-reply-retry",
+    goal: "Always watch Outlook and prefill replies for unread mail",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "outlook-desktop-main",
+    skillName: null,
+    appTarget: "Microsoft Outlook",
+    livePack: "outlook-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-outlook-reply-retry",
+    name: "outlook-desktop-main",
+    rootPath: "/tmp/outlook-desktop-main",
+    profilePath: "/tmp/outlook-desktop-main/profile",
+    downloadsPath: "/tmp/outlook-desktop-main/downloads",
+    artifactsPath: "/tmp/outlook-desktop-main/artifacts",
+    scratchPath: "/tmp/outlook-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: initialWorldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {} as never
+  });
+  const context = await pack?.extractContext?.({
+    rule,
+    worldState: initialWorldState as never,
+    detection: detection as never,
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: { isConfigured: () => false }
+    } as never
+  });
+
+  assert.equal(replyButtonClicks, 2);
+  assert.equal(replyShortcutUsed, false);
+  assert.equal(context?.inputs?.typeTarget, "Reply");
+  assert.equal(context?.taskSpec?.steps?.[1]?.label, "Focus Outlook composer");
+});
+
+test("outlook desktop pack can visually ground a reply control when AX reply controls are missing", async () => {
+  let opened = false;
+  let replyControlClicked = false;
+  const initialWorldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-outlook-visual-reply-control",
+    appContext: {
+      appName: "Microsoft Outlook",
+      windows: [
+        {
+          ownerName: "Microsoft Outlook",
+          windowName: "Inbox - Microsoft Outlook",
+          bounds: { x: 120, y: 40, width: 1180, height: 820, centerX: 710, centerY: 450 }
+        }
+      ]
+    },
+    capture: {
+      id: "artifact-outlook-visual-reply-control-initial",
+      taskId: "task-outlook-visual-reply-control",
+      traceId: null,
+      kind: "screenshot",
+      label: "Outlook list",
+      path: "/tmp/outlook-visual-reply-control-initial.png",
+      metadata: {},
+      createdAt: new Date().toISOString()
+    },
+    ocrBlocks: [],
+    interactionCandidates: [
+      {
+        id: "thread-project-update",
+        surface: "desktop",
+        kind: "text",
+        text: "Unread email Project update",
+        role: "row",
+        bounds: { x: 240, y: 180, width: 260, height: 40, centerX: 370, centerY: 200 },
+        confidence: 0.98,
+        sourceHints: { source: "accessibility", ariaLabel: "Unread email Project update", actions: ["AXPress"] },
+        isInteractive: true
+      }
+    ],
+    visibleText: "Outlook\nUnread\nProject update",
+    recentActions: [],
+    summary: "Microsoft Outlook unread list",
+    timestamp: new Date().toISOString()
+  };
+  const threadWithoutComposer = {
+    ...initialWorldState,
+    capture: {
+      ...initialWorldState.capture,
+      id: "artifact-outlook-visual-reply-control-thread",
+      label: "Outlook thread",
+      path: "/tmp/outlook-visual-reply-control-thread.png"
+    },
+    interactionCandidates: [
+      {
+        id: "thread-project-update-open",
+        surface: "desktop",
+        kind: "text",
+        text: "Project update",
+        role: "row",
+        bounds: { x: 240, y: 180, width: 260, height: 40, centerX: 370, centerY: 200 },
+        confidence: 0.98,
+        sourceHints: { source: "accessibility", ariaLabel: "Project update", actions: ["AXPress"] },
+        isInteractive: true
+      }
+    ],
+    visibleText: "Outlook\nProject update\nCustomer: Any update?"
+  };
+  const threadWithVisualComposer = {
+    ...threadWithoutComposer,
+    capture: {
+      ...threadWithoutComposer.capture,
+      id: "artifact-outlook-visual-reply-control-compose",
+      label: "Outlook composer",
+      path: "/tmp/outlook-visual-reply-control-compose.png"
+    },
+    visibleText: "Outlook\nProject update\nCustomer: Any update?\nInline reply editor\nSend"
+  };
+  const fakeSurface = {
+    async observe() {
+      if (!opened) {
+        return initialWorldState;
+      }
+      return replyControlClicked ? threadWithVisualComposer : threadWithoutComposer;
+    },
+    async act({ step }) {
+      if ((step.action === "clickTarget" || step.action === "clickAt") && String(step.label ?? "").includes("Open mail thread")) {
+        opened = true;
+      }
+      if (step.action === "clickTarget" && String(step.label ?? "").includes("Open mail reply composer")) {
+        replyControlClicked = true;
+      }
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("outlook-desktop");
+  const rule: WatchRule = {
+    id: "watch-outlook-visual-reply-control",
+    goal: "Always watch Outlook and prefill replies for unread mail",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "outlook-desktop-main",
+    skillName: null,
+    appTarget: "Microsoft Outlook",
+    livePack: "outlook-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-outlook-visual-reply-control",
+    name: "outlook-desktop-main",
+    rootPath: "/tmp/outlook-desktop-main",
+    profilePath: "/tmp/outlook-desktop-main/profile",
+    downloadsPath: "/tmp/outlook-desktop-main/downloads",
+    artifactsPath: "/tmp/outlook-desktop-main/artifacts",
+    scratchPath: "/tmp/outlook-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: initialWorldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {} as never
+  });
+  const context = await pack?.extractContext?.({
+    rule,
+    worldState: initialWorldState as never,
+    detection: detection as never,
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        isConfigured: () => false,
+        supportsImageJson: () => true,
+        analyzeImageJson: async ({ schemaName }) => {
+          if (schemaName === "agentos_outlook_reply_control") {
+            return {
+              present: true,
+              evidence: "Reply action near the top of the reading pane",
+              label: "Reply",
+              approxBox: { x: 0.56, y: 0.19, width: 0.08, height: 0.04 }
+            };
+          }
+          if (schemaName === "agentos_outlook_desktop_visual") {
+            if (replyControlClicked) {
+              return {
+                scene: "thread",
+                sceneEvidence: "A thread is open and an inline reply editor is visible.",
+                recommendedRecoveryAction: "none",
+                recoveryControl: { present: false, evidence: "", approxBox: null },
+                openThread: "Project update",
+                bestUnreadThread: {
+                  present: false,
+                  name: "",
+                  evidence: "",
+                  replyable: false,
+                  conversationKind: "unknown",
+                  shouldReply: false,
+                  replyReason: "",
+                  latestSnippet: "",
+                  priority: "low",
+                  approxBox: null
+                },
+                composer: {
+                  present: true,
+                  evidence: "Inline reply editor",
+                  approxBox: { x: 0.42, y: 0.68, width: 0.36, height: 0.14 },
+                  entryPoint: { x: 0.61, y: 0.74 }
+                },
+                targetThreadOpen: true,
+                prefillVisible: false
+              };
+            }
+            return {
+              scene: "thread",
+              sceneEvidence: "A thread is open in the reading pane but no reply composer is visible yet.",
+              recommendedRecoveryAction: "none",
+              recoveryControl: { present: false, evidence: "", approxBox: null },
+              openThread: "Project update",
+              bestUnreadThread: {
+                present: false,
+                name: "",
+                evidence: "",
+                replyable: false,
+                conversationKind: "unknown",
+                shouldReply: false,
+                replyReason: "",
+                latestSnippet: "",
+                priority: "low",
+                approxBox: null
+              },
+              composer: {
+                present: false,
+                evidence: "",
+                approxBox: null
+              },
+              targetThreadOpen: true,
+              prefillVisible: false
+            };
+          }
+          throw new Error(`Unexpected schema ${schemaName}`);
+        }
+      }
+    } as never
+  });
+
+  assert.equal(replyControlClicked, true);
+  assert.equal(context?.inputs?.typeTarget, "Inline reply editor");
+  assert.equal(context?.taskSpec?.steps?.[1]?.label, "Focus Outlook composer");
+});
+
+test("outlook desktop pack refuses to reuse a visible composer that already contains draft text", async () => {
+  const composeCapturePath = `/tmp/outlook-existing-draft-compose-${Date.now()}.png`;
+  await fs.writeFile(composeCapturePath, createPngHeaderBuffer(1440, 900));
+
+  const threadWithExistingDraft = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-outlook-existing-draft",
+    appContext: {
+      appName: "Microsoft Outlook",
+      windows: [
+        {
+          ownerName: "Microsoft Outlook",
+          windowName: "Inbox - Microsoft Outlook",
+          bounds: { x: 120, y: 40, width: 1180, height: 820, centerX: 710, centerY: 450 }
+        }
+      ]
+    },
+    capture: {
+      id: "artifact-outlook-existing-draft",
+      taskId: "task-outlook-existing-draft",
+      traceId: null,
+      kind: "screenshot",
+      label: "Outlook existing draft compose",
+      path: composeCapturePath,
+      metadata: {},
+      createdAt: new Date().toISOString()
+    },
+    ocrBlocks: [],
+    interactionCandidates: [],
+    visibleText: "Outlook\nRe: Project update\nExisting draft reply",
+    recentActions: [],
+    summary: "Microsoft Outlook thread with existing draft",
+    timestamp: new Date().toISOString()
+  };
+
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: {
+        async observe() {
+          return threadWithExistingDraft;
+        },
+        async act() {
+          return { ok: true };
+        }
+      } as never
+    })
+  });
+  const pack = registry.get("outlook-desktop");
+  const rule: WatchRule = {
+    id: "watch-outlook-existing-draft",
+    goal: "Always watch Outlook and prefill replies",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "outlook-desktop-main",
+    skillName: null,
+    appTarget: "Microsoft Outlook",
+    livePack: "outlook-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const detection = {
+    summary: "Project update",
+    inputs: {
+      openTarget: "Project update"
+    },
+    metadata: {
+      visualAnalysis: {
+        scene: "thread",
+        openThread: "Project update"
+      }
+    }
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-outlook-existing-draft",
+    name: "outlook-desktop-main",
+    rootPath: "/tmp",
+    profilePath: "/tmp/profile",
+    downloadsPath: "/tmp/downloads",
+    artifactsPath: "/tmp/artifacts",
+    scratchPath: "/tmp/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const context = await pack?.extractContext?.({
+    rule,
+    worldState: threadWithExistingDraft as never,
+    detection: detection as never,
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        async analyzeImageJson({ schemaName }: { schemaName: string }) {
+          if (schemaName === "agentos_outlook_desktop_visual") {
+            return {
+              scene: "thread",
+              sceneEvidence: "A reply composer is open and already contains draft text.",
+              recommendedRecoveryAction: "none",
+              recoveryControl: { present: false, evidence: "", approxBox: null },
+              openThread: "Project update",
+              bestUnreadThread: {
+                present: false,
+                name: "",
+                evidence: "",
+                replyable: false,
+                conversationKind: "unknown",
+                shouldReply: false,
+                replyReason: "",
+                latestSnippet: "",
+                priority: "low",
+                approxBox: null
+              },
+              composer: {
+                present: true,
+                evidence: "Inline reply editor",
+                hasDraftText: true,
+                draftPreview: "Existing draft reply",
+                approxBox: { x: 0.4, y: 0.18, width: 0.52, height: 0.66 },
+                entryPoint: { x: 0.56, y: 0.23 }
+              },
+              targetThreadOpen: true,
+              prefillVisible: false
+            };
+          }
+          throw new Error(`Unexpected schema ${schemaName}`);
+        }
+      }
+    } as never
+  });
+
+  assert.equal(context, null);
+
+  await fs.unlink(composeCapturePath).catch(() => {});
+});
+
+test("outlook desktop pack does not mistake a quoted original message for authored draft text", async () => {
+  const composeCapturePath = `/tmp/outlook-quoted-message-compose-${Date.now()}.png`;
+  await fs.writeFile(composeCapturePath, createPngHeaderBuffer(1440, 900));
+
+  const threadWithQuotedMessageOnly = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-outlook-quoted-message-only",
+    appContext: {
+      appName: "Microsoft Outlook",
+      windows: [
+        {
+          ownerName: "Microsoft Outlook",
+          windowName: "Inbox - Microsoft Outlook",
+          bounds: { x: 120, y: 40, width: 1180, height: 820, centerX: 710, centerY: 450 }
+        }
+      ]
+    },
+    capture: {
+      id: "artifact-outlook-quoted-message-only",
+      taskId: "task-outlook-quoted-message-only",
+      traceId: null,
+      kind: "screenshot",
+      label: "Outlook quoted message compose",
+      path: composeCapturePath,
+      metadata: {},
+      createdAt: new Date().toISOString()
+    },
+    ocrBlocks: [
+      {
+        id: "ocr-quoted-marker",
+        text: "On 1/22/26, 17:35, Lazaro Waters wrote:",
+        confidence: 0.92,
+        bounds: { x: 550, y: 320, width: 420, height: 28, centerX: 760, centerY: 334 }
+      },
+      {
+        id: "ocr-quoted-body",
+        text: "Should i share info?",
+        confidence: 0.9,
+        bounds: { x: 560, y: 360, width: 220, height: 24, centerX: 670, centerY: 372 }
+      }
+    ],
+    interactionCandidates: [],
+    visibleText: "Outlook\nRe: extend runway\nOn 1/22/26, 17:35, Lazaro Waters wrote:\nShould i share info?",
+    recentActions: [],
+    summary: "Microsoft Outlook thread with quoted original message",
+    timestamp: new Date().toISOString()
+  };
+
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: {
+        async observe() {
+          return threadWithQuotedMessageOnly;
+        },
+        async act() {
+          return { ok: true };
+        }
+      } as never
+    })
+  });
+  const pack = registry.get("outlook-desktop");
+  const rule: WatchRule = {
+    id: "watch-outlook-quoted-message-only",
+    goal: "Always watch Outlook and prefill replies",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "outlook-desktop-main",
+    skillName: null,
+    appTarget: "Microsoft Outlook",
+    livePack: "outlook-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const detection = {
+    summary: "Lazaro Waters",
+    inputs: {
+      openTarget: "Lazaro Waters"
+    },
+    metadata: {
+      visualAnalysis: {
+        scene: "thread",
+        openThread: "Re: extend runway"
+      },
+      visualThread: {
+        subjectCue: "extend runway"
+      }
+    }
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-outlook-quoted-message-only",
+    name: "outlook-desktop-main",
+    rootPath: "/tmp",
+    profilePath: "/tmp/profile",
+    downloadsPath: "/tmp/downloads",
+    artifactsPath: "/tmp/artifacts",
+    scratchPath: "/tmp/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const context = await pack?.extractContext?.({
+    rule,
+    worldState: threadWithQuotedMessageOnly as never,
+    detection: detection as never,
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        async analyzeImageJson({ schemaName }: { schemaName: string }) {
+          if (schemaName === "agentos_outlook_desktop_visual") {
+            return {
+              scene: "thread",
+              sceneEvidence: "A reply composer is open and the quoted original message is visible below the caret.",
+              recommendedRecoveryAction: "none",
+              recoveryControl: { present: false, evidence: "", approxBox: null },
+              openThread: "Re: extend runway",
+              selectedRow: "Lazaro Waters extend run...",
+              bestUnreadThread: {
+                present: false,
+                name: "",
+                evidence: "",
+                replyable: false,
+                conversationKind: "unknown",
+                shouldReply: false,
+                replyReason: "",
+                latestSnippet: "",
+                priority: "low",
+                approxBox: null
+              },
+              composer: {
+                present: true,
+                evidence: "Inline reply editor",
+                hasDraftText: true,
+                draftPreview: null,
+                approxBox: { x: 0.33, y: 0.2, width: 0.62, height: 0.66 },
+                entryPoint: { x: 0.37, y: 0.35 }
+              },
+              targetThreadOpen: true,
+              prefillVisible: false
+            };
+          }
+          throw new Error(`Unexpected schema ${schemaName}`);
+        }
+      }
+    } as never
+  });
+
+  assert.ok(context);
+  assert.equal(context?.inputs?.typeTarget, "Inline reply editor");
+
+  await fs.unlink(composeCapturePath).catch(() => {});
+});
+
+test("outlook desktop pack falls back to a heuristic English draft when model drafting fails", async () => {
+  const registry = new LivePackRegistry();
+  const pack = registry.get("outlook-desktop");
+  const rule: WatchRule = {
+    id: "watch-outlook-draft-fallback",
+    goal: "Always watch Outlook and prefill replies",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "outlook-desktop-main",
+    skillName: null,
+    appTarget: "Microsoft Outlook",
+    livePack: "outlook-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const draft = await pack?.draftReply?.({
+    rule,
+    detection: {
+      summary: "Re: extend runway",
+      context: [
+        "Should I share info?",
+        "Curious, are you using AWS or Google Cloud?"
+      ]
+    } as never,
+    controlPlane: {
+      modelClient: {
+        isConfigured: () => true,
+        draftReply: async () => {
+          throw new Error("Claude Code CLI request failed");
+        }
+      },
+      listReplyStylePreferences: () => []
+    } as never
+  });
+
+  assert.equal(draft?.replyText, "Thanks for your email. I received it and will follow up shortly.");
+  assert.equal(draft?.metadata?.source, "heuristic");
+  assert.match(String(draft?.metadata?.modelError ?? ""), /Claude Code CLI request failed/);
+});
+
+test("outlook desktop pack does not retry opening a newly selected thread just because the reading pane subject differs from the sender row", async () => {
+  const threadCapturePath = `/tmp/outlook-thread-subject-mismatch-${Date.now()}.png`;
+  const composeCapturePath = `/tmp/outlook-thread-subject-mismatch-compose-${Date.now()}.png`;
+  await fs.writeFile(threadCapturePath, createPngHeaderBuffer(1440, 900));
+  await fs.writeFile(composeCapturePath, createPngHeaderBuffer(1440, 900));
+
+  let opened = false;
+  let openClicks = 0;
+  let returnedToList = false;
+  let replyControlClicked = false;
+
+  const initialWorldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-outlook-thread-subject-mismatch",
+    appContext: {
+      appName: "Microsoft Outlook",
+      windows: [{ title: "Inbox - Microsoft Outlook" }]
+    },
+    capture: null,
+    ocrBlocks: [],
+    interactionCandidates: [
+      {
+        id: "outlook-row-lazaro",
+        surface: "desktop",
+        kind: "text",
+        text: "Lazaro Waters",
+        role: "row",
+        bounds: { x: 240, y: 200, width: 220, height: 52, centerX: 350, centerY: 226 },
+        confidence: 0.98,
+        sourceHints: { source: "accessibility", ariaLabel: "Lazaro Waters", actions: ["AXPress"] },
+        isInteractive: true
+      }
+    ],
+    visibleText: "Outlook\nInbox\nUnread\nlingrui.zhang@fou...",
+    recentActions: [],
+    summary: "Microsoft Outlook unread list",
+    timestamp: new Date().toISOString()
+  };
+  const threadWithoutComposer = {
+    ...initialWorldState,
+    capture: {
+      id: "artifact-outlook-thread-subject-mismatch",
+      taskId: "task-outlook-thread-subject-mismatch",
+      traceId: null,
+      kind: "screenshot",
+      label: "Outlook thread without composer",
+      path: threadCapturePath,
+      metadata: {},
+      createdAt: new Date().toISOString()
+    },
+    interactionCandidates: [],
+    visibleText: "Outlook\nRe: Tan, quick thought\n您好, 管理一支全球化..."
+  };
+  const listAfterMisclick = {
+    ...initialWorldState,
+    capture: {
+      ...threadWithoutComposer.capture,
+      id: "artifact-outlook-thread-subject-mismatch-list",
+      label: "Outlook list after retry misclick"
+    },
+    visibleText: "Outlook\nInbox\nUnread\n李伟"
+  };
+  const threadWithVisualComposer = {
+    ...threadWithoutComposer,
+    capture: {
+      ...threadWithoutComposer.capture,
+      id: "artifact-outlook-thread-subject-mismatch-compose",
+      label: "Outlook thread with visual composer",
+      path: composeCapturePath
+    },
+    visibleText: "Outlook\nRe: Tan, quick thought\nInline reply editor\nSend"
+  };
+
+  const fakeSurface = {
+    async observe() {
+      if (!opened) {
+        return initialWorldState;
+      }
+      if (returnedToList) {
+        return listAfterMisclick;
+      }
+      return replyControlClicked ? threadWithVisualComposer : threadWithoutComposer;
+    },
+    async act({ step }) {
+      if (step.action === "clickAt" && String(step.label ?? "").includes("Open mail thread")) {
+        openClicks += 1;
+        if (!opened) {
+          opened = true;
+        } else {
+          returnedToList = true;
+        }
+      }
+      if (step.action === "clickTarget" && String(step.label ?? "").includes("Open mail reply composer")) {
+        replyControlClicked = true;
+      }
+      return { ok: true };
+    }
+  };
+
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("outlook-desktop");
+  const rule: WatchRule = {
+    id: "watch-outlook-thread-subject-mismatch",
+    goal: "Always watch Outlook and prefill replies for unread mail",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "outlook-desktop-main",
+    skillName: null,
+    appTarget: "Microsoft Outlook",
+    livePack: "outlook-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-outlook-thread-subject-mismatch",
+    name: "outlook-desktop-main",
+    rootPath: "/tmp/outlook-desktop-main",
+    profilePath: "/tmp/outlook-desktop-main/profile",
+    downloadsPath: "/tmp/outlook-desktop-main/downloads",
+    artifactsPath: "/tmp/outlook-desktop-main/artifacts",
+    scratchPath: "/tmp/outlook-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = {
+    fingerprint: "outlook-thread-subject-mismatch",
+    summary: "lingrui.zhang@fou...",
+    text: "lingrui.zhang@fou...",
+    context: ["您好, 管理一支全球化..."],
+    inputs: {
+      openTarget: "lingrui.zhang@fou...",
+      openX: 280,
+      openY: 220
+    },
+    metadata: {
+      visualAnalysis: {
+        scene: "thread",
+        openThread: "Existing open thread"
+      }
+    }
+  };
+
+  const context = await pack?.extractContext?.({
+    rule,
+    worldState: initialWorldState as never,
+    detection: detection as never,
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        isConfigured: () => false,
+        supportsImageJson: () => true,
+        analyzeImageJson: async ({ schemaName }) => {
+          if (schemaName === "agentos_outlook_reply_control") {
+            return {
+              present: true,
+              evidence: "Reply action above the reading pane footer",
+              label: "Reply",
+              approxBox: { x: 0.56, y: 0.18, width: 0.08, height: 0.05 }
+            };
+          }
+          if (schemaName === "agentos_outlook_desktop_visual") {
+            if (returnedToList) {
+              return {
+                scene: "list",
+                sceneEvidence: "The inbox list is visible.",
+                recommendedRecoveryAction: "none",
+                recoveryControl: { present: false, evidence: "", approxBox: null },
+                openThread: null,
+                bestUnreadThread: {
+                  present: true,
+                  name: "李伟",
+                  evidence: "Unread email from 李伟.",
+                  replyable: true,
+                  conversationKind: "mail",
+                  shouldReply: true,
+                  replyReason: "Personal email",
+                  latestSnippet: "您好! 贵方...",
+                  priority: "high",
+                  approxBox: { x: 0.12, y: 0.18, width: 0.14, height: 0.05 }
+                },
+                composer: { present: false, evidence: "", approxBox: null },
+                targetThreadOpen: null,
+                prefillVisible: false
+              };
+            }
+            if (replyControlClicked) {
+              return {
+                scene: "thread",
+                sceneEvidence: "A thread is open and an inline reply editor is visible.",
+                recommendedRecoveryAction: "none",
+                recoveryControl: { present: false, evidence: "", approxBox: null },
+                openThread: "Re: Tan, quick thought",
+                bestUnreadThread: {
+                  present: false,
+                  name: "",
+                  evidence: "",
+                  replyable: false,
+                  conversationKind: "unknown",
+                  shouldReply: false,
+                  replyReason: "",
+                  latestSnippet: "",
+                  priority: "low",
+                  approxBox: null
+                },
+                composer: {
+                  present: true,
+                  evidence: "Inline reply editor",
+                  approxBox: { x: 0.42, y: 0.68, width: 0.36, height: 0.14 },
+                  entryPoint: { x: 0.61, y: 0.74 }
+                },
+                targetThreadOpen: null,
+                prefillVisible: false
+              };
+            }
+            return {
+              scene: "thread",
+              sceneEvidence: "A thread is open in the reading pane but no reply composer is visible yet.",
+              recommendedRecoveryAction: "none",
+              recoveryControl: { present: false, evidence: "", approxBox: null },
+              openThread: "Re: Tan, quick thought",
+              bestUnreadThread: {
+                present: false,
+                name: "",
+                evidence: "",
+                replyable: false,
+                conversationKind: "unknown",
+                shouldReply: false,
+                replyReason: "",
+                latestSnippet: "",
+                priority: "low",
+                approxBox: null
+              },
+              composer: {
+                present: false,
+                evidence: "",
+                approxBox: null
+              },
+              targetThreadOpen: null,
+              prefillVisible: false
+            };
+          }
+          throw new Error(`Unexpected schema ${schemaName}`);
+        }
+      }
+    } as never
+  });
+
+  assert.equal(openClicks, 1);
+  assert.equal(returnedToList, false);
+  assert.equal(replyControlClicked, true);
+  assert.equal(context?.inputs?.threadVerifyTarget, "Tan, quick thought");
+  assert.equal(context?.inputs?.typeTarget, "Inline reply editor");
+
+  await fs.unlink(threadCapturePath).catch(() => {});
+  await fs.unlink(composeCapturePath).catch(() => {});
+});
+
+test("outlook desktop pack keeps retry target queries pinned to the sender row instead of rotating to the subject cue", async () => {
+  const openQueries: string[] = [];
+  const initialWorldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-outlook-retry-query",
+    appContext: {
+      appName: "Microsoft Outlook",
+      windows: [{ title: "Inbox - Microsoft Outlook" }]
+    },
+    capture: null,
+    ocrBlocks: [],
+    interactionCandidates: [],
+    visibleText: "Outlook\nInbox\nUnread\nLazaro Waters\nextend run...",
+    recentActions: [],
+    summary: "Microsoft Outlook unread list",
+    timestamp: new Date().toISOString()
+  };
+
+  const fakeSurface = {
+    async observe() {
+      return initialWorldState;
+    },
+    async act({ step }) {
+      if (step.action === "clickTarget" && String(step.label ?? "").toLowerCase().includes("mail thread")) {
+        openQueries.push(String(step.params?.targetQuery ?? ""));
+      }
+      return { ok: true };
+    }
+  };
+
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("outlook-desktop");
+  const rule: WatchRule = {
+    id: "watch-outlook-retry-query",
+    goal: "Always watch Outlook and prefill replies for unread mail",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "outlook-desktop-main",
+    skillName: null,
+    appTarget: "Microsoft Outlook",
+    livePack: "outlook-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-outlook-retry-query",
+    name: "outlook-desktop-main",
+    rootPath: "/tmp/outlook-desktop-main",
+    profilePath: "/tmp/outlook-desktop-main/profile",
+    downloadsPath: "/tmp/outlook-desktop-main/downloads",
+    artifactsPath: "/tmp/outlook-desktop-main/artifacts",
+    scratchPath: "/tmp/outlook-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = {
+    fingerprint: "outlook-retry-query",
+    summary: "Lazaro Waters",
+    text: "Lazaro Waters",
+    context: ["extend run..."],
+    inputs: {
+      openTarget: "Lazaro Waters"
+    },
+    metadata: {
+      openCandidate: {
+        id: "outlook-retry-query-open",
+        text: "Lazaro Waters",
+        role: "text",
+        isInteractive: true,
+        bounds: { x: 240, y: 200, width: 220, height: 52, centerX: 350, centerY: 226 }
+      },
+      visualAnalysis: {
+        scene: "list",
+        openThread: null
+      },
+      visualThread: {
+        subjectCue: "extend run..."
+      }
+    }
+  };
+
+  const context = await pack?.extractContext?.({
+    rule,
+    worldState: initialWorldState as never,
+    detection: detection as never,
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        isConfigured: () => false,
+        supportsImageJson: () => true,
+        analyzeImageJson: async ({ schemaName }: { schemaName?: string }) => {
+          if (schemaName === "agentos_outlook_desktop_visual") {
+            return {
+              scene: "list",
+              sceneEvidence: "The inbox list is still visible and the same unread row remains on screen.",
+              recommendedRecoveryAction: "none",
+              recoveryControl: { present: false, evidence: "", approxBox: null },
+              openThread: null,
+              bestUnreadThread: {
+                present: true,
+                name: "Lazaro Waters",
+                evidence: "Unread sender row still visible.",
+                replyable: true,
+                conversationKind: "mail",
+                shouldReply: true,
+                replyReason: "Unread mail that likely needs a response.",
+                latestSnippet: "Need the extension approved",
+                subjectCue: "extend run...",
+                priority: "high",
+                approxBox: { x: 0.18, y: 0.24, width: 0.24, height: 0.08 }
+              },
+              composer: {
+                present: false,
+                evidence: "",
+                approxBox: null
+              },
+              targetThreadOpen: false,
+              prefillVisible: false
+            };
+          }
+          throw new Error(`Unexpected schema ${schemaName}`);
+        }
+      }
+    } as never
+  });
+
+  assert.equal(context, null);
+  assert.ok(openQueries.length >= 2);
+  assert.deepEqual(openQueries, Array.from({ length: openQueries.length }, () => "Lazaro Waters"));
+});
+
+test("outlook desktop pack does not reopen the message list when a transient visual analysis failure happens after the target row is already selected", async () => {
+  const threadCapturePath = `/tmp/outlook-selected-row-transient-null-${Date.now()}.png`;
+  const composeCapturePath = `/tmp/outlook-selected-row-transient-null-compose-${Date.now()}.png`;
+  await fs.writeFile(threadCapturePath, createPngHeaderBuffer(1440, 900));
+  await fs.writeFile(composeCapturePath, createPngHeaderBuffer(1440, 900));
+
+  let openClicks = 0;
+  let replyControlClicked = false;
+  let visualAnalyzeCalls = 0;
+
+  const initialWorldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-outlook-selected-row-transient-null",
+    appContext: {
+      appName: "Microsoft Outlook",
+      windows: [{ title: "Inbox - Microsoft Outlook" }]
+    },
+    capture: null,
+    ocrBlocks: [],
+    interactionCandidates: [],
+    visibleText: "Outlook\nInbox\nUnread\nnew PIO",
+    recentActions: [],
+    summary: "Microsoft Outlook unread list",
+    timestamp: new Date().toISOString()
+  };
+  const threadWithoutComposer = {
+    ...initialWorldState,
+    capture: {
+      id: "artifact-outlook-selected-row-transient-null",
+      taskId: "task-outlook-selected-row-transient-null",
+      traceId: null,
+      kind: "screenshot",
+      label: "Outlook thread without composer",
+      path: threadCapturePath,
+      metadata: {},
+      createdAt: new Date().toISOString()
+    },
+    visibleText: "Outlook\nRe: For Payinone\nnew PIO\nReply"
+  };
+  const threadWithComposer = {
+    ...threadWithoutComposer,
+    capture: {
+      ...threadWithoutComposer.capture,
+      id: "artifact-outlook-selected-row-transient-null-compose",
+      label: "Outlook thread with composer",
+      path: composeCapturePath
+    },
+    visibleText: "Outlook\nRe: For Payinone\nInline reply editor\nSend"
+  };
+
+  const fakeSurface = {
+    async observe() {
+      return replyControlClicked ? threadWithComposer : threadWithoutComposer;
+    },
+    async act({ step }) {
+      if (String(step.label ?? "").includes("Open mail thread")) {
+        openClicks += 1;
+      }
+      if (step.action === "clickTarget" && String(step.label ?? "").includes("Open mail reply composer")) {
+        replyControlClicked = true;
+      }
+      return { ok: true };
+    }
+  };
+
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("outlook-desktop");
+  const rule: WatchRule = {
+    id: "watch-outlook-selected-row-transient-null",
+    goal: "Always watch Outlook and prefill replies for unread mail",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "outlook-desktop-main",
+    skillName: null,
+    appTarget: "Microsoft Outlook",
+    livePack: "outlook-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-outlook-selected-row-transient-null",
+    name: "outlook-desktop-main",
+    rootPath: "/tmp/outlook-desktop-main",
+    profilePath: "/tmp/outlook-desktop-main/profile",
+    downloadsPath: "/tmp/outlook-desktop-main/downloads",
+    artifactsPath: "/tmp/outlook-desktop-main/artifacts",
+    scratchPath: "/tmp/outlook-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = {
+    fingerprint: "outlook-selected-row-transient-null",
+    summary: "new PIO",
+    text: "new PIO",
+    context: ["Bug 报告: 创建汇总账..."],
+    inputs: {
+      openTarget: "new PIO",
+      openX: 458,
+      openY: 798
+    },
+    metadata: {
+      visualAnalysis: {
+        scene: "thread",
+        openThread: "For Payinone",
+        selectedRow: "new PIO"
+      }
+    }
+  };
+
+  const context = await pack?.extractContext?.({
+    rule,
+    worldState: initialWorldState as never,
+    detection: detection as never,
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        isConfigured: () => false,
+        supportsImageJson: () => true,
+        analyzeImageJson: async ({ schemaName }) => {
+          if (schemaName === "agentos_outlook_reply_control") {
+            return {
+              present: true,
+              evidence: "Reply action above the reading pane footer",
+              label: "Reply",
+              approxBox: { x: 0.56, y: 0.18, width: 0.08, height: 0.05 }
+            };
+          }
+          if (schemaName === "agentos_outlook_desktop_visual") {
+            visualAnalyzeCalls += 1;
+            if (visualAnalyzeCalls === 1) {
+              throw new Error("Transient vision timeout");
+            }
+            if (replyControlClicked) {
+              return {
+                scene: "thread",
+                sceneEvidence: "A thread is open and an inline reply editor is visible.",
+                recommendedRecoveryAction: "none",
+                recoveryControl: { present: false, evidence: "", approxBox: null },
+                openThread: "For Payinone",
+                selectedRow: "new PIO",
+                bestUnreadThread: {
+                  present: false,
+                  name: "",
+                  evidence: "",
+                  replyable: false,
+                  conversationKind: "unknown",
+                  shouldReply: false,
+                  replyReason: "",
+                  subjectCue: "",
+                  latestSnippet: "",
+                  priority: "low",
+                  approxBox: null
+                },
+                composer: {
+                  present: true,
+                  evidence: "Inline reply editor",
+                  approxBox: { x: 0.42, y: 0.68, width: 0.36, height: 0.14 },
+                  entryPoint: { x: 0.61, y: 0.74 },
+                  hasDraftText: false,
+                  draftPreview: null
+                },
+                targetThreadOpen: null,
+                prefillVisible: false
+              };
+            }
+            return {
+              scene: "thread",
+              sceneEvidence: "A thread is open in the reading pane.",
+              recommendedRecoveryAction: "none",
+              recoveryControl: { present: false, evidence: "", approxBox: null },
+              openThread: "For Payinone",
+              selectedRow: "new PIO",
+              bestUnreadThread: {
+                present: false,
+                name: "",
+                evidence: "",
+                replyable: false,
+                conversationKind: "unknown",
+                shouldReply: false,
+                replyReason: "",
+                subjectCue: "",
+                latestSnippet: "",
+                priority: "low",
+                approxBox: null
+              },
+              composer: {
+                present: false,
+                evidence: "",
+                approxBox: null,
+                entryPoint: null,
+                hasDraftText: false,
+                draftPreview: null
+              },
+              targetThreadOpen: null,
+              prefillVisible: false
+            };
+          }
+          throw new Error(`Unexpected schema ${schemaName}`);
+        }
+      }
+    } as never
+  });
+
+  assert.equal(openClicks, 0);
+  assert.equal(replyControlClicked, true);
+  assert.equal(context?.inputs?.threadVerifyTarget, "For Payinone");
+  assert.equal(context?.inputs?.typeTarget, "Inline reply editor");
+
+  await fs.unlink(threadCapturePath).catch(() => {});
+  await fs.unlink(composeCapturePath).catch(() => {});
+});
+
+test("outlook desktop pack does not fall back to OCR candidates when vision finds no reply-worthy threads", async () => {
+  const worldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-outlook-no-fallback",
+    appContext: {
+      appName: "Microsoft Outlook",
+      windows: [
+        {
+          ownerName: "Microsoft Outlook",
+          windowName: "Inbox - Outlook",
+          bounds: { x: 120, y: 40, width: 1180, height: 820, centerX: 710, centerY: 450 }
+        }
+      ]
+    },
+    capture: {
+      id: "artifact-outlook-no-fallback",
+      taskId: "task-outlook-no-fallback",
+      traceId: null,
+      kind: "screenshot",
+      label: "Outlook vision state",
+      path: "/tmp/outlook-no-fallback.png",
+      metadata: {},
+      createdAt: new Date().toISOString()
+    },
+    ocrBlocks: [],
+    interactionCandidates: [
+      {
+        id: "ocr-mail-row",
+        surface: "desktop",
+        kind: "text",
+        text: "TurboTax",
+        role: "row",
+        bounds: { x: 240, y: 220, width: 280, height: 40, centerX: 380, centerY: 240 },
+        confidence: 0.91,
+        sourceHints: { source: "ocr", unread: true },
+        isInteractive: true
+      }
+    ],
+    visibleText: "Outlook\nInbox\nUnread\nTurboTax",
+    recentActions: [],
+    summary: "Outlook",
+    timestamp: new Date().toISOString()
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({})
+  });
+  const pack = registry.get("outlook-desktop");
+  const rule: WatchRule = {
+    id: "watch-outlook-no-fallback",
+    goal: "Always watch Outlook and prefill replies",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "outlook-desktop-main",
+    skillName: null,
+    appTarget: "Microsoft Outlook",
+    livePack: "outlook-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-outlook-no-fallback",
+    name: "outlook-desktop-main",
+    rootPath: "/tmp/outlook-desktop-main",
+    profilePath: "/tmp/outlook-desktop-main/profile",
+    downloadsPath: "/tmp/outlook-desktop-main/downloads",
+    artifactsPath: "/tmp/outlook-desktop-main/artifacts",
+    scratchPath: "/tmp/outlook-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: worldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        analyzeImageJson: async () => ({
+          scene: "list",
+          sceneEvidence: "Promotional mail rows are visible but do not need a reply",
+          recommendedRecoveryAction: "none",
+          recoveryControl: { present: false, evidence: "", approxBox: null },
+          openThread: null,
+          visibleUnreadThreads: [
+            {
+              name: "TurboTax",
+              evidence: "Unread promotional row",
+              replyable: false,
+              conversationKind: "mail",
+              shouldReply: false,
+              replyReason: "Promotional newsletter does not need a reply.",
+              latestSnippet: "Finish your taxes today",
+              priority: "low",
+              approxBox: { x: 0.18, y: 0.22, width: 0.28, height: 0.08 }
+            }
+          ],
+          composer: {
+            present: false,
+            evidence: "",
+            approxBox: null
+          }
+        })
+      }
+    } as never
+  });
+
+  assert.equal(detection, null);
+});
+
+test("outlook desktop pack fails closed when desktop scan drifts away from Outlook", async () => {
+  const outlookWorldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-outlook-drift",
+    appContext: {
+      appName: "Microsoft Outlook",
+      windows: [
+        {
+          ownerName: "Microsoft Outlook",
+          windowName: "Inbox - Outlook",
+          bounds: { x: 120, y: 40, width: 1180, height: 820, centerX: 710, centerY: 450 }
+        }
+      ]
+    },
+    capture: {
+      id: "artifact-outlook-drift",
+      taskId: "task-outlook-drift",
+      traceId: null,
+      kind: "screenshot",
+      label: "Outlook inbox",
+      path: "/tmp/outlook-drift.png",
+      metadata: {},
+      createdAt: new Date().toISOString()
+    },
+    ocrBlocks: [],
+    interactionCandidates: [],
+    visibleText: "Outlook\nInbox\nNo unread reply rows on the first screen",
+    recentActions: [],
+    summary: "Outlook inbox list",
+    timestamp: new Date().toISOString()
+  };
+  const slackWorldState = {
+    ...outlookWorldState,
+    appContext: {
+      appName: "Slack",
+      windows: [
+        {
+          ownerName: "Slack",
+          windowName: "Slack",
+          bounds: { x: 120, y: 40, width: 1180, height: 820, centerX: 710, centerY: 450 }
+        }
+      ]
+    },
+    capture: {
+      ...outlookWorldState.capture,
+      id: "artifact-slack-drift",
+      path: "/tmp/slack-drift.png"
+    },
+    visibleText: "Slack\nEngineering\nDrafts & Sent",
+    summary: "Slack window"
+  };
+  const fakeSurface = {
+    async observe() {
+      return slackWorldState;
+    },
+    async act() {
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("outlook-desktop");
+  const rule: WatchRule = {
+    id: "watch-outlook-drift",
+    goal: "Always watch Outlook and prefill replies",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "outlook-desktop-main",
+    skillName: null,
+    appTarget: "Microsoft Outlook",
+    livePack: "outlook-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-outlook-drift",
+    name: "outlook-desktop-main",
+    rootPath: "/tmp/outlook-desktop-main",
+    profilePath: "/tmp/outlook-desktop-main/profile",
+    downloadsPath: "/tmp/outlook-desktop-main/downloads",
+    artifactsPath: "/tmp/outlook-desktop-main/artifacts",
+    scratchPath: "/tmp/outlook-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: outlookWorldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        analyzeImageJson: async () => ({
+          scene: "list",
+          sceneEvidence: "No unread reply-worthy rows are visible yet.",
+          recommendedRecoveryAction: "none",
+          recoveryControl: { present: false, evidence: "", approxBox: null },
+          openThread: null,
+          visibleUnreadThreads: [],
+          composer: { present: false, evidence: "", approxBox: null }
+        })
+      }
+    } as never
+  });
+
+  assert.equal(detection, null);
+});
+
+test("outlook desktop pack does not fall back to Cmd+R when composer grounding fails", async () => {
+  let replyShortcutUsed = false;
+  const threadWithoutComposer = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-outlook-no-shortcut",
+    appContext: {
+      appName: "Microsoft Outlook",
+      windows: [
+        {
+          ownerName: "Microsoft Outlook",
+          windowName: "Inbox - Outlook",
+          bounds: { x: 120, y: 40, width: 1180, height: 820, centerX: 710, centerY: 450 }
+        }
+      ]
+    },
+    capture: {
+      id: "artifact-outlook-no-shortcut",
+      taskId: "task-outlook-no-shortcut",
+      traceId: null,
+      kind: "screenshot",
+      label: "Outlook thread",
+      path: "/tmp/outlook-no-shortcut.png",
+      metadata: {},
+      createdAt: new Date().toISOString()
+    },
+    ocrBlocks: [],
+    interactionCandidates: [
+      {
+        id: "mail-row",
+        surface: "desktop",
+        kind: "element",
+        text: "Project update",
+        role: "row",
+        bounds: { x: 160, y: 120, width: 420, height: 56, centerX: 370, centerY: 148 },
+        confidence: 0.95,
+        sourceHints: { source: "accessibility" },
+        isInteractive: true
+      }
+    ],
+    visibleText: "Outlook\nProject update\nCustomer: Any update?",
+    recentActions: [],
+    summary: "Outlook thread open",
+    timestamp: new Date().toISOString()
+  };
+  const fakeSurface = {
+    async observe() {
+      return threadWithoutComposer;
+    },
+    async act({ step }: { step: RuntimeStep }) {
+      if (step.action === "pressKey" && step.params?.key === "r") {
+        replyShortcutUsed = true;
+      }
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("outlook-desktop");
+  const rule: WatchRule = {
+    id: "watch-outlook-no-shortcut",
+    goal: "Always watch Outlook and prefill replies",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "outlook-desktop-main",
+    skillName: null,
+    appTarget: "Microsoft Outlook",
+    livePack: "outlook-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-outlook-no-shortcut",
+    name: "outlook-desktop-main",
+    rootPath: "/tmp/outlook-desktop-main",
+    profilePath: "/tmp/outlook-desktop-main/profile",
+    downloadsPath: "/tmp/outlook-desktop-main/downloads",
+    artifactsPath: "/tmp/outlook-desktop-main/artifacts",
+    scratchPath: "/tmp/outlook-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const context = await pack?.extractContext?.({
+    rule,
+    worldState: threadWithoutComposer as never,
+    detection: {
+      summary: "Project update",
+      text: "Project update",
+      context: [],
+      inputs: {
+        openTarget: "Project update"
+      },
+      metadata: {
+        visualAnalysis: {
+          scene: "thread",
+          openThread: "Project update"
+        }
+      }
+    } as never,
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => false
+      }
+    } as never
+  });
+
+  assert.equal(replyShortcutUsed, false);
+  assert.equal(context, null);
+});
+
+test("outlook desktop pack can use Cmd+R after the thread is visually confirmed open and no reply controls are visible", async () => {
+  const threadCapturePath = `/tmp/outlook-shortcut-thread-${Date.now()}.png`;
+  const composeCapturePath = `/tmp/outlook-shortcut-compose-${Date.now()}.png`;
+  await fs.writeFile(threadCapturePath, createPngHeaderBuffer(1440, 900));
+  await fs.writeFile(composeCapturePath, createPngHeaderBuffer(1440, 900));
+
+  let opened = false;
+  let replyShortcutUsed = false;
+  const initialWorldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-outlook-shortcut-success",
+    appContext: {
+      appName: "Microsoft Outlook",
+      windows: [
+        {
+          ownerName: "Microsoft Outlook",
+          windowName: "Inbox - Microsoft Outlook",
+          bounds: { x: 120, y: 40, width: 1180, height: 820, centerX: 710, centerY: 450 }
+        }
+      ]
+    },
+    capture: null,
+    ocrBlocks: [],
+    interactionCandidates: [],
+    visibleText: "Outlook\nUnread\n李伟",
+    recentActions: [],
+    summary: "Microsoft Outlook unread list",
+    timestamp: new Date().toISOString()
+  };
+  const threadWithoutComposer = {
+    ...initialWorldState,
+    capture: {
+      id: "artifact-outlook-shortcut-thread",
+      taskId: "task-outlook-shortcut-thread",
+      traceId: null,
+      kind: "screenshot",
+      label: "Outlook thread without composer",
+      path: threadCapturePath,
+      metadata: {},
+      createdAt: new Date().toISOString()
+    },
+    visibleText: "Outlook\nRe: Project update\nCustomer: Any update?"
+  };
+  const threadWithVisualComposer = {
+    ...threadWithoutComposer,
+    capture: {
+      ...threadWithoutComposer.capture,
+      id: "artifact-outlook-shortcut-compose",
+      label: "Outlook thread with composer",
+      path: composeCapturePath
+    },
+    visibleText: "Outlook\nRe: Project update\nInline reply editor\nSend"
+  };
+  const fakeSurface = {
+    async observe() {
+      if (!opened) {
+        return initialWorldState;
+      }
+      return replyShortcutUsed ? threadWithVisualComposer : threadWithoutComposer;
+    },
+    async act({ step }: { step: RuntimeStep }) {
+      if (step.action === "clickAt" && String(step.label ?? "").includes("Open mail thread")) {
+        opened = true;
+      }
+      if (step.action === "pressKey" && step.params?.key === "r") {
+        replyShortcutUsed = true;
+      }
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("outlook-desktop");
+  const rule: WatchRule = {
+    id: "watch-outlook-shortcut-success",
+    goal: "Always watch Outlook and prefill replies",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "outlook-desktop-main",
+    skillName: null,
+    appTarget: "Microsoft Outlook",
+    livePack: "outlook-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-outlook-shortcut-success",
+    name: "outlook-desktop-main",
+    rootPath: "/tmp/outlook-desktop-main",
+    profilePath: "/tmp/outlook-desktop-main/profile",
+    downloadsPath: "/tmp/outlook-desktop-main/downloads",
+    artifactsPath: "/tmp/outlook-desktop-main/artifacts",
+    scratchPath: "/tmp/outlook-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const context = await pack?.extractContext?.({
+    rule,
+    worldState: initialWorldState as never,
+    detection: {
+      summary: "李伟",
+      text: "李伟",
+      context: [],
+      inputs: {
+        openTarget: "李伟",
+        openX: 280,
+        openY: 220
+      },
+      metadata: {
+        visualAnalysis: {
+          scene: "thread",
+          openThread: "Existing open thread"
+        }
+      }
+    } as never,
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        analyzeImageJson: async ({ schemaName }) => {
+          if (schemaName === "agentos_outlook_reply_control") {
+            return {
+              present: false,
+              evidence: "",
+              label: "",
+              approxBox: null
+            };
+          }
+          if (schemaName === "agentos_outlook_desktop_visual") {
+            if (replyShortcutUsed) {
+              return {
+                scene: "thread",
+                sceneEvidence: "A thread is open and an inline reply editor is visible.",
+                recommendedRecoveryAction: "none",
+                recoveryControl: { present: false, evidence: "", approxBox: null },
+                openThread: "Re: Project update",
+                bestUnreadThread: {
+                  present: false,
+                  name: "",
+                  evidence: "",
+                  replyable: false,
+                  conversationKind: "unknown",
+                  shouldReply: false,
+                  replyReason: "",
+                  latestSnippet: "",
+                  priority: "low",
+                  approxBox: null
+                },
+                composer: {
+                  present: true,
+                  evidence: "Inline reply editor",
+                  approxBox: { x: 0.42, y: 0.68, width: 0.36, height: 0.14 },
+                  entryPoint: { x: 0.61, y: 0.74 }
+                },
+                targetThreadOpen: null,
+                prefillVisible: false
+              };
+            }
+            return {
+              scene: "thread",
+              sceneEvidence: "A thread is open in the reading pane but no reply composer is visible yet.",
+              recommendedRecoveryAction: "none",
+              recoveryControl: { present: false, evidence: "", approxBox: null },
+              openThread: "Re: Project update",
+              bestUnreadThread: {
+                present: false,
+                name: "",
+                evidence: "",
+                replyable: false,
+                conversationKind: "unknown",
+                shouldReply: false,
+                replyReason: "",
+                latestSnippet: "",
+                priority: "low",
+                approxBox: null
+              },
+              composer: {
+                present: false,
+                evidence: "",
+                approxBox: null
+              },
+              targetThreadOpen: null,
+              prefillVisible: false
+            };
+          }
+          throw new Error(`Unexpected schema ${schemaName}`);
+        }
+      }
+    } as never
+  });
+
+  assert.equal(replyShortcutUsed, true);
+  assert.equal(context?.inputs?.threadVerifyTarget, "Project update");
+  assert.equal(context?.inputs?.typeTarget, "Inline reply editor");
+  const shortcutComposeTarget = (context?.inputs?.composeTarget ?? null) as { bounds?: { centerX?: number; centerY?: number } } | null;
+  assert.equal(Math.round(Number(shortcutComposeTarget?.bounds?.centerX ?? 0)), 698);
+  assert.equal(Math.round(Number(shortcutComposeTarget?.bounds?.centerY ?? 0)), 650);
+  assert.ok(context?.inputs?.composeVerifyRegion);
+
+  await fs.unlink(threadCapturePath).catch(() => {});
+  await fs.unlink(composeCapturePath).catch(() => {});
+});
+
+test("outlook desktop pack can use Cmd+R when the opened thread matches the unread subject cue instead of the sender row", async () => {
+  const threadCapturePath = `/tmp/outlook-shortcut-cue-thread-${Date.now()}.png`;
+  const composeCapturePath = `/tmp/outlook-shortcut-cue-compose-${Date.now()}.png`;
+  await fs.writeFile(threadCapturePath, createPngHeaderBuffer(1440, 900));
+  await fs.writeFile(composeCapturePath, createPngHeaderBuffer(1440, 900));
+
+  let opened = false;
+  let replyShortcutUsed = false;
+  const initialWorldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-outlook-shortcut-cue",
+    appContext: {
+      appName: "Microsoft Outlook",
+      windows: [
+        {
+          ownerName: "Microsoft Outlook",
+          windowName: "Inbox - Microsoft Outlook",
+          bounds: { x: 120, y: 40, width: 1180, height: 820, centerX: 710, centerY: 450 }
+        }
+      ]
+    },
+    capture: null,
+    ocrBlocks: [],
+    interactionCandidates: [],
+    visibleText: "Outlook\nUnread\nRaghav Bansal\nFor Payinone",
+    recentActions: [],
+    summary: "Microsoft Outlook unread list",
+    timestamp: new Date().toISOString()
+  };
+  const threadWithoutComposer = {
+    ...initialWorldState,
+    capture: {
+      id: "artifact-outlook-shortcut-cue-thread",
+      taskId: "task-outlook-shortcut-cue-thread",
+      traceId: null,
+      kind: "screenshot",
+      label: "Outlook thread without composer",
+      path: threadCapturePath,
+      metadata: {},
+      createdAt: new Date().toISOString()
+    },
+    visibleText: "Outlook\nRe: For Payinone\nIs any of that showing up right now?"
+  };
+  const threadWithVisualComposer = {
+    ...threadWithoutComposer,
+    capture: {
+      ...threadWithoutComposer.capture,
+      id: "artifact-outlook-shortcut-cue-compose",
+      label: "Outlook thread with composer",
+      path: composeCapturePath
+    },
+    visibleText: "Outlook\nRe: For Payinone\nInline reply editor\nSend"
+  };
+  const fakeSurface = {
+    async observe() {
+      if (!opened) {
+        return initialWorldState;
+      }
+      return replyShortcutUsed ? threadWithVisualComposer : threadWithoutComposer;
+    },
+    async act({ step }: { step: RuntimeStep }) {
+      if (step.action === "clickAt" && String(step.label ?? "").includes("Open mail thread")) {
+        opened = true;
+      }
+      if (step.action === "pressKey" && step.params?.key === "r") {
+        replyShortcutUsed = true;
+      }
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("outlook-desktop");
+  const rule: WatchRule = {
+    id: "watch-outlook-shortcut-cue",
+    goal: "Always watch Outlook and prefill replies",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "outlook-desktop-main",
+    skillName: null,
+    appTarget: "Microsoft Outlook",
+    livePack: "outlook-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-outlook-shortcut-cue",
+    name: "outlook-desktop-main",
+    rootPath: "/tmp/outlook-desktop-main",
+    profilePath: "/tmp/outlook-desktop-main/profile",
+    downloadsPath: "/tmp/outlook-desktop-main/downloads",
+    artifactsPath: "/tmp/outlook-desktop-main/artifacts",
+    scratchPath: "/tmp/outlook-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const context = await pack?.extractContext?.({
+    rule,
+    worldState: initialWorldState as never,
+    detection: {
+      summary: "Raghav Bansal",
+      text: "Raghav Bansal",
+      context: ["Is any of that showing up right now?"],
+      inputs: {
+        openTarget: "Raghav Bansal",
+        openX: 280,
+        openY: 220
+      },
+      metadata: {
+        visualAnalysis: {
+          scene: "list",
+          openThread: null
+        },
+        visualThread: {
+          subjectCue: "For Payinone",
+          latestSnippet: "Is any of that showing up right now?"
+        }
+      }
+    } as never,
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        analyzeImageJson: async ({ schemaName }) => {
+          if (schemaName === "agentos_outlook_reply_control") {
+            return {
+              present: false,
+              evidence: "",
+              label: "",
+              approxBox: null
+            };
+          }
+          if (schemaName === "agentos_outlook_desktop_visual") {
+            if (replyShortcutUsed) {
+              return {
+                scene: "thread",
+                sceneEvidence: "A thread is open and an inline reply editor is visible.",
+                recommendedRecoveryAction: "none",
+                recoveryControl: { present: false, evidence: "", approxBox: null },
+                openThread: "Re: For Payinone",
+                bestUnreadThread: {
+                  present: false,
+                  name: "",
+                  evidence: "",
+                  replyable: false,
+                  conversationKind: "unknown",
+                  shouldReply: false,
+                  replyReason: "",
+                  latestSnippet: "",
+                  priority: "low",
+                  approxBox: null
+                },
+                composer: {
+                  present: true,
+                  evidence: "Inline reply editor",
+                  hasDraftText: false,
+                  draftPreview: null,
+                  approxBox: { x: 0.42, y: 0.68, width: 0.36, height: 0.14 },
+                  entryPoint: { x: 0.61, y: 0.74 }
+                },
+                targetThreadOpen: null,
+                prefillVisible: false
+              };
+            }
+            return {
+              scene: "thread",
+              sceneEvidence: "A thread is open in the reading pane but no reply composer is visible yet.",
+              recommendedRecoveryAction: "none",
+              recoveryControl: { present: false, evidence: "", approxBox: null },
+              openThread: "Re: For Payinone",
+              bestUnreadThread: {
+                present: false,
+                name: "",
+                evidence: "",
+                replyable: false,
+                conversationKind: "unknown",
+                shouldReply: false,
+                replyReason: "",
+                latestSnippet: "",
+                priority: "low",
+                approxBox: null
+              },
+              composer: {
+                present: false,
+                evidence: "",
+                hasDraftText: null,
+                draftPreview: null,
+                approxBox: null,
+                entryPoint: null
+              },
+              targetThreadOpen: null,
+              prefillVisible: false
+            };
+          }
+          throw new Error(`Unexpected schema ${schemaName}`);
+        }
+      }
+    } as never
+  });
+
+  assert.equal(replyShortcutUsed, true);
+  assert.equal(context?.inputs?.threadVerifyTarget, "For Payinone");
+
+  await fs.unlink(threadCapturePath).catch(() => {});
+  await fs.unlink(composeCapturePath).catch(() => {});
+});
+
+test("outlook desktop pack waits for a delayed composer after Cmd+R and uses the reply body entry point", async () => {
+  const threadCapturePath = `/tmp/outlook-shortcut-delay-thread-${Date.now()}.png`;
+  const composeCapturePath = `/tmp/outlook-shortcut-delay-compose-${Date.now()}.png`;
+  await fs.writeFile(threadCapturePath, createPngHeaderBuffer(1440, 900));
+  await fs.writeFile(composeCapturePath, createPngHeaderBuffer(1440, 900));
+
+  let opened = false;
+  let replyShortcutUsed = false;
+  let postShortcutObserveCount = 0;
+  const initialWorldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-outlook-shortcut-delay",
+    appContext: {
+      appName: "Microsoft Outlook",
+      windows: [
+        {
+          ownerName: "Microsoft Outlook",
+          windowName: "Inbox - Outlook",
+          bounds: { x: 120, y: 40, width: 1180, height: 820, centerX: 710, centerY: 450 }
+        }
+      ]
+    },
+    capture: null,
+    ocrBlocks: [],
+    interactionCandidates: [],
+    visibleText: "Outlook\nUnread\nJin Wang",
+    recentActions: [],
+    summary: "Microsoft Outlook unread list",
+    timestamp: new Date().toISOString()
+  };
+  const threadWithoutComposer = {
+    ...initialWorldState,
+    capture: {
+      id: "artifact-outlook-shortcut-delay-thread",
+      taskId: "task-outlook-shortcut-delay-thread",
+      traceId: null,
+      kind: "screenshot",
+      label: "Outlook thread without composer",
+      path: threadCapturePath,
+      metadata: {},
+      createdAt: new Date().toISOString()
+    },
+    visibleText: "Outlook\nRe: Project update\nCustomer: Any update?"
+  };
+  const threadWithVisualComposer = {
+    ...threadWithoutComposer,
+    capture: {
+      ...threadWithoutComposer.capture,
+      id: "artifact-outlook-shortcut-delay-compose",
+      label: "Outlook thread with delayed composer",
+      path: composeCapturePath
+    },
+    visibleText: "Outlook\nRe: Project update\nInline reply editor\nSend"
+  };
+  const fakeSurface = {
+    async observe() {
+      if (!opened) {
+        return initialWorldState;
+      }
+      if (replyShortcutUsed) {
+        postShortcutObserveCount += 1;
+        return postShortcutObserveCount >= 2 ? threadWithVisualComposer : threadWithoutComposer;
+      }
+      return threadWithoutComposer;
+    },
+    async act({ step }: { step: RuntimeStep }) {
+      if (step.action === "clickAt" && String(step.label ?? "").includes("Open mail thread")) {
+        opened = true;
+      }
+      if (step.action === "pressKey" && step.params?.key === "r") {
+        replyShortcutUsed = true;
+      }
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("outlook-desktop");
+  const rule: WatchRule = {
+    id: "watch-outlook-shortcut-delay",
+    goal: "Always watch Outlook and prefill replies",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "outlook-desktop-main",
+    skillName: null,
+    appTarget: "Microsoft Outlook",
+    livePack: "outlook-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-outlook-shortcut-delay",
+    name: "outlook-desktop-main",
+    rootPath: "/tmp/outlook-desktop-main",
+    profilePath: "/tmp/outlook-desktop-main/profile",
+    downloadsPath: "/tmp/outlook-desktop-main/downloads",
+    artifactsPath: "/tmp/outlook-desktop-main/artifacts",
+    scratchPath: "/tmp/outlook-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const context = await pack?.extractContext?.({
+    rule,
+    worldState: initialWorldState as never,
+    detection: {
+      summary: "Jin Wang",
+      text: "Jin Wang",
+      context: [],
+      inputs: {
+        openTarget: "Jin Wang",
+        openX: 280,
+        openY: 220
+      },
+      metadata: {
+        visualAnalysis: {
+          scene: "thread",
+          openThread: "Existing open thread"
+        }
+      }
+    } as never,
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        analyzeImageJson: async ({ schemaName }) => {
+          if (schemaName === "agentos_outlook_reply_control") {
+            return {
+              present: false,
+              evidence: "",
+              label: "",
+              approxBox: null
+            };
+          }
+          if (schemaName === "agentos_outlook_desktop_visual") {
+            if (replyShortcutUsed && postShortcutObserveCount >= 2) {
+              return {
+                scene: "thread",
+                sceneEvidence: "A thread is open and the reply editor is now visible.",
+                recommendedRecoveryAction: "none",
+                recoveryControl: { present: false, evidence: "", approxBox: null },
+                openThread: "Re: Project update",
+                bestUnreadThread: {
+                  present: false,
+                  name: "",
+                  evidence: "",
+                  replyable: false,
+                  conversationKind: "unknown",
+                  shouldReply: false,
+                  replyReason: "",
+                  latestSnippet: "",
+                  priority: "low",
+                  approxBox: null
+                },
+                composer: {
+                  present: true,
+                  evidence: "Inline reply editor",
+                  approxBox: { x: 0.42, y: 0.68, width: 0.36, height: 0.14 },
+                  entryPoint: { x: 0.62, y: 0.75 }
+                },
+                targetThreadOpen: null,
+                prefillVisible: false
+              };
+            }
+            return {
+              scene: "thread",
+              sceneEvidence: "A thread is open in the reading pane but the reply editor has not appeared yet.",
+              recommendedRecoveryAction: "none",
+              recoveryControl: { present: false, evidence: "", approxBox: null },
+              openThread: "Re: Project update",
+              bestUnreadThread: {
+                present: false,
+                name: "",
+                evidence: "",
+                replyable: false,
+                conversationKind: "unknown",
+                shouldReply: false,
+                replyReason: "",
+                latestSnippet: "",
+                priority: "low",
+                approxBox: null
+              },
+              composer: {
+                present: false,
+                evidence: "",
+                approxBox: null
+              },
+              targetThreadOpen: null,
+              prefillVisible: false
+            };
+          }
+          throw new Error(`Unexpected schema ${schemaName}`);
+        }
+      }
+    } as never
+  });
+
+  assert.equal(replyShortcutUsed, true);
+  assert.ok(postShortcutObserveCount >= 2);
+  assert.equal(context?.inputs?.typeTarget, "Inline reply editor");
+  const delayedComposeTarget = (context?.inputs?.composeTarget ?? null) as { bounds?: { centerX?: number; centerY?: number } } | null;
+  assert.equal(Math.round(Number(delayedComposeTarget?.bounds?.centerX ?? 0)), 698);
+  assert.equal(Math.round(Number(delayedComposeTarget?.bounds?.centerY ?? 0)), 650);
+  assert.ok(context?.inputs?.composeVerifyRegion);
+
+  await fs.unlink(threadCapturePath).catch(() => {});
+  await fs.unlink(composeCapturePath).catch(() => {});
+});
+
+test("outlook desktop pack treats a truncated subject cue as an already opened thread", async () => {
+  const threadCapturePath = `/tmp/outlook-shortcut-truncated-thread-${Date.now()}.png`;
+  const composeCapturePath = `/tmp/outlook-shortcut-truncated-compose-${Date.now()}.png`;
+  await fs.writeFile(threadCapturePath, createPngHeaderBuffer(1440, 900));
+  await fs.writeFile(composeCapturePath, createPngHeaderBuffer(1440, 900));
+
+  let replyShortcutUsed = false;
+  const actions: string[] = [];
+  const threadWithoutComposer = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-outlook-shortcut-truncated",
+    appContext: {
+      appName: "Microsoft Outlook",
+      windows: [
+        {
+          ownerName: "Microsoft Outlook",
+          windowName: "Inbox - Outlook",
+          bounds: { x: 120, y: 40, width: 1180, height: 820, centerX: 710, centerY: 450 }
+        }
+      ]
+    },
+    capture: {
+      id: "artifact-outlook-shortcut-truncated-thread",
+      taskId: "task-outlook-shortcut-truncated-thread",
+      traceId: null,
+      kind: "screenshot",
+      label: "Outlook thread without composer",
+      path: threadCapturePath,
+      metadata: {},
+      createdAt: new Date().toISOString()
+    },
+    ocrBlocks: [],
+    interactionCandidates: [],
+    visibleText: "Outlook\nRe: credibility guide for Tan\nCan I send it over?",
+    recentActions: [],
+    summary: "Microsoft Outlook thread",
+    timestamp: new Date().toISOString()
+  };
+  const threadWithVisualComposer = {
+    ...threadWithoutComposer,
+    capture: {
+      ...threadWithoutComposer.capture,
+      id: "artifact-outlook-shortcut-truncated-compose",
+      label: "Outlook thread with composer",
+      path: composeCapturePath
+    },
+    visibleText: "Outlook\nRe: credibility guide for Tan\nInline reply editor\nSend"
+  };
+  const fakeSurface = {
+    async observe() {
+      return replyShortcutUsed ? threadWithVisualComposer : threadWithoutComposer;
+    },
+    async act({ step }: { step: RuntimeStep }) {
+      actions.push(`${step.action}:${String(step.label ?? step.id ?? "")}`);
+      if (step.action === "pressKey" && step.params?.key === "r") {
+        replyShortcutUsed = true;
+      }
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("outlook-desktop");
+  const rule: WatchRule = {
+    id: "watch-outlook-shortcut-truncated",
+    goal: "Always watch Outlook and prefill replies",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "outlook-desktop-main",
+    skillName: null,
+    appTarget: "Microsoft Outlook",
+    livePack: "outlook-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-outlook-shortcut-truncated",
+    name: "outlook-desktop-main",
+    rootPath: "/tmp/outlook-desktop-main",
+    profilePath: "/tmp/outlook-desktop-main/profile",
+    downloadsPath: "/tmp/outlook-desktop-main/downloads",
+    artifactsPath: "/tmp/outlook-desktop-main/artifacts",
+    scratchPath: "/tmp/outlook-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const context = await pack?.extractContext?.({
+    rule,
+    worldState: threadWithoutComposer as never,
+    detection: {
+      summary: "Jenna Fernandes",
+      text: "Jenna Fernandes",
+      context: ["credibility gu...", "Can I send it over?"],
+      inputs: {
+        openTarget: "Jenna Fernandes",
+        openX: 312,
+        openY: 418
+      },
+      metadata: {
+        visualAnalysis: {
+          scene: "thread",
+          openThread: "Re: credibility guide for Tan"
+        },
+        visualThread: {
+          subjectCue: "credibility gu...",
+          latestSnippet: "Can I send it over?"
+        }
+      }
+    } as never,
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        analyzeImageJson: async ({ schemaName }) => {
+          if (schemaName === "agentos_outlook_reply_control") {
+            return {
+              present: false,
+              evidence: "",
+              label: "",
+              approxBox: null
+            };
+          }
+          if (schemaName === "agentos_outlook_desktop_visual") {
+            return replyShortcutUsed
+              ? {
+                  scene: "thread",
+                  sceneEvidence: "A thread is open and an inline reply editor is visible.",
+                  recommendedRecoveryAction: "none",
+                  recoveryControl: { present: false, evidence: "", approxBox: null },
+                  openThread: "Re: credibility guide for Tan",
+                  bestUnreadThread: {
+                    present: false,
+                    name: "",
+                    evidence: "",
+                    replyable: false,
+                    conversationKind: "unknown",
+                    shouldReply: false,
+                    replyReason: "",
+                    latestSnippet: "",
+                    priority: "low",
+                    subjectCue: "",
+                    approxBox: null
+                  },
+                  composer: {
+                    present: true,
+                    evidence: "Inline reply editor",
+                    hasDraftText: false,
+                    draftPreview: null,
+                    approxBox: { x: 0.42, y: 0.68, width: 0.36, height: 0.14 },
+                    entryPoint: { x: 0.61, y: 0.74 }
+                  },
+                  targetThreadOpen: null,
+                  prefillVisible: false
+                }
+              : {
+                  scene: "thread",
+                  sceneEvidence: "A thread is open in the reading pane but no reply composer is visible yet.",
+                  recommendedRecoveryAction: "none",
+                  recoveryControl: { present: false, evidence: "", approxBox: null },
+                  openThread: "Re: credibility guide for Tan",
+                  bestUnreadThread: {
+                    present: false,
+                    name: "",
+                    evidence: "",
+                    replyable: false,
+                    conversationKind: "unknown",
+                    shouldReply: false,
+                    replyReason: "",
+                    latestSnippet: "",
+                    priority: "low",
+                    subjectCue: "",
+                    approxBox: null
+                  },
+                  composer: {
+                    present: false,
+                    evidence: "",
+                    hasDraftText: null,
+                    draftPreview: null,
+                    approxBox: null,
+                    entryPoint: null
+                  },
+                  targetThreadOpen: null,
+                  prefillVisible: false
+                };
+          }
+          throw new Error(`Unexpected schema ${schemaName}`);
+        }
+      }
+    } as never
+  });
+
+  assert.equal(replyShortcutUsed, true);
+  assert.equal(actions.some((action) => action.includes("Open mail thread")), false);
+  assert.equal(context?.inputs?.threadVerifyTarget, "credibility guide for Tan");
+
+  await fs.unlink(threadCapturePath).catch(() => {});
+  await fs.unlink(composeCapturePath).catch(() => {});
+});
+
+test("outlook desktop pack treats a target unread row disappearing after selection as thread advancement", async () => {
+  const threadCapturePath = `/tmp/outlook-shortcut-read-thread-${Date.now()}.png`;
+  const composeCapturePath = `/tmp/outlook-shortcut-read-compose-${Date.now()}.png`;
+  await fs.writeFile(threadCapturePath, createPngHeaderBuffer(1440, 900));
+  await fs.writeFile(composeCapturePath, createPngHeaderBuffer(1440, 900));
+
+  let replyShortcutUsed = false;
+  let threadOpened = false;
+  const fakeSurface = {
+    async observe() {
+      return replyShortcutUsed
+        ? {
+            version: 1,
+            surface: "desktop",
+            workspaceId: "workspace-outlook-shortcut-read",
+            appContext: {
+              appName: "Microsoft Outlook",
+              windows: [
+                {
+                  ownerName: "Microsoft Outlook",
+                  windowName: "Inbox - Outlook",
+                  bounds: { x: 120, y: 40, width: 1180, height: 820, centerX: 710, centerY: 450 }
+                }
+              ]
+            },
+            capture: {
+              id: "artifact-outlook-shortcut-read-compose",
+              taskId: "task-outlook-shortcut-read-compose",
+              traceId: null,
+              kind: "screenshot",
+              label: "Outlook thread with composer",
+              path: composeCapturePath,
+              metadata: {},
+              createdAt: new Date().toISOString()
+            },
+            ocrBlocks: [],
+            interactionCandidates: [],
+            visibleText: "Outlook\nRe: For Payinone\nInline reply editor\nSend",
+            recentActions: [],
+            summary: "Microsoft Outlook thread with composer",
+            timestamp: new Date().toISOString()
+          }
+        : {
+            version: 1,
+            surface: "desktop",
+            workspaceId: "workspace-outlook-shortcut-read",
+            appContext: {
+              appName: "Microsoft Outlook",
+              windows: [
+                {
+                  ownerName: "Microsoft Outlook",
+                  windowName: "Inbox - Outlook",
+                  bounds: { x: 120, y: 40, width: 1180, height: 820, centerX: 710, centerY: 450 }
+                }
+              ]
+            },
+            capture: {
+              id: "artifact-outlook-shortcut-read-thread",
+              taskId: "task-outlook-shortcut-read-thread",
+              traceId: null,
+              kind: "screenshot",
+              label: "Outlook thread without composer",
+              path: threadCapturePath,
+              metadata: {},
+              createdAt: new Date().toISOString()
+            },
+            ocrBlocks: [],
+            interactionCandidates: [],
+            visibleText: threadOpened
+              ? "Outlook\nRe: For Payinone\nCurrent thread"
+              : "Outlook\nUnread\nzhangbei",
+            recentActions: [],
+            summary: threadOpened ? "Microsoft Outlook thread" : "Microsoft Outlook unread list",
+            timestamp: new Date().toISOString()
+          };
+    },
+    async act({ step }: { step: RuntimeStep }) {
+      if (String(step.label ?? "").includes("Open mail thread")) {
+        threadOpened = true;
+      }
+      if (step.action === "pressKey" && step.params?.key === "r") {
+        replyShortcutUsed = true;
+      }
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("outlook-desktop");
+  const rule: WatchRule = {
+    id: "watch-outlook-shortcut-read",
+    goal: "Always watch Outlook and prefill replies",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "outlook-desktop-main",
+    skillName: null,
+    appTarget: "Microsoft Outlook",
+    livePack: "outlook-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-outlook-shortcut-read",
+    name: "outlook-desktop-main",
+    rootPath: "/tmp/outlook-desktop-main",
+    profilePath: "/tmp/outlook-desktop-main/profile",
+    downloadsPath: "/tmp/outlook-desktop-main/downloads",
+    artifactsPath: "/tmp/outlook-desktop-main/artifacts",
+    scratchPath: "/tmp/outlook-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const context = await pack?.extractContext?.({
+    rule,
+    worldState: {
+      version: 1,
+      surface: "desktop",
+      workspaceId: "workspace-outlook-shortcut-read",
+      appContext: {
+        appName: "Microsoft Outlook",
+        windows: [
+          {
+            ownerName: "Microsoft Outlook",
+            windowName: "Inbox - Outlook",
+            bounds: { x: 120, y: 40, width: 1180, height: 820, centerX: 710, centerY: 450 }
+          }
+        ]
+      },
+      capture: null,
+      ocrBlocks: [],
+      interactionCandidates: [],
+      visibleText: "Outlook\nUnread\nzhangbei",
+      recentActions: [],
+      summary: "Microsoft Outlook unread list",
+      timestamp: new Date().toISOString()
+    } as never,
+    detection: {
+      summary: "zhangbei",
+      text: "zhangbei",
+      context: ["对接口代理...", "徐老师您好, 烦请先分..."],
+      inputs: {
+        openTarget: "zhangbei",
+        openX: 413,
+        openY: 370
+      },
+      metadata: {
+        visualAnalysis: {
+          scene: "thread",
+          openThread: "For Payinone"
+        },
+        visualThread: {
+          subjectCue: "对接口代理...",
+          latestSnippet: "徐老师您好, 烦请先分..."
+        },
+        openCandidate: {
+          id: "outlook-vision-unread",
+          text: "zhangbei",
+          role: "text",
+          isInteractive: true,
+          bounds: { x: 305, y: 348, width: 215, height: 44, centerX: 413, centerY: 370 }
+        }
+      }
+    } as never,
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        analyzeImageJson: async ({ schemaName }) => {
+          if (schemaName === "agentos_outlook_reply_control") {
+            return {
+              present: false,
+              evidence: "",
+              label: "",
+              approxBox: null
+            };
+          }
+          if (schemaName === "agentos_outlook_desktop_visual") {
+            return replyShortcutUsed
+              ? {
+                  scene: "thread",
+                  sceneEvidence: "A thread is open and an inline reply editor is visible.",
+                  recommendedRecoveryAction: "none",
+                  recoveryControl: { present: false, evidence: "", approxBox: null },
+                  openThread: "Re: For Payinone",
+                  bestUnreadThread: {
+                    present: false,
+                    name: "",
+                    evidence: "",
+                    replyable: false,
+                    conversationKind: "unknown",
+                    shouldReply: false,
+                    replyReason: "",
+                    latestSnippet: "",
+                    priority: "low",
+                    subjectCue: "",
+                    approxBox: null
+                  },
+                  composer: {
+                    present: true,
+                    evidence: "Inline reply editor",
+                    hasDraftText: false,
+                    draftPreview: null,
+                    approxBox: { x: 0.42, y: 0.68, width: 0.36, height: 0.14 },
+                    entryPoint: { x: 0.61, y: 0.74 }
+                  },
+                  targetThreadOpen: null,
+                  prefillVisible: false
+                }
+              : {
+                  scene: "thread",
+                  sceneEvidence: "A thread is open in the reading pane but no reply composer is visible yet.",
+                  recommendedRecoveryAction: "none",
+                  recoveryControl: { present: false, evidence: "", approxBox: null },
+                  openThread: "Re: For Payinone",
+                  bestUnreadThread: {
+                    present: false,
+                    name: "",
+                    evidence: "",
+                    replyable: false,
+                    conversationKind: "unknown",
+                    shouldReply: false,
+                    replyReason: "",
+                    latestSnippet: "",
+                    priority: "low",
+                    subjectCue: "",
+                    approxBox: null
+                  },
+                  composer: {
+                    present: false,
+                    evidence: "",
+                    hasDraftText: null,
+                    draftPreview: null,
+                    approxBox: null,
+                    entryPoint: null
+                  },
+                  targetThreadOpen: null,
+                  prefillVisible: false
+                };
+          }
+          throw new Error(`Unexpected schema ${schemaName}`);
+        }
+      }
+    } as never
+  });
+
+  assert.equal(replyShortcutUsed, true);
+  assert.equal(context?.inputs?.threadVerifyTarget, "For Payinone");
+
+  await fs.unlink(threadCapturePath).catch(() => {});
+  await fs.unlink(composeCapturePath).catch(() => {});
+});
+
+test("outlook desktop pack treats a selected row that starts with the target sender as thread advancement", async () => {
+  const threadCapturePath = `/tmp/outlook-selected-row-target-prefix-${Date.now()}.png`;
+  const composeCapturePath = `/tmp/outlook-selected-row-target-prefix-compose-${Date.now()}.png`;
+  await fs.writeFile(threadCapturePath, createPngHeaderBuffer(1440, 900));
+  await fs.writeFile(composeCapturePath, createPngHeaderBuffer(1440, 900));
+
+  let replyShortcutUsed = false;
+  let openClicks = 0;
+
+  const initialWorldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-outlook-selected-row-target-prefix",
+    appContext: {
+      appName: "Microsoft Outlook",
+      windows: [
+        {
+          ownerName: "Microsoft Outlook",
+          windowName: "Inbox - Outlook",
+          bounds: { x: 120, y: 40, width: 1180, height: 820, centerX: 710, centerY: 450 }
+        }
+      ]
+    },
+    capture: null,
+    ocrBlocks: [],
+    interactionCandidates: [],
+    visibleText: "Outlook\nUnread\n杜军奋",
+    recentActions: [],
+    summary: "Microsoft Outlook unread list",
+    timestamp: new Date().toISOString()
+  };
+  const threadWithoutComposer = {
+    ...initialWorldState,
+    capture: {
+      id: "artifact-outlook-selected-row-target-prefix",
+      taskId: "task-outlook-selected-row-target-prefix",
+      traceId: null,
+      kind: "screenshot",
+      label: "Outlook thread without composer",
+      path: threadCapturePath,
+      metadata: {},
+      createdAt: new Date().toISOString()
+    },
+    visibleText: "Outlook\nAI 法务系统优化需求\n杜军奋 周报 (2.24-...\nReply"
+  };
+  const threadWithComposer = {
+    ...threadWithoutComposer,
+    capture: {
+      ...threadWithoutComposer.capture,
+      id: "artifact-outlook-selected-row-target-prefix-compose",
+      label: "Outlook thread with composer",
+      path: composeCapturePath
+    },
+    visibleText: "Outlook\n周报 (2.24-...)\nInline reply editor\nSend"
+  };
+
+  const fakeSurface = {
+    async observe() {
+      return replyShortcutUsed ? threadWithComposer : threadWithoutComposer;
+    },
+    async act({ step }) {
+      if ((step.action === "clickTarget" || step.action === "clickAt") && String(step.label ?? "").includes("Open mail thread")) {
+        openClicks += 1;
+      }
+      if (step.action === "pressKey" && step.params?.key === "r") {
+        replyShortcutUsed = true;
+      }
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("outlook-desktop");
+  const rule: WatchRule = {
+    id: "watch-outlook-selected-row-target-prefix",
+    goal: "Always watch Outlook and prefill replies",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "outlook-desktop-main",
+    skillName: null,
+    appTarget: "Microsoft Outlook",
+    livePack: "outlook-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-outlook-selected-row-target-prefix",
+    name: "outlook-desktop-main",
+    rootPath: "/tmp/outlook-desktop-main",
+    profilePath: "/tmp/outlook-desktop-main/profile",
+    downloadsPath: "/tmp/outlook-desktop-main/downloads",
+    artifactsPath: "/tmp/outlook-desktop-main/artifacts",
+    scratchPath: "/tmp/outlook-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const context = await pack?.extractContext?.({
+    rule,
+    worldState: initialWorldState as never,
+    detection: {
+      summary: "杜军奋",
+      text: "杜军奋",
+      context: ["周报 (2.24-...", "Dear LinTan, 本周周..."],
+      inputs: {
+        openTarget: "杜军奋",
+        openX: 410,
+        openY: 302
+      },
+      metadata: {
+        visualAnalysis: {
+          scene: "thread",
+          openThread: "AI 法务系统优化需求: 审批详情页补充“提交结论”字段展示",
+          selectedRow: "Jin Wang Re: AI 法务系统优化需求: 审批详情页补充“提交结论”字段展示"
+        },
+        visualThread: {
+          subjectCue: "周报 (2.24-...",
+          latestSnippet: "Dear LinTan, 本周周..."
+        }
+      }
+    } as never,
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        analyzeImageJson: async ({ schemaName }) => {
+          if (schemaName === "agentos_outlook_reply_control") {
+            return {
+              present: false,
+              evidence: "",
+              label: "",
+              approxBox: null
+            };
+          }
+          if (schemaName === "agentos_outlook_desktop_visual") {
+            return replyShortcutUsed
+              ? {
+                  scene: "thread",
+                  sceneEvidence: "A thread is open and an inline reply editor is visible.",
+                  recommendedRecoveryAction: "none",
+                  recoveryControl: { present: false, evidence: "", approxBox: null },
+                  openThread: "周报 (2.24-...)",
+                  selectedRow: "杜军奋 周报 (2.24-...)",
+                  bestUnreadThread: {
+                    present: false,
+                    name: "",
+                    evidence: "",
+                    replyable: false,
+                    conversationKind: "unknown",
+                    shouldReply: false,
+                    replyReason: "",
+                    latestSnippet: "",
+                    priority: "low",
+                    subjectCue: "",
+                    approxBox: null
+                  },
+                  composer: {
+                    present: true,
+                    evidence: "Inline reply editor",
+                    hasDraftText: false,
+                    draftPreview: null,
+                    approxBox: { x: 0.42, y: 0.68, width: 0.36, height: 0.14 },
+                    entryPoint: { x: 0.61, y: 0.74 }
+                  },
+                  targetThreadOpen: null,
+                  prefillVisible: false
+                }
+              : {
+                  scene: "thread",
+                  sceneEvidence: "A thread is open in the reading pane but no reply composer is visible yet.",
+                  recommendedRecoveryAction: "none",
+                  recoveryControl: { present: false, evidence: "", approxBox: null },
+                  openThread: "AI 法务系统优化需求: 审批详情页补充“提交结论”字段展示",
+                  selectedRow: "杜军奋 周报 (2.24-...)",
+                  bestUnreadThread: {
+                    present: false,
+                    name: "",
+                    evidence: "",
+                    replyable: false,
+                    conversationKind: "unknown",
+                    shouldReply: false,
+                    replyReason: "",
+                    latestSnippet: "",
+                    priority: "low",
+                    subjectCue: "",
+                    approxBox: null
+                  },
+                  composer: {
+                    present: false,
+                    evidence: "",
+                    hasDraftText: null,
+                    draftPreview: null,
+                    approxBox: null,
+                    entryPoint: null
+                  },
+                  targetThreadOpen: null,
+                  prefillVisible: false
+                };
+          }
+          throw new Error(`Unexpected schema ${schemaName}`);
+        }
+      }
+    } as never
+  });
+
+  assert.equal(openClicks, 1);
+  assert.equal(replyShortcutUsed, true);
+  assert.equal(context?.inputs?.threadVerifyTarget, "周报 (2.24-...)");
+
+  await fs.unlink(threadCapturePath).catch(() => {});
+  await fs.unlink(composeCapturePath).catch(() => {});
+});
+
+test("outlook desktop pack falls back to a body-safe composer point when the visual entry point sits in the header chrome", async () => {
+  const composeCapturePath = `/tmp/outlook-compose-header-entry-${Date.now()}.png`;
+  await fs.writeFile(composeCapturePath, createPngHeaderBuffer(1440, 900));
+
+  const threadWithComposer = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-outlook-compose-header-entry",
+    appContext: {
+      appName: "Microsoft Outlook",
+      windows: [
+        {
+          ownerName: "Microsoft Outlook",
+          windowName: "Inbox - Outlook",
+          bounds: { x: 120, y: 40, width: 1180, height: 820, centerX: 710, centerY: 450 }
+        }
+      ]
+    },
+    capture: {
+      id: "artifact-outlook-compose-header-entry",
+      taskId: "task-outlook-compose-header-entry",
+      traceId: null,
+      kind: "screenshot",
+      label: "Outlook compose with bad entry point",
+      path: composeCapturePath,
+      metadata: {},
+      createdAt: new Date().toISOString()
+    },
+    ocrBlocks: [],
+    interactionCandidates: [],
+    visibleText: "Outlook\nRe: Project update\nSend",
+    recentActions: [],
+    summary: "Microsoft Outlook thread with compose",
+    timestamp: new Date().toISOString()
+  };
+  const fakeSurface = {
+    async observe() {
+      return threadWithComposer;
+    },
+    async act() {
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("outlook-desktop");
+  const rule: WatchRule = {
+    id: "watch-outlook-compose-header-entry",
+    goal: "Always watch Outlook and prefill replies",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "outlook-desktop-main",
+    skillName: null,
+    appTarget: "Microsoft Outlook",
+    livePack: "outlook-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const detection = {
+    summary: "Project update",
+    inputs: {
+      openTarget: "Project update"
+    },
+    metadata: {
+      openCandidate: {
+        id: "candidate-project-update",
+        surface: "desktop",
+        kind: "text",
+        text: "Project update",
+        role: "row",
+        bounds: { x: 300, y: 180, width: 240, height: 36, centerX: 420, centerY: 198 },
+        confidence: 0.99,
+        sourceHints: { source: "vision" },
+        isInteractive: true
+      }
+    }
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-outlook-compose-header-entry",
+    name: "outlook-desktop-main",
+    rootPath: "/tmp",
+    profilePath: "/tmp/profile",
+    downloadsPath: "/tmp/downloads",
+    artifactsPath: "/tmp/artifacts",
+    scratchPath: "/tmp/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const context = await pack?.extractContext?.({
+    rule,
+    worldState: threadWithComposer as never,
+    detection: detection as never,
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        async analyzeImageJson({ schemaName }: { schemaName: string }) {
+          if (schemaName === "agentos_outlook_desktop_visual") {
+            return {
+              scene: "thread",
+              sceneEvidence: "Reply composer is visible on the right.",
+              recommendedRecoveryAction: "none",
+              recoveryControl: { present: false, evidence: "", approxBox: null },
+              openThread: "Re: Project update",
+              bestUnreadThread: {
+                present: false,
+                name: "",
+                evidence: "",
+                replyable: false,
+                conversationKind: "unknown",
+                shouldReply: false,
+                replyReason: "",
+                latestSnippet: "",
+                priority: "low",
+                approxBox: null
+              },
+              composer: {
+                present: true,
+                evidence: "Inline reply editor",
+                entryPoint: { x: 0.62, y: 0.17 },
+                approxBox: { x: 0.38, y: 0.14, width: 0.56, height: 0.68 }
+              },
+              targetThreadOpen: true,
+              prefillVisible: false
+            };
+          }
+          throw new Error(`Unexpected schema ${schemaName}`);
+        }
+      }
+    } as never
+  });
+
+  const composeTarget = (context?.inputs?.composeTarget ?? null) as {
+    bounds?: { x?: number; y?: number; width?: number; height?: number; centerX?: number; centerY?: number };
+  } | null;
+  assert.equal(Math.round(Number(composeTarget?.bounds?.x ?? 0)), 621);
+  assert.equal(Math.round(Number(composeTarget?.bounds?.y ?? 0)), 255);
+  assert.ok(Number(composeTarget?.bounds?.width ?? 0) >= 340);
+  assert.ok(Number(composeTarget?.bounds?.height ?? 0) >= 89);
+  assert.equal(Math.round(Number(composeTarget?.bounds?.centerX ?? 0)), 669);
+  assert.equal(Math.round(Number(composeTarget?.bounds?.centerY ?? 0)), 277);
+  const verifyRegion = (context?.inputs?.composeVerifyRegion ?? null) as { y?: number; height?: number } | null;
+  assert.ok(Number(verifyRegion?.y ?? 0) > 0.2);
+  assert.ok(Number(verifyRegion?.height ?? 0) >= 0.08);
+
+  await fs.unlink(composeCapturePath).catch(() => {});
+});
+
+test("outlook desktop pack recovers to a visible inbox row before scanning for unread mail", async () => {
+  let recovered = false;
+  const actions: string[] = [];
+  let recoveryClick: { x: number; y: number } | null = null;
+  const archiveWorldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-outlook-recover",
+    appContext: {
+      appName: "Microsoft Outlook",
+      windows: [
+        {
+          ownerName: "Microsoft Outlook",
+          windowName: "Archive - Outlook",
+          bounds: { x: 120, y: 40, width: 1180, height: 820, centerX: 710, centerY: 450 }
+        }
+      ]
+    },
+    capture: { path: "/tmp/outlook-archive.png" },
+    ocrBlocks: [],
+    interactionCandidates: [],
+    visibleText: "Outlook\nArchive\nInbox 4\nGemini Hsieh",
+    recentActions: [],
+    summary: "Outlook archive list",
+    timestamp: new Date().toISOString()
+  };
+  const inboxWorldState = {
+    ...archiveWorldState,
+    capture: { path: "/tmp/outlook-inbox.png" },
+    visibleText: "Outlook\nInbox\nUnread\nGemini Hsieh",
+    summary: "Outlook inbox list"
+  };
+  const fakeSurface = {
+    async observe() {
+      return recovered ? inboxWorldState : archiveWorldState;
+    },
+    async act({ step }: { step: RuntimeStep }) {
+      actions.push(`${step.action}:${String(step.label ?? step.id ?? "")}`);
+      if (step.action === "clickAt" && String(step.label ?? "").includes("Recover Outlook to inbox list")) {
+        recoveryClick = {
+          x: Number(step.params?.x ?? NaN),
+          y: Number(step.params?.y ?? NaN)
+        };
+        recovered = true;
+      }
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("outlook-desktop");
+  const rule: WatchRule = {
+    id: "watch-outlook-recover-inbox",
+    goal: "Always watch Outlook and prefill replies",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "outlook-desktop-main",
+    skillName: null,
+    appTarget: "Microsoft Outlook",
+    livePack: "outlook-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-outlook-recover-inbox",
+    name: "outlook-desktop-main",
+    rootPath: "/tmp/outlook-desktop-main",
+    profilePath: "/tmp/outlook-desktop-main/profile",
+    downloadsPath: "/tmp/outlook-desktop-main/downloads",
+    artifactsPath: "/tmp/outlook-desktop-main/artifacts",
+    scratchPath: "/tmp/outlook-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: archiveWorldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        analyzeImageJson: async () => {
+          if (!recovered) {
+            return {
+              scene: "list",
+              sceneEvidence: "Archive folder is selected while Inbox 4 is visible in the sidebar",
+              recommendedRecoveryAction: "recover_to_list",
+              recoveryControl: {
+                present: true,
+                evidence: "Inbox row with unread count",
+                approxBox: { x: 136, y: 314, width: 80, height: 20 }
+              },
+              openThread: null,
+              visibleUnreadThreads: [],
+              composer: {
+                present: false,
+                evidence: "",
+                approxBox: null
+              }
+            };
+          }
+          return {
+            scene: "list",
+            sceneEvidence: "Unread inbox row visible",
+            recommendedRecoveryAction: "none",
+            recoveryControl: {
+              present: false,
+              evidence: "",
+              approxBox: null
+            },
+            openThread: null,
+            visibleUnreadThreads: [
+              {
+                name: "Gemini Hsieh",
+                evidence: "Bold unread sender row in Inbox",
+                replyable: true,
+                conversationKind: "mail",
+                shouldReply: true,
+                replyReason: "Unread direct email likely needs a response",
+                latestSnippet: "Regulations",
+                priority: "high",
+                approxBox: { x: 0.18, y: 0.22, width: 0.28, height: 0.08 }
+              }
+            ],
+            composer: {
+              present: false,
+              evidence: "",
+              approxBox: null
+            }
+          };
+        }
+      }
+    } as never
+  });
+
+  assert.equal(detection?.summary, "Gemini Hsieh");
+  assert.equal((detection?.metadata as { recoveryAttempts?: unknown } | undefined)?.recoveryAttempts, 1);
+  assert.equal(actions.includes("clickAt:Recover Outlook to inbox list"), true);
+  assert.equal(Number.isFinite(Number(recoveryClick?.x ?? NaN)), true);
+  assert.equal(Number.isFinite(Number(recoveryClick?.y ?? NaN)), true);
+});
+
+test("outlook desktop pack can recover an empty focused list via load more conversations before scanning unread mail", async () => {
+  let recovered = false;
+  const actions: string[] = [];
+  const emptyListWorldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-outlook-recover-load-more",
+    appContext: {
+      appName: "Microsoft Outlook",
+      windows: [
+        {
+          ownerName: "Microsoft Outlook",
+          windowName: "Inbox - Outlook",
+          bounds: { x: 80, y: 30, width: 1280, height: 860, centerX: 720, centerY: 460 }
+        }
+      ]
+    },
+    capture: { path: "/tmp/outlook-empty-focused.png" },
+    ocrBlocks: [],
+    interactionCandidates: [],
+    visibleText: "Outlook\nInbox\nFocused\nOther\nLoad more conversations",
+    recentActions: [],
+    summary: "Outlook inbox with empty focused list",
+    timestamp: new Date().toISOString()
+  };
+  const loadedWorldState = {
+    ...emptyListWorldState,
+    capture: { path: "/tmp/outlook-loaded-list.png" },
+    visibleText: "Outlook\nInbox\nUnread\nGemini Hsieh\nRegulations",
+    summary: "Outlook inbox with unread row"
+  };
+  const fakeSurface = {
+    async observe() {
+      return recovered ? loadedWorldState : emptyListWorldState;
+    },
+    async act({ step }: { step: RuntimeStep }) {
+      actions.push(`${step.action}:${String(step.label ?? step.id ?? "")}`);
+      if (step.action === "clickAt" && String(step.label ?? "").includes("Recover Outlook to inbox list")) {
+        recovered = true;
+      }
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("outlook-desktop");
+  const rule: WatchRule = {
+    id: "watch-outlook-recover-load-more",
+    goal: "Always watch Outlook and prefill replies",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "outlook-desktop-main",
+    skillName: null,
+    appTarget: "Microsoft Outlook",
+    livePack: "outlook-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-outlook-recover-load-more",
+    name: "outlook-desktop-main",
+    rootPath: "/tmp/outlook-desktop-main",
+    profilePath: "/tmp/outlook-desktop-main/profile",
+    downloadsPath: "/tmp/outlook-desktop-main/downloads",
+    artifactsPath: "/tmp/outlook-desktop-main/artifacts",
+    scratchPath: "/tmp/outlook-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: emptyListWorldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        analyzeImageJson: async () => {
+          if (!recovered) {
+            return {
+              scene: "list",
+              sceneEvidence: "Focused list is empty while Load more conversations is visible",
+              recommendedRecoveryAction: "recover_to_list",
+              recoveryControl: {
+                present: true,
+                evidence: "Load more conversations would reveal more messages",
+                approxBox: { x: 0.28, y: 0.18, width: 0.2, height: 0.04 }
+              },
+              openThread: null,
+              visibleUnreadThreads: [],
+              composer: {
+                present: false,
+                evidence: "",
+                approxBox: null
+              }
+            };
+          }
+          return {
+            scene: "list",
+            sceneEvidence: "Unread inbox row visible after loading more conversations",
+            recommendedRecoveryAction: "none",
+            recoveryControl: {
+              present: false,
+              evidence: "",
+              approxBox: null
+            },
+            openThread: null,
+            visibleUnreadThreads: [
+              {
+                name: "Gemini Hsieh",
+                evidence: "Bold unread sender row in Inbox",
+                replyable: true,
+                conversationKind: "mail",
+                shouldReply: true,
+                replyReason: "Unread direct email likely needs a response",
+                latestSnippet: "Regulations",
+                priority: "high",
+                approxBox: { x: 0.19, y: 0.24, width: 0.27, height: 0.08 }
+              }
+            ],
+            composer: {
+              present: false,
+              evidence: "",
+              approxBox: null
+            }
+          };
+        }
+      }
+    } as never
+  });
+
+  assert.equal(detection?.summary, "Gemini Hsieh");
+  assert.equal((detection?.metadata as { recoveryAttempts?: unknown } | undefined)?.recoveryAttempts, 1);
+  assert.equal(actions.includes("clickAt:Recover Outlook to inbox list"), true);
+});
+
+test("outlook desktop pack prefers a visible Inbox row over load more when the current folder is non-inbox", async () => {
+  let recovered = false;
+  const recoveryClicks: Array<{ x: number; y: number }> = [];
+  const sentWorldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-outlook-recover-prioritize-inbox",
+    appContext: {
+      appName: "Microsoft Outlook",
+      windows: [
+        {
+          ownerName: "Microsoft Outlook",
+          windowName: "Sent - Outlook",
+          bounds: { x: 80, y: 30, width: 1280, height: 860, centerX: 720, centerY: 460 }
+        }
+      ]
+    },
+    capture: { path: "/tmp/outlook-sent-load-more.png" },
+    ocrBlocks: [],
+    interactionCandidates: [
+      {
+        id: "folder-inbox-priority",
+        surface: "desktop",
+        kind: "text",
+        text: "Inbox",
+        role: "button",
+        bounds: { x: 180, y: 260, width: 120, height: 28, centerX: 240, centerY: 274 },
+        confidence: 0.9,
+        sourceHints: { source: "ocr" },
+        isInteractive: true
+      }
+    ],
+    visibleText: "Outlook\nSent\nInbox\nDrafts\nLoad more conversations",
+    recentActions: [],
+    summary: "Outlook sent folder with visible inbox row and load more link",
+    timestamp: new Date().toISOString()
+  };
+  const inboxWorldState = {
+    ...sentWorldState,
+    capture: { path: "/tmp/outlook-sent-recovered-inbox.png" },
+    visibleText: "Outlook\nInbox\nUnread\nGemini Hsieh\nRegulations",
+    summary: "Outlook inbox with unread row"
+  };
+  const fakeSurface = {
+    async observe() {
+      return recovered ? inboxWorldState : sentWorldState;
+    },
+    async act({ step }: { step: RuntimeStep }) {
+      if (step.action === "clickAt" && String(step.label ?? "").includes("Recover Outlook to inbox list")) {
+        recovered = true;
+        recoveryClicks.push({
+          x: Number(step.params?.x ?? NaN),
+          y: Number(step.params?.y ?? NaN)
+        });
+      }
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("outlook-desktop");
+  const rule: WatchRule = {
+    id: "watch-outlook-recover-prioritize-inbox",
+    goal: "Always watch Outlook and prefill replies",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "outlook-desktop-main",
+    skillName: null,
+    appTarget: "Microsoft Outlook",
+    livePack: "outlook-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-outlook-recover-prioritize-inbox",
+    name: "outlook-desktop-main",
+    rootPath: "/tmp/outlook-desktop-main",
+    profilePath: "/tmp/outlook-desktop-main/profile",
+    downloadsPath: "/tmp/outlook-desktop-main/downloads",
+    artifactsPath: "/tmp/outlook-desktop-main/artifacts",
+    scratchPath: "/tmp/outlook-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: sentWorldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        analyzeImageJson: async ({ schemaName }: { schemaName?: string }) => {
+          if (schemaName === "agentos_outlook_desktop_recovery_control") {
+            return {
+              present: true,
+              evidence: "Load more conversations control is visible in the message list",
+              approxBox: { x: 0.29, y: 0.18, width: 0.12, height: 0.03 }
+            };
+          }
+          if (!recovered) {
+            return {
+              scene: "list",
+              sceneEvidence: "Sent is selected while Inbox is visible and Load more conversations is on the list",
+              recommendedRecoveryAction: "recover_to_list",
+              recoveryControl: {
+                present: true,
+                evidence: "Inbox row in the sidebar is the correct recovery control",
+                approxBox: { x: 0.07, y: 0.375, width: 0.12, height: 0.03 }
+              },
+              openThread: null,
+              visibleUnreadThreads: [],
+              composer: {
+                present: false,
+                evidence: "",
+                approxBox: null
+              }
+            };
+          }
+          return {
+            scene: "list",
+            sceneEvidence: "Unread inbox row visible after recovering to Inbox",
+            recommendedRecoveryAction: "none",
+            recoveryControl: {
+              present: false,
+              evidence: "",
+              approxBox: null
+            },
+            openThread: null,
+            visibleUnreadThreads: [
+              {
+                name: "Gemini Hsieh",
+                evidence: "Bold unread sender row in Inbox",
+                replyable: true,
+                conversationKind: "mail",
+                shouldReply: true,
+                replyReason: "Unread direct email likely needs a response",
+                latestSnippet: "Regulations",
+                priority: "high",
+                approxBox: { x: 0.19, y: 0.24, width: 0.27, height: 0.08 }
+              }
+            ],
+            composer: {
+              present: false,
+              evidence: "",
+              approxBox: null
+            }
+          };
+        }
+      }
+    } as never
+  });
+
+  assert.equal(detection?.summary, "Gemini Hsieh");
+  assert.equal(recoveryClicks.length, 1);
+  assert.equal(recoveryClicks[0]?.x, 240);
+  assert.equal(recoveryClicks[0]?.y, 274);
+});
+
+test("outlook desktop pack offsets a visible Inbox recovery row into screen coordinates for window captures", async () => {
+  let recovered = false;
+  const recoveryClicks: Array<{ x: number; y: number }> = [];
+  const tempDir = await createTempDir("outlook-recovery-offset-");
+  const capturePath = `${tempDir}/outlook-sent-window.png`;
+  await fs.writeFile(capturePath, createPngHeaderBuffer(1280, 860));
+
+  const sentWorldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-outlook-recover-offset",
+    appContext: {
+      appName: "Microsoft Outlook",
+      captureWindowNumber: 123,
+      windows: [
+        {
+          ownerName: "Microsoft Outlook",
+          windowName: "Sent - Outlook",
+          bounds: { x: 80, y: 30, width: 1280, height: 860, centerX: 720, centerY: 460 }
+        }
+      ]
+    },
+    capture: { path: capturePath },
+    ocrBlocks: [],
+    interactionCandidates: [
+      {
+        id: "folder-inbox-offset",
+        surface: "desktop",
+        kind: "text",
+        text: "Inbox",
+        role: "button",
+        bounds: { x: 180, y: 260, width: 120, height: 28, centerX: 240, centerY: 274 },
+        confidence: 0.9,
+        sourceHints: { source: "ocr" },
+        isInteractive: true
+      }
+    ],
+    visibleText: "Outlook\nSent\nInbox\nDrafts\nLoad more conversations",
+    recentActions: [],
+    summary: "Outlook sent folder with visible inbox row and load more link",
+    timestamp: new Date().toISOString()
+  };
+  const inboxWorldState = {
+    ...sentWorldState,
+    capture: { path: `${tempDir}/outlook-recovered.png` },
+    visibleText: "Outlook\nInbox\nUnread\nGemini Hsieh\nRegulations",
+    summary: "Outlook inbox with unread row"
+  };
+  await fs.writeFile(String(inboxWorldState.capture.path), createPngHeaderBuffer(1280, 860));
+
+  const fakeSurface = {
+    async observe() {
+      return recovered ? inboxWorldState : sentWorldState;
+    },
+    async act({ step }: { step: RuntimeStep }) {
+      if (step.action === "clickAt" && String(step.label ?? "").includes("Recover Outlook to inbox list")) {
+        recovered = true;
+        recoveryClicks.push({
+          x: Number(step.params?.x ?? NaN),
+          y: Number(step.params?.y ?? NaN)
+        });
+      }
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("outlook-desktop");
+  const rule: WatchRule = {
+    id: "watch-outlook-recover-offset",
+    goal: "Always watch Outlook and prefill replies",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "outlook-desktop-main",
+    skillName: null,
+    appTarget: "Microsoft Outlook",
+    livePack: "outlook-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-outlook-recover-offset",
+    name: "outlook-desktop-main",
+    rootPath: tempDir,
+    profilePath: `${tempDir}/profile`,
+    downloadsPath: `${tempDir}/downloads`,
+    artifactsPath: `${tempDir}/artifacts`,
+    scratchPath: `${tempDir}/scratch`,
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: sentWorldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        analyzeImageJson: async () => {
+          if (!recovered) {
+            return {
+              scene: "list",
+              sceneEvidence: "Sent is selected while Inbox is visible",
+              recommendedRecoveryAction: "recover_to_list",
+              recoveryControl: {
+                present: true,
+                evidence: "Inbox row in the sidebar is the correct recovery control",
+                approxBox: { x: 0.07, y: 0.375, width: 0.12, height: 0.03 }
+              },
+              openThread: null,
+              visibleUnreadThreads: [],
+              composer: {
+                present: false,
+                evidence: "",
+                approxBox: null
+              }
+            };
+          }
+          return {
+            scene: "list",
+            sceneEvidence: "Unread inbox row visible after recovering to Inbox",
+            recommendedRecoveryAction: "none",
+            recoveryControl: {
+              present: false,
+              evidence: "",
+              approxBox: null
+            },
+            openThread: null,
+            visibleUnreadThreads: [
+              {
+                name: "Gemini Hsieh",
+                evidence: "Bold unread sender row in Inbox",
+                replyable: true,
+                conversationKind: "mail",
+                shouldReply: true,
+                replyReason: "Unread direct email likely needs a response",
+                latestSnippet: "Regulations",
+                priority: "high",
+                approxBox: { x: 0.19, y: 0.24, width: 0.27, height: 0.08 }
+              }
+            ],
+            composer: {
+              present: false,
+              evidence: "",
+              approxBox: null
+            }
+          };
+        }
+      }
+    } as never
+  });
+
+  assert.equal(detection?.summary, "Gemini Hsieh");
+  assert.equal(recoveryClicks.length, 1);
+  assert.equal(recoveryClicks[0]?.x, 320);
+  assert.equal(recoveryClicks[0]?.y, 304);
+});
+
+test("outlook desktop pack maps recovery controls against the captured main window when a modal window is also visible", async () => {
+  let modalDismissed = false;
+  let recovered = false;
+  const actions: string[] = [];
+  const recoveryClicks: Array<{ x: number; y: number }> = [];
+  const tempDir = await createTempDir("outlook-recovery-modal-window-");
+  const capturePath = `${tempDir}/outlook-sent-with-modal.png`;
+  await fs.writeFile(capturePath, createPngHeaderBuffer(1280, 860));
+
+  const sentWorldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-outlook-recover-modal",
+    appContext: {
+      appName: "Microsoft Outlook",
+      captureWindowNumber: 123,
+      windows: [
+        {
+          ownerName: "Microsoft Outlook",
+          windowName: "",
+          windowNumber: 999,
+          bounds: { x: 1055, y: 277, width: 450, height: 376, centerX: 1280, centerY: 465 }
+        },
+        {
+          ownerName: "Microsoft Outlook",
+          windowName: "Sent - Outlook",
+          windowNumber: 123,
+          bounds: { x: 80, y: 30, width: 1280, height: 860, centerX: 720, centerY: 460 }
+        }
+      ]
+    },
+    capture: { path: capturePath },
+    ocrBlocks: [],
+    interactionCandidates: [],
+    visibleText: "Outlook\nSent\nInbox\nDrafts\nLoad more conversations",
+    recentActions: [],
+    summary: "Outlook sent folder with modal and visible inbox row",
+    timestamp: new Date().toISOString()
+  };
+  const sentWithoutModalWorldState = {
+    ...sentWorldState,
+    capture: { path: `${tempDir}/outlook-sent-no-modal.png` },
+    appContext: {
+      ...sentWorldState.appContext,
+      windows: [sentWorldState.appContext.windows[1]]
+    },
+    summary: "Outlook sent folder without the blocking modal"
+  };
+  const inboxWorldState = {
+    ...sentWithoutModalWorldState,
+    capture: { path: `${tempDir}/outlook-recovered-modal.png` },
+    visibleText: "Outlook\nInbox\nUnread\nGemini Hsieh\nRegulations",
+    summary: "Outlook inbox with unread row after modal recovery"
+  };
+  await fs.writeFile(String(sentWithoutModalWorldState.capture.path), createPngHeaderBuffer(1280, 860));
+  await fs.writeFile(String(inboxWorldState.capture.path), createPngHeaderBuffer(1280, 860));
+
+  const fakeSurface = {
+    async observe() {
+      if (!modalDismissed) {
+        return sentWorldState;
+      }
+      return recovered ? inboxWorldState : sentWithoutModalWorldState;
+    },
+    async act({ step }: { step: RuntimeStep }) {
+      actions.push(`${step.action}:${String(step.label ?? step.id ?? "")}`);
+      if (step.action === "clickAt" && String(step.label ?? "").includes("Dismiss Outlook foreign view")) {
+        modalDismissed = true;
+      }
+      if (step.action === "clickAt" && String(step.label ?? "").includes("Recover Outlook to inbox list")) {
+        recovered = true;
+        recoveryClicks.push({
+          x: Number(step.params?.x ?? NaN),
+          y: Number(step.params?.y ?? NaN)
+        });
+      }
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("outlook-desktop");
+  const rule: WatchRule = {
+    id: "watch-outlook-recover-modal",
+    goal: "Always watch Outlook and prefill replies",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "outlook-desktop-main",
+    skillName: null,
+    appTarget: "Microsoft Outlook",
+    livePack: "outlook-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-outlook-recover-modal",
+    name: "outlook-desktop-main",
+    rootPath: tempDir,
+    profilePath: `${tempDir}/profile`,
+    downloadsPath: `${tempDir}/downloads`,
+    artifactsPath: `${tempDir}/artifacts`,
+    scratchPath: `${tempDir}/scratch`,
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  await pack?.detectNewItems?.({
+    rule,
+    worldState: sentWorldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        analyzeImageJson: async ({ schemaName }: { schemaName?: string }) => {
+          if (schemaName === "agentos_desktop_modal_dismiss_control") {
+            return {
+              present: !modalDismissed,
+              evidence: modalDismissed ? "" : "Cancel button is visible in the modal footer",
+              approxBox: modalDismissed ? null : { x: 0.5, y: 0.68, width: 0.08, height: 0.04 }
+            };
+          }
+          if (!modalDismissed) {
+            return {
+              scene: "foreign_view",
+              sceneEvidence: "Blocking modal dialog is covering the Sent view",
+              recommendedRecoveryAction: "recover_to_list",
+              recoveryControl: { present: false, evidence: "", approxBox: null },
+              openThread: null,
+              bestUnreadThread: {
+                present: false,
+                name: "",
+                evidence: "",
+                replyable: false,
+                conversationKind: "unknown",
+                shouldReply: false,
+                replyReason: "",
+                latestSnippet: "",
+                priority: "low",
+                approxBox: null
+              },
+              composer: { present: false, evidence: "", approxBox: null }
+            };
+          }
+          return {
+            scene: recovered ? "list" : "list",
+            sceneEvidence: recovered ? "Unread inbox row visible after recovering to Inbox" : "Sent is selected while Inbox is visible",
+            recommendedRecoveryAction: recovered ? "none" : "recover_to_list",
+            recoveryControl: recovered
+              ? { present: false, evidence: "", approxBox: null }
+              : {
+                  present: true,
+                  evidence: "Inbox row in the captured main Outlook window",
+                  approxBox: { x: 0.07, y: 0.375, width: 0.12, height: 0.03 }
+                },
+            openThread: null,
+            bestUnreadThread: recovered
+              ? {
+                  present: true,
+                  name: "Gemini Hsieh",
+                  evidence: "Bold unread sender row in Inbox",
+                  replyable: true,
+                  conversationKind: "mail",
+                  shouldReply: true,
+                  replyReason: "Unread direct email likely needs a response",
+                  latestSnippet: "Regulations",
+                  priority: "high",
+                  approxBox: { x: 0.19, y: 0.24, width: 0.27, height: 0.08 }
+                }
+              : {
+                  present: false,
+                  name: "",
+                  evidence: "",
+                  replyable: false,
+                  conversationKind: "unknown",
+                  shouldReply: false,
+                  replyReason: "",
+                  latestSnippet: "",
+                  priority: "low",
+                  approxBox: null
+                },
+            composer: { present: false, evidence: "", approxBox: null }
+          };
+        }
+      }
+    } as never
+  });
+
+  assert.equal(actions.includes("clickAt:Dismiss Outlook foreign view"), true);
+  assert.equal(recoveryClicks.length, 1);
+  assert.ok(Math.abs(Number(recoveryClicks[0]?.x ?? NaN) - 246.4) < 1e-6);
+  assert.ok(Math.abs(Number(recoveryClicks[0]?.y ?? NaN) - 365.4) < 1e-6);
+});
+
+test("outlook desktop pack can ground a recovery control when the initial scene lacks a recovery box", async () => {
+  let recovered = false;
+  const actions: string[] = [];
+  const emptyListWorldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-outlook-ground-recovery",
+    appContext: {
+      appName: "Microsoft Outlook",
+      windows: [
+        {
+          ownerName: "Microsoft Outlook",
+          windowName: "Inbox - Outlook",
+          bounds: { x: 80, y: 30, width: 1280, height: 860, centerX: 720, centerY: 460 }
+        }
+      ]
+    },
+    capture: { path: "/tmp/outlook-ground-recovery.png" },
+    ocrBlocks: [],
+    interactionCandidates: [],
+    visibleText: "Outlook\nInbox\nFocused\nOther\nLoad more conversations",
+    recentActions: [],
+    summary: "Outlook inbox with empty focused list",
+    timestamp: new Date().toISOString()
+  };
+  const loadedWorldState = {
+    ...emptyListWorldState,
+    capture: { path: "/tmp/outlook-ground-recovery-loaded.png" },
+    visibleText: "Outlook\nInbox\nUnread\nGemini Hsieh\nRegulations",
+    summary: "Outlook inbox with unread row"
+  };
+  const fakeSurface = {
+    async observe() {
+      return recovered ? loadedWorldState : emptyListWorldState;
+    },
+    async act({ step }: { step: RuntimeStep }) {
+      actions.push(`${step.action}:${String(step.label ?? step.id ?? "")}`);
+      if (step.action === "clickAt" && String(step.label ?? "").includes("Recover Outlook to inbox list")) {
+        recovered = true;
+      }
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("outlook-desktop");
+  const rule: WatchRule = {
+    id: "watch-outlook-ground-recovery",
+    goal: "Always watch Outlook and prefill replies",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "outlook-desktop-main",
+    skillName: null,
+    appTarget: "Microsoft Outlook",
+    livePack: "outlook-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-outlook-ground-recovery",
+    name: "outlook-desktop-main",
+    rootPath: "/tmp/outlook-desktop-main",
+    profilePath: "/tmp/outlook-desktop-main/profile",
+    downloadsPath: "/tmp/outlook-desktop-main/downloads",
+    artifactsPath: "/tmp/outlook-desktop-main/artifacts",
+    scratchPath: "/tmp/outlook-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: emptyListWorldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        analyzeImageJson: async ({ schemaName }: { schemaName: string }) => {
+          if (schemaName === "agentos_outlook_desktop_recovery_control") {
+            return {
+              present: true,
+              evidence: "Load more conversations control is visible",
+              approxBox: { x: 0.28, y: 0.18, width: 0.2, height: 0.04 }
+            };
+          }
+          if (!recovered) {
+            return {
+              scene: "list",
+              sceneEvidence: "Focused list is empty while Load more conversations is visible",
+              recommendedRecoveryAction: "recover_to_list",
+              recoveryControl: {
+                present: false,
+                evidence: "",
+                approxBox: null
+              },
+              openThread: null,
+              visibleUnreadThreads: [],
+              composer: {
+                present: false,
+                evidence: "",
+                approxBox: null
+              }
+            };
+          }
+          return {
+            scene: "list",
+            sceneEvidence: "Unread inbox row visible after loading more conversations",
+            recommendedRecoveryAction: "none",
+            recoveryControl: {
+              present: false,
+              evidence: "",
+              approxBox: null
+            },
+            openThread: null,
+            visibleUnreadThreads: [
+              {
+                name: "Gemini Hsieh",
+                evidence: "Bold unread sender row in Inbox",
+                replyable: true,
+                conversationKind: "mail",
+                shouldReply: true,
+                replyReason: "Unread direct email likely needs a response",
+                latestSnippet: "Regulations",
+                priority: "high",
+                approxBox: { x: 0.19, y: 0.24, width: 0.27, height: 0.08 }
+              }
+            ],
+            composer: {
+              present: false,
+              evidence: "",
+              approxBox: null
+            }
+          };
+        }
+      }
+    } as never
+  });
+
+  assert.equal(detection?.summary, "Gemini Hsieh");
+  assert.equal((detection?.metadata as { recoveryAttempts?: unknown } | undefined)?.recoveryAttempts, 1);
+  assert.equal(actions.includes("clickAt:Recover Outlook to inbox list"), true);
+});
+
+test("outlook desktop pack dismisses a blocking modal before recovering to the inbox list", async () => {
+  let modalDismissed = false;
+  let recovered = false;
+  const actions: string[] = [];
+  const tempDir = await createTempDir("outlook-modal-recovery-");
+  const modalCapturePath = `${tempDir}/outlook-modal-recovery.png`;
+  const sentCapturePath = `${tempDir}/outlook-modal-recovery-sent.png`;
+  const inboxCapturePath = `${tempDir}/outlook-modal-recovery-inbox.png`;
+  await fs.writeFile(modalCapturePath, createPngHeaderBuffer(1512, 870));
+  await fs.writeFile(sentCapturePath, createPngHeaderBuffer(1512, 870));
+  await fs.writeFile(inboxCapturePath, createPngHeaderBuffer(1512, 870));
+  const modalWorldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-outlook-modal-recovery",
+    appContext: {
+      appName: "Microsoft Outlook",
+      captureWindowNumber: 101,
+      windows: [
+        {
+          ownerName: "Microsoft Outlook",
+          windowNumber: 101,
+          windowName: "Sent • tan@xgenie.co",
+          bounds: { x: 520, y: 30, width: 1512, height: 870, centerX: 1276, centerY: 465 }
+        },
+        {
+          ownerName: "Microsoft Outlook",
+          windowNumber: 202,
+          windowName: "",
+          bounds: { x: 1055, y: 277, width: 450, height: 376, centerX: 1280, centerY: 465 }
+        }
+      ]
+    },
+    capture: { path: modalCapturePath },
+    ocrBlocks: [],
+    interactionCandidates: [],
+    visibleText: "Outlook\nSent\nCancel\nInbox\nFocused",
+    recentActions: [],
+    summary: "Outlook Sent view with a blocking modal dialog",
+    timestamp: new Date().toISOString()
+  };
+  const sentWorldState = {
+    ...modalWorldState,
+    appContext: {
+      ...modalWorldState.appContext,
+      windows: [modalWorldState.appContext.windows[0]]
+    },
+    capture: { path: sentCapturePath },
+    visibleText: "Outlook\nSent\nInbox\nFocused",
+    summary: "Outlook Sent view without the blocking modal"
+  };
+  const recoveredWorldState = {
+    ...sentWorldState,
+    capture: { path: inboxCapturePath },
+    visibleText: "Outlook\nInbox\nUnread\nGemini Hsieh\nRegulations",
+    summary: "Outlook inbox with unread row"
+  };
+  const fakeSurface = {
+    async observe() {
+      if (!modalDismissed) {
+        return modalWorldState;
+      }
+      return recovered ? recoveredWorldState : sentWorldState;
+    },
+    async act({ step }: { step: RuntimeStep }) {
+      actions.push(`${step.action}:${String(step.label ?? step.id ?? "")}`);
+      if (step.action === "clickAt" && String(step.label ?? "").includes("Dismiss Outlook foreign view")) {
+        modalDismissed = true;
+      }
+      if (step.action === "clickAt" && String(step.label ?? "").includes("Recover Outlook to inbox list")) {
+        recovered = true;
+      }
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("outlook-desktop");
+  const rule: WatchRule = {
+    id: "watch-outlook-modal-recovery",
+    goal: "Always watch Outlook and prefill replies",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "outlook-desktop-main",
+    skillName: null,
+    appTarget: "Microsoft Outlook",
+    livePack: "outlook-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-outlook-modal-recovery",
+    name: "outlook-desktop-main",
+    rootPath: "/tmp/outlook-desktop-main",
+    profilePath: "/tmp/outlook-desktop-main/profile",
+    downloadsPath: "/tmp/outlook-desktop-main/downloads",
+    artifactsPath: "/tmp/outlook-desktop-main/artifacts",
+    scratchPath: "/tmp/outlook-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: modalWorldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        analyzeImageJson: async ({ schemaName }: { schemaName?: string }) => {
+          if (schemaName === "agentos_desktop_modal_dismiss_control") {
+            return {
+              present: true,
+              evidence: "Cancel button is visible in the modal footer",
+              approxBox: { x: 0.5, y: 0.68, width: 0.08, height: 0.04 }
+            };
+          }
+          if (!modalDismissed) {
+            return {
+              scene: "foreign_view",
+              sceneEvidence: "Blocking modal dialog is covering the Sent view",
+              recommendedRecoveryAction: "recover_to_list",
+              recoveryControl: {
+                present: false,
+                evidence: "",
+                approxBox: null
+              },
+              openThread: null,
+              bestUnreadThread: {
+                present: false,
+                name: "",
+                evidence: "",
+                replyable: false,
+                conversationKind: "unknown",
+                shouldReply: false,
+                replyReason: "",
+                latestSnippet: "",
+                priority: "low",
+                approxBox: null
+              },
+              composer: {
+                present: false,
+                evidence: "",
+                approxBox: null
+              }
+            };
+          }
+          if (!recovered) {
+            return {
+              scene: "list",
+              sceneEvidence: "Sent is selected while Inbox is visible",
+              recommendedRecoveryAction: "recover_to_list",
+              recoveryControl: {
+                present: true,
+                evidence: "Inbox row is visible in the sidebar",
+                approxBox: { x: 0.07, y: 0.375, width: 0.12, height: 0.03 }
+              },
+              openThread: null,
+              bestUnreadThread: {
+                present: false,
+                name: "",
+                evidence: "",
+                replyable: false,
+                conversationKind: "unknown",
+                shouldReply: false,
+                replyReason: "",
+                latestSnippet: "",
+                priority: "low",
+                approxBox: null
+              },
+              composer: {
+                present: false,
+                evidence: "",
+                approxBox: null
+              }
+            };
+          }
+          return {
+            scene: "list",
+            sceneEvidence: "Unread inbox row visible after recovering to Inbox",
+            recommendedRecoveryAction: "none",
+            recoveryControl: {
+              present: false,
+              evidence: "",
+              approxBox: null
+            },
+            openThread: null,
+            bestUnreadThread: {
+              present: true,
+              name: "Gemini Hsieh",
+              evidence: "Bold unread sender row in Inbox",
+              replyable: true,
+              conversationKind: "mail",
+              shouldReply: true,
+              replyReason: "Unread direct email likely needs a response",
+              latestSnippet: "Regulations",
+              priority: "high",
+              approxBox: { x: 0.19, y: 0.24, width: 0.27, height: 0.08 }
+            },
+            composer: {
+              present: false,
+              evidence: "",
+              approxBox: null
+            }
+          };
+        }
+      }
+    } as never
+  });
+
+  assert.equal(detection?.summary, "Gemini Hsieh");
+  assert.equal(actions.includes("clickAt:Dismiss Outlook foreign view"), true);
+  assert.equal(actions.includes("clickAt:Recover Outlook to inbox list"), true);
+});
+
+test("outlook desktop pack prefers a dedicated modal capture when grounding the dismiss control", async () => {
+  let modalDismissed = false;
+  let recovered = false;
+  const dismissClicks: Array<{ x: number; y: number }> = [];
+  const dismissImagePaths: string[] = [];
+  const tempDir = await createTempDir("outlook-modal-capture-");
+  const mainCapturePath = `${tempDir}/outlook-main-with-modal.png`;
+  const modalCapturePath = `${tempDir}/outlook-modal-only.png`;
+  const sentCapturePath = `${tempDir}/outlook-main-sent.png`;
+  const inboxCapturePath = `${tempDir}/outlook-main-inbox.png`;
+  await fs.writeFile(mainCapturePath, createPngHeaderBuffer(1280, 860));
+  await fs.writeFile(modalCapturePath, createPngHeaderBuffer(450, 376));
+  await fs.writeFile(sentCapturePath, createPngHeaderBuffer(1280, 860));
+  await fs.writeFile(inboxCapturePath, createPngHeaderBuffer(1280, 860));
+
+  const modalWorldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-outlook-modal-capture",
+    appContext: {
+      appName: "Microsoft Outlook",
+      captureWindowNumber: 101,
+      windows: [
+        {
+          ownerName: "Microsoft Outlook",
+          windowNumber: 101,
+          windowName: "Sent • tan@xgenie.co",
+          bounds: { x: 520, y: 30, width: 1512, height: 870, centerX: 1276, centerY: 465 }
+        },
+        {
+          ownerName: "Microsoft Outlook",
+          windowNumber: 202,
+          windowName: "",
+          bounds: { x: 1055, y: 277, width: 450, height: 376, centerX: 1280, centerY: 465 }
+        }
+      ]
+    },
+    capture: { path: mainCapturePath },
+    ocrBlocks: [],
+    interactionCandidates: [],
+    visibleText: "Outlook\nSent\nCancel\nInbox\nFocused",
+    recentActions: [],
+    summary: "Outlook Sent view with a blocking modal dialog",
+    timestamp: new Date().toISOString()
+  };
+  const sentWorldState = {
+    ...modalWorldState,
+    appContext: {
+      ...modalWorldState.appContext,
+      windows: [modalWorldState.appContext.windows[0]]
+    },
+    capture: { path: sentCapturePath },
+    visibleText: "Outlook\nSent\nInbox\nFocused",
+    summary: "Outlook Sent view without the blocking modal"
+  };
+  const recoveredWorldState = {
+    ...sentWorldState,
+    capture: { path: inboxCapturePath },
+    visibleText: "Outlook\nInbox\nUnread\nGemini Hsieh\nRegulations",
+    summary: "Outlook inbox with unread row"
+  };
+
+  const fakeSurface = {
+    async observe() {
+      if (!modalDismissed) {
+        return modalWorldState;
+      }
+      return recovered ? recoveredWorldState : sentWorldState;
+    },
+    async capture({ windowNumber }: { windowNumber?: number }) {
+      if (Number(windowNumber) === 202) {
+        return {
+          path: modalCapturePath,
+          metadata: { windowNumber: 202 }
+        };
+      }
+      return {
+        path: mainCapturePath,
+        metadata: { windowNumber: 101 }
+      };
+    },
+    async act({ step }: { step: RuntimeStep }) {
+      if (step.action === "clickAt" && String(step.label ?? "").includes("Dismiss Outlook foreign view")) {
+        modalDismissed = true;
+        dismissClicks.push({
+          x: Number(step.params?.x ?? NaN),
+          y: Number(step.params?.y ?? NaN)
+        });
+      }
+      if (step.action === "clickAt" && String(step.label ?? "").includes("Recover Outlook to inbox list")) {
+        recovered = true;
+      }
+      return { ok: true };
+    }
+  };
+
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("outlook-desktop");
+  const rule: WatchRule = {
+    id: "watch-outlook-modal-capture",
+    goal: "Always watch Outlook and prefill replies",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "outlook-desktop-main",
+    skillName: null,
+    appTarget: "Microsoft Outlook",
+    livePack: "outlook-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-outlook-modal-capture",
+    name: "outlook-desktop-main",
+    rootPath: tempDir,
+    profilePath: `${tempDir}/profile`,
+    downloadsPath: `${tempDir}/downloads`,
+    artifactsPath: `${tempDir}/artifacts`,
+    scratchPath: `${tempDir}/scratch`,
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: modalWorldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        analyzeImageJson: async ({ schemaName, imagePath }: { schemaName?: string; imagePath?: string }) => {
+          if (schemaName === "agentos_desktop_modal_dismiss_control") {
+            dismissImagePaths.push(String(imagePath ?? ""));
+            return {
+              present: true,
+              evidence: "Cancel button is visible in the modal footer",
+              approxBox: { x: 0.5, y: 0.86, width: 0.18, height: 0.09 }
+            };
+          }
+          if (!modalDismissed) {
+            return {
+              scene: "foreign_view",
+              sceneEvidence: "Blocking modal dialog is covering the Sent view",
+              recommendedRecoveryAction: "recover_to_list",
+              recoveryControl: { present: false, evidence: "", approxBox: null },
+              openThread: null,
+              bestUnreadThread: {
+                present: false,
+                name: "",
+                evidence: "",
+                replyable: false,
+                conversationKind: "unknown",
+                shouldReply: false,
+                replyReason: "",
+                latestSnippet: "",
+                priority: "low",
+                approxBox: null
+              },
+              composer: { present: false, evidence: "", approxBox: null }
+            };
+          }
+          if (!recovered) {
+            return {
+              scene: "list",
+              sceneEvidence: "Sent is selected while Inbox is visible",
+              recommendedRecoveryAction: "recover_to_list",
+              recoveryControl: {
+                present: true,
+                evidence: "Inbox row is visible in the sidebar",
+                approxBox: { x: 0.07, y: 0.375, width: 0.12, height: 0.03 }
+              },
+              openThread: null,
+              bestUnreadThread: {
+                present: false,
+                name: "",
+                evidence: "",
+                replyable: false,
+                conversationKind: "unknown",
+                shouldReply: false,
+                replyReason: "",
+                latestSnippet: "",
+                priority: "low",
+                approxBox: null
+              },
+              composer: { present: false, evidence: "", approxBox: null }
+            };
+          }
+          return {
+            scene: "list",
+            sceneEvidence: "Unread inbox row visible after recovering to Inbox",
+            recommendedRecoveryAction: "none",
+            recoveryControl: { present: false, evidence: "", approxBox: null },
+            openThread: null,
+            bestUnreadThread: {
+              present: true,
+              name: "Gemini Hsieh",
+              evidence: "Bold unread sender row in Inbox",
+              replyable: true,
+              conversationKind: "mail",
+              shouldReply: true,
+              replyReason: "Unread direct email likely needs a response",
+              latestSnippet: "Regulations",
+              priority: "high",
+              approxBox: { x: 0.19, y: 0.24, width: 0.27, height: 0.08 }
+            },
+            composer: { present: false, evidence: "", approxBox: null }
+          };
+        }
+      }
+    } as never
+  });
+
+  assert.equal(detection?.summary, "Gemini Hsieh");
+  assert.deepEqual(dismissImagePaths, [modalCapturePath]);
+  assert.equal(dismissClicks.length, 1);
+  assert.ok(Math.abs(Number(dismissClicks[0]?.x ?? NaN) - 1320.5) < 1e-6);
+  assert.ok(Math.abs(Number(dismissClicks[0]?.y ?? NaN) - 617.28) < 1e-6);
+});
+
+test("outlook desktop pack falls back to main-window grounding when a modal capture is still full-window sized", async () => {
+  let modalDismissed = false;
+  let recovered = false;
+  const dismissClicks: Array<{ x: number; y: number }> = [];
+  const dismissImagePaths: string[] = [];
+  const tempDir = await createTempDir("outlook-modal-full-window-");
+  const mainCapturePath = `${tempDir}/outlook-main-with-modal.png`;
+  const modalCapturePath = `${tempDir}/outlook-modal-window-number-but-main-sized.png`;
+  const sentCapturePath = `${tempDir}/outlook-main-sent.png`;
+  const inboxCapturePath = `${tempDir}/outlook-main-inbox.png`;
+  await fs.writeFile(mainCapturePath, createPngHeaderBuffer(3024, 1740));
+  await fs.writeFile(modalCapturePath, createPngHeaderBuffer(3024, 1740));
+  await fs.writeFile(sentCapturePath, createPngHeaderBuffer(3024, 1740));
+  await fs.writeFile(inboxCapturePath, createPngHeaderBuffer(3024, 1740));
+
+  const modalWorldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-outlook-modal-full-window",
+    appContext: {
+      appName: "Microsoft Outlook",
+      captureWindowNumber: 101,
+      windows: [
+        {
+          ownerName: "Microsoft Outlook",
+          windowNumber: 101,
+          windowName: "Sent • tan@xgenie.co",
+          bounds: { x: 524, y: 30, width: 1512, height: 870, centerX: 1280, centerY: 465 }
+        },
+        {
+          ownerName: "Microsoft Outlook",
+          windowNumber: 202,
+          windowName: "",
+          bounds: { x: 1055, y: 277, width: 450, height: 376, centerX: 1280, centerY: 465 }
+        }
+      ]
+    },
+    capture: { path: mainCapturePath },
+    ocrBlocks: [],
+    interactionCandidates: [],
+    visibleText: "Outlook\nSent\nCancel\nInbox\nFocused",
+    recentActions: [],
+    summary: "Outlook Sent view with a blocking modal dialog",
+    timestamp: new Date().toISOString()
+  };
+  const sentWorldState = {
+    ...modalWorldState,
+    appContext: {
+      ...modalWorldState.appContext,
+      windows: [modalWorldState.appContext.windows[0]]
+    },
+    capture: { path: sentCapturePath },
+    visibleText: "Outlook\nSent\nInbox\nFocused",
+    summary: "Outlook Sent view without the blocking modal"
+  };
+  const recoveredWorldState = {
+    ...sentWorldState,
+    capture: { path: inboxCapturePath },
+    visibleText: "Outlook\nInbox\nUnread\nGemini Hsieh\nRegulations",
+    summary: "Outlook inbox with unread row"
+  };
+
+  const fakeSurface = {
+    async observe() {
+      if (!modalDismissed) {
+        return modalWorldState;
+      }
+      return recovered ? recoveredWorldState : sentWorldState;
+    },
+    async capture({ windowNumber }: { windowNumber?: number }) {
+      if (Number(windowNumber) === 202) {
+        return {
+          path: modalCapturePath,
+          metadata: { windowNumber: 202 }
+        };
+      }
+      return {
+        path: mainCapturePath,
+        metadata: { windowNumber: 101 }
+      };
+    },
+    async act({ step }: { step: RuntimeStep }) {
+      if (step.action === "clickAt" && String(step.label ?? "").includes("Dismiss Outlook foreign view")) {
+        modalDismissed = true;
+        dismissClicks.push({
+          x: Number(step.params?.x ?? NaN),
+          y: Number(step.params?.y ?? NaN)
+        });
+      }
+      if (step.action === "clickAt" && String(step.label ?? "").includes("Recover Outlook to inbox list")) {
+        recovered = true;
+      }
+      return { ok: true };
+    }
+  };
+
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("outlook-desktop");
+  const rule: WatchRule = {
+    id: "watch-outlook-modal-full-window",
+    goal: "Always watch Outlook and prefill replies",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "outlook-desktop-main",
+    skillName: null,
+    appTarget: "Microsoft Outlook",
+    livePack: "outlook-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-outlook-modal-full-window",
+    name: "outlook-desktop-main",
+    rootPath: tempDir,
+    profilePath: `${tempDir}/profile`,
+    downloadsPath: `${tempDir}/downloads`,
+    artifactsPath: `${tempDir}/artifacts`,
+    scratchPath: `${tempDir}/scratch`,
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: modalWorldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        analyzeImageJson: async ({ schemaName, imagePath }: { schemaName?: string; imagePath?: string }) => {
+          if (schemaName === "agentos_desktop_modal_dismiss_control") {
+            dismissImagePaths.push(String(imagePath ?? ""));
+            return {
+              present: true,
+              evidence: "Cancel button is visible in the modal footer",
+              approxBox: { x: 0.52, y: 0.665, width: 0.05, height: 0.03 }
+            };
+          }
+          if (!modalDismissed) {
+            return {
+              scene: "foreign_view",
+              sceneEvidence: "Blocking modal dialog is covering the Sent view",
+              recommendedRecoveryAction: "recover_to_list",
+              recoveryControl: { present: false, evidence: "", approxBox: null },
+              openThread: null,
+              bestUnreadThread: {
+                present: false,
+                name: "",
+                evidence: "",
+                replyable: false,
+                conversationKind: "unknown",
+                shouldReply: false,
+                replyReason: "",
+                latestSnippet: "",
+                priority: "low",
+                approxBox: null
+              },
+              composer: { present: false, evidence: "", approxBox: null }
+            };
+          }
+          if (!recovered) {
+            return {
+              scene: "list",
+              sceneEvidence: "Sent is selected while Inbox is visible",
+              recommendedRecoveryAction: "recover_to_list",
+              recoveryControl: {
+                present: true,
+                evidence: "Inbox row is visible in the sidebar",
+                approxBox: { x: 0.07, y: 0.375, width: 0.12, height: 0.03 }
+              },
+              openThread: null,
+              bestUnreadThread: {
+                present: false,
+                name: "",
+                evidence: "",
+                replyable: false,
+                conversationKind: "unknown",
+                shouldReply: false,
+                replyReason: "",
+                latestSnippet: "",
+                priority: "low",
+                approxBox: null
+              },
+              composer: { present: false, evidence: "", approxBox: null }
+            };
+          }
+          return {
+            scene: "list",
+            sceneEvidence: "Unread inbox row visible after recovering to Inbox",
+            recommendedRecoveryAction: "none",
+            recoveryControl: { present: false, evidence: "", approxBox: null },
+            openThread: null,
+            bestUnreadThread: {
+              present: true,
+              name: "Gemini Hsieh",
+              evidence: "Bold unread sender row in Inbox",
+              replyable: true,
+              conversationKind: "mail",
+              shouldReply: true,
+              replyReason: "Unread direct email likely needs a response",
+              latestSnippet: "Regulations",
+              priority: "high",
+              approxBox: { x: 0.19, y: 0.24, width: 0.27, height: 0.08 }
+            },
+            composer: { present: false, evidence: "", approxBox: null }
+          };
+        }
+      }
+    } as never
+  });
+
+  assert.equal(detection?.summary, "Gemini Hsieh");
+  assert.deepEqual(dismissImagePaths, [modalCapturePath]);
+  assert.equal(dismissClicks.length, 1);
+  assert.ok(Math.abs(Number(dismissClicks[0]?.x ?? NaN) - 1348.04) < 1e-6);
+  assert.ok(Math.abs(Number(dismissClicks[0]?.y ?? NaN) - 621.6) < 1e-6);
+});
+
+test("outlook desktop pack can fall back to a visible Inbox row when recovery grounding returns no box", async () => {
+  let recovered = false;
+  const recoveryClicks: Array<{ x: number; y: number }> = [];
+  const folderWorldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-outlook-inbox-recovery",
+    appContext: {
+      appName: "Microsoft Outlook",
+      windows: [
+        {
+          ownerName: "Microsoft Outlook",
+          windowName: "Inbox - Outlook",
+          bounds: { x: 80, y: 30, width: 1280, height: 860, centerX: 720, centerY: 460 }
+        }
+      ]
+    },
+    capture: { path: "/tmp/outlook-folder-recovery.png" },
+    ocrBlocks: [],
+    interactionCandidates: [
+      {
+        id: "folder-deleted",
+        surface: "desktop",
+        kind: "text",
+        text: "Deleted Items",
+        role: "button",
+        bounds: { x: 180, y: 210, width: 180, height: 28, centerX: 270, centerY: 224 },
+        confidence: 0.9,
+        sourceHints: { source: "ocr" },
+        isInteractive: true
+      },
+      {
+        id: "folder-inbox",
+        surface: "desktop",
+        kind: "text",
+        text: "Inbox",
+        role: "button",
+        bounds: { x: 180, y: 640, width: 120, height: 28, centerX: 240, centerY: 654 },
+        confidence: 0.9,
+        sourceHints: { source: "ocr" },
+        isInteractive: true
+      }
+    ],
+    visibleText: "Outlook\nDeleted Items\nJunk Email\ntan@xgenie.co\nInbox\nDrafts\nSent",
+    recentActions: [],
+    summary: "Outlook showing a non-Inbox folder while Inbox is visible",
+    timestamp: new Date().toISOString()
+  };
+  const loadedWorldState = {
+    ...folderWorldState,
+    capture: { path: "/tmp/outlook-folder-recovery-loaded.png" },
+    visibleText: "Outlook\nInbox\nUnread\nGemini Hsieh\nRegulations",
+    summary: "Outlook inbox with unread row"
+  };
+  const fakeSurface = {
+    async observe() {
+      return recovered ? loadedWorldState : folderWorldState;
+    },
+    async act({ step }: { step: RuntimeStep }) {
+      if (step.action === "clickAt" && String(step.label ?? "").includes("Recover Outlook to inbox list")) {
+        recovered = true;
+        recoveryClicks.push({
+          x: Number(step.params?.x ?? NaN),
+          y: Number(step.params?.y ?? NaN)
+        });
+      }
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("outlook-desktop");
+  const rule: WatchRule = {
+    id: "watch-outlook-inbox-recovery",
+    goal: "Always watch Outlook and prefill replies",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "outlook-desktop-main",
+    skillName: null,
+    appTarget: "Microsoft Outlook",
+    livePack: "outlook-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-outlook-inbox-recovery",
+    name: "outlook-desktop-main",
+    rootPath: "/tmp/outlook-desktop-main",
+    profilePath: "/tmp/outlook-desktop-main/profile",
+    downloadsPath: "/tmp/outlook-desktop-main/downloads",
+    artifactsPath: "/tmp/outlook-desktop-main/artifacts",
+    scratchPath: "/tmp/outlook-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: folderWorldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        analyzeImageJson: async ({ schemaName }: { schemaName?: string }) => {
+          if (!recovered) {
+            if (schemaName === "agentos_outlook_desktop_recovery_control") {
+              return {
+                present: false,
+                evidence: "No grounded control returned",
+                approxBox: null
+              };
+            }
+            return {
+              scene: "list",
+              sceneEvidence: "Deleted Items is visible while Inbox is also visible in the sidebar",
+              recommendedRecoveryAction: "recover_to_list",
+              recoveryControl: {
+                present: false,
+                evidence: "",
+                approxBox: null
+              },
+              openThread: null,
+              visibleUnreadThreads: [],
+              composer: {
+                present: false,
+                evidence: "",
+                approxBox: null
+              }
+            };
+          }
+          return {
+            scene: "list",
+            sceneEvidence: "Unread inbox row visible after recovering to Inbox",
+            recommendedRecoveryAction: "none",
+            recoveryControl: {
+              present: false,
+              evidence: "",
+              approxBox: null
+            },
+            openThread: null,
+            visibleUnreadThreads: [
+              {
+                name: "Gemini Hsieh",
+                evidence: "Bold unread sender row in Inbox",
+                replyable: true,
+                conversationKind: "mail",
+                shouldReply: true,
+                replyReason: "Unread direct email likely needs a response",
+                latestSnippet: "Regulations",
+                priority: "high",
+                approxBox: { x: 0.19, y: 0.24, width: 0.27, height: 0.08 }
+              }
+            ],
+            composer: {
+              present: false,
+              evidence: "",
+              approxBox: null
+            }
+          };
+        }
+      }
+    } as never
+  });
+
+  assert.equal(detection?.summary, "Gemini Hsieh");
+  assert.equal(recoveryClicks.length, 1);
+  assert.deepEqual(recoveryClicks[0], { x: 240, y: 654 });
+});
+
+test("outlook desktop pack can fall back to an OCR Inbox row when recovery grounding returns no box", async () => {
+  let recovered = false;
+  const recoveryClicks: Array<{ x: number; y: number }> = [];
+  await fs.writeFile("/tmp/outlook-folder-recovery-ocr.png", createPngHeaderBuffer(3024, 1740));
+  const folderWorldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-outlook-inbox-recovery-ocr",
+    appContext: {
+      appName: "Microsoft Outlook",
+      captureWindowNumber: 101,
+      windows: [
+        {
+          ownerName: "Microsoft Outlook",
+          windowNumber: 101,
+          windowName: "Inbox - Outlook",
+          bounds: { x: 524, y: 30, width: 1512, height: 870, centerX: 1280, centerY: 465 }
+        }
+      ]
+    },
+    capture: { path: "/tmp/outlook-folder-recovery-ocr.png" },
+    ocrBlocks: [
+      {
+        id: "ocr-deleted-items",
+        text: "Deleted Items",
+        bounds: { x: 250, y: 206, width: 158, height: 22, centerX: 329, centerY: 217 },
+        confidence: 0.9,
+        source: "ocr"
+      },
+      {
+        id: "ocr-inbox",
+        text: "Inbox",
+        bounds: { x: 237, y: 641, width: 79, height: 22, centerX: 276.5, centerY: 652 },
+        confidence: 0.94,
+        source: "ocr"
+      }
+    ],
+    interactionCandidates: [],
+    visibleText: "Outlook\nDeleted Items\nJunk Email\ntan@xgenie.co\nInbox\nDrafts\nSent",
+    recentActions: [],
+    summary: "Outlook showing a non-Inbox folder while Inbox is visible via OCR",
+    timestamp: new Date().toISOString()
+  };
+  const loadedWorldState = {
+    ...folderWorldState,
+    capture: { path: "/tmp/outlook-folder-recovery-ocr-loaded.png" },
+    visibleText: "Outlook\nInbox\nUnread\nGemini Hsieh\nRegulations",
+    summary: "Outlook inbox with unread row"
+  };
+  const fakeSurface = {
+    async observe() {
+      return recovered ? loadedWorldState : folderWorldState;
+    },
+    async act({ step }: { step: RuntimeStep }) {
+      if (step.action === "clickAt" && String(step.label ?? "").includes("Recover Outlook to inbox list")) {
+        recovered = true;
+        recoveryClicks.push({
+          x: Number(step.params?.x ?? NaN),
+          y: Number(step.params?.y ?? NaN)
+        });
+      }
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("outlook-desktop");
+  const rule: WatchRule = {
+    id: "watch-outlook-inbox-recovery-ocr",
+    goal: "Always watch Outlook and prefill replies",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "outlook-desktop-main",
+    skillName: null,
+    appTarget: "Microsoft Outlook",
+    livePack: "outlook-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-outlook-inbox-recovery-ocr",
+    name: "outlook-desktop-main",
+    rootPath: "/tmp/outlook-desktop-main",
+    profilePath: "/tmp/outlook-desktop-main/profile",
+    downloadsPath: "/tmp/outlook-desktop-main/downloads",
+    artifactsPath: "/tmp/outlook-desktop-main/artifacts",
+    scratchPath: "/tmp/outlook-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: folderWorldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        analyzeImageJson: async ({ schemaName }: { schemaName?: string }) => {
+          if (!recovered) {
+            if (schemaName === "agentos_outlook_desktop_recovery_control") {
+              return {
+                present: false,
+                evidence: "No grounded control returned",
+                approxBox: null
+              };
+            }
+            return {
+              scene: "list",
+              sceneEvidence: "Deleted Items is visible while Inbox is also visible in the sidebar",
+              recommendedRecoveryAction: "recover_to_list",
+              recoveryControl: {
+                present: false,
+                evidence: "",
+                approxBox: null
+              },
+              openThread: null,
+              visibleUnreadThreads: [],
+              composer: {
+                present: false,
+                evidence: "",
+                approxBox: null
+              }
+            };
+          }
+          return {
+            scene: "list",
+            sceneEvidence: "Unread inbox row visible after recovering to Inbox",
+            recommendedRecoveryAction: "none",
+            recoveryControl: {
+              present: false,
+              evidence: "",
+              approxBox: null
+            },
+            openThread: null,
+            visibleUnreadThreads: [
+              {
+                name: "Gemini Hsieh",
+                evidence: "Bold unread sender row in Inbox",
+                replyable: true,
+                conversationKind: "mail",
+                shouldReply: true,
+                replyReason: "Unread direct email likely needs a response",
+                latestSnippet: "Regulations",
+                priority: "high",
+                approxBox: { x: 0.19, y: 0.24, width: 0.27, height: 0.08 }
+              }
+            ],
+            composer: {
+              present: false,
+              evidence: "",
+              approxBox: null
+            }
+          };
+        }
+      }
+    } as never
+  });
+
+  assert.equal(detection?.summary, "Gemini Hsieh");
+  assert.equal(recoveryClicks.length, 1);
+  assert.deepEqual(recoveryClicks[0], { x: 662.25, y: 356 });
+});
+
+test("outlook desktop pack retries Inbox recovery when the first click leaves the view unchanged", async () => {
+  let recoveryClicks = 0;
+  const recoveryPoints: Array<{ x: number; y: number }> = [];
+  const folderWorldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-outlook-inbox-recovery-retry",
+    appContext: {
+      appName: "Microsoft Outlook",
+      windows: [
+        {
+          ownerName: "Microsoft Outlook",
+          windowName: "Inbox - Outlook",
+          bounds: { x: 80, y: 30, width: 1280, height: 860, centerX: 720, centerY: 460 }
+        }
+      ]
+    },
+    capture: { path: "/tmp/outlook-folder-recovery-retry.png" },
+    ocrBlocks: [],
+    interactionCandidates: [
+      {
+        id: "folder-deleted",
+        surface: "desktop",
+        kind: "text",
+        text: "Deleted Items",
+        role: "button",
+        bounds: { x: 180, y: 210, width: 180, height: 28, centerX: 270, centerY: 224 },
+        confidence: 0.9,
+        sourceHints: { source: "ocr" },
+        isInteractive: true
+      },
+      {
+        id: "folder-inbox",
+        surface: "desktop",
+        kind: "text",
+        text: "Inbox",
+        role: "button",
+        bounds: { x: 180, y: 640, width: 120, height: 28, centerX: 240, centerY: 654 },
+        confidence: 0.9,
+        sourceHints: { source: "ocr" },
+        isInteractive: true
+      }
+    ],
+    visibleText: "Outlook\nDeleted Items\nJunk Email\ntan@xgenie.co\nInbox\nDrafts\nSent",
+    recentActions: [],
+    summary: "Outlook showing a non-Inbox folder while Inbox is visible",
+    timestamp: new Date().toISOString()
+  };
+  const loadedWorldState = {
+    ...folderWorldState,
+    capture: { path: "/tmp/outlook-folder-recovery-retry-loaded.png" },
+    visibleText: "Outlook\nInbox\nUnread\nGemini Hsieh\nRegulations",
+    summary: "Outlook inbox with unread row"
+  };
+  const fakeSurface = {
+    async observe() {
+      return recoveryClicks >= 2 ? loadedWorldState : folderWorldState;
+    },
+    async act({ step }: { step: RuntimeStep }) {
+      if (step.action === "clickAt" && String(step.label ?? "").includes("Recover Outlook to inbox list")) {
+        recoveryClicks += 1;
+        recoveryPoints.push({
+          x: Number(step.params?.x ?? NaN),
+          y: Number(step.params?.y ?? NaN)
+        });
+      }
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("outlook-desktop");
+  const rule: WatchRule = {
+    id: "watch-outlook-inbox-recovery-retry",
+    goal: "Always watch Outlook and prefill replies",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "outlook-desktop-main",
+    skillName: null,
+    appTarget: "Microsoft Outlook",
+    livePack: "outlook-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-outlook-inbox-recovery-retry",
+    name: "outlook-desktop-main",
+    rootPath: "/tmp/outlook-desktop-main",
+    profilePath: "/tmp/outlook-desktop-main/profile",
+    downloadsPath: "/tmp/outlook-desktop-main/downloads",
+    artifactsPath: "/tmp/outlook-desktop-main/artifacts",
+    scratchPath: "/tmp/outlook-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: folderWorldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        analyzeImageJson: async () => {
+          if (recoveryClicks >= 2) {
+            return {
+              scene: "list",
+              sceneEvidence: "Unread inbox row visible after recovering to Inbox",
+              recommendedRecoveryAction: "none",
+              recoveryControl: {
+                present: false,
+                evidence: "",
+                approxBox: null
+              },
+              openThread: null,
+              visibleUnreadThreads: [
+                {
+                  name: "Gemini Hsieh",
+                  evidence: "Bold unread sender row in Inbox",
+                  replyable: true,
+                  conversationKind: "mail",
+                  shouldReply: true,
+                  replyReason: "Unread direct email likely needs a response",
+                  latestSnippet: "Regulations",
+                  priority: "high",
+                  approxBox: { x: 0.19, y: 0.24, width: 0.27, height: 0.08 }
+                }
+              ],
+              composer: {
+                present: false,
+                evidence: "",
+                approxBox: null
+              }
+            };
+          }
+          return {
+            scene: "list",
+            sceneEvidence: "Deleted Items is visible while Inbox is also visible in the sidebar",
+            recommendedRecoveryAction: "recover_to_list",
+            recoveryControl: {
+              present: false,
+              evidence: "",
+              approxBox: null
+            },
+            openThread: null,
+            visibleUnreadThreads: [],
+            composer: {
+              present: false,
+              evidence: "",
+              approxBox: null
+            }
+          };
+        }
+      }
+    } as never
+  });
+
+  assert.equal(detection?.summary, "Gemini Hsieh");
+  assert.equal(recoveryClicks, 2);
+  assert.deepEqual(recoveryPoints, [
+    { x: 240, y: 654 },
+    { x: 240, y: 654 }
+  ]);
+});
+
+test("outlook desktop pack can recover to Inbox when vision times out but an Inbox row is visible", async () => {
+  let recovered = false;
+  const recoveryClicks: Array<{ x: number; y: number }> = [];
+  const sidebarWorldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-outlook-inbox-vision-timeout",
+    appContext: {
+      appName: "Microsoft Outlook",
+      windows: [
+        {
+          ownerName: "Microsoft Outlook",
+          windowName: "Inbox - Outlook",
+          bounds: { x: 80, y: 30, width: 1280, height: 860, centerX: 720, centerY: 460 }
+        }
+      ]
+    },
+    capture: { path: "/tmp/outlook-inbox-vision-timeout-sidebar.png" },
+    ocrBlocks: [
+      {
+        id: "ocr-inbox",
+        text: "Inbox",
+        bounds: { x: 246, y: 507, width: 75, height: 22, centerX: 283.5, centerY: 518 },
+        confidence: 0.94,
+        source: "ocr"
+      }
+    ],
+    interactionCandidates: [],
+    visibleText: "Outlook\nNew Mail\nFavorites\nAll Accounts\ntan.lin@pioinc.com\nInbox\nDrafts",
+    recentActions: [],
+    summary: "Outlook sidebar view with Inbox visible but no message list",
+    timestamp: new Date().toISOString()
+  };
+  const inboxWorldState = {
+    ...sidebarWorldState,
+    capture: { path: "/tmp/outlook-inbox-vision-timeout-list.png" },
+    visibleText: "Outlook\nInbox\nUnread\nAlice - Need your review\nCan you review this draft today?",
+    summary: "Outlook inbox list after recovery"
+  };
+  const fakeSurface = {
+    async observe() {
+      return recovered ? inboxWorldState : sidebarWorldState;
+    },
+    async act({ step }: { step: RuntimeStep }) {
+      if (step.action === "clickAt" && String(step.label ?? "").includes("Recover Outlook to inbox list")) {
+        recovered = true;
+        recoveryClicks.push({
+          x: Number(step.params?.x ?? NaN),
+          y: Number(step.params?.y ?? NaN)
+        });
+      }
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      desktop: fakeSurface as never
+    })
+  });
+  const pack = registry.get("outlook-desktop");
+  const rule: WatchRule = {
+    id: "watch-outlook-inbox-vision-timeout",
+    goal: "Always watch Outlook and prefill replies",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "outlook-desktop-main",
+    skillName: null,
+    appTarget: "Microsoft Outlook",
+    livePack: "outlook-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-outlook-inbox-vision-timeout",
+    name: "outlook-desktop-main",
+    rootPath: "/tmp/outlook-desktop-main",
+    profilePath: "/tmp/outlook-desktop-main/profile",
+    downloadsPath: "/tmp/outlook-desktop-main/downloads",
+    artifactsPath: "/tmp/outlook-desktop-main/artifacts",
+    scratchPath: "/tmp/outlook-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: sidebarWorldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        analyzeImageJson: async () => {
+          if (!recovered) {
+            throw new Error("Outlook desktop vision analysis timed out after 12000ms");
+          }
+          return {
+            scene: "list",
+            sceneEvidence: "Unread inbox row visible after clicking Inbox",
+            recommendedRecoveryAction: "none",
+            recoveryControl: {
+              present: false,
+              evidence: "",
+              approxBox: null
+            },
+            openThread: null,
+            visibleUnreadThreads: [
+              {
+                name: "Alice - Need your review",
+                evidence: "Unread bold sender row in Inbox",
+                replyable: true,
+                conversationKind: "mail",
+                shouldReply: true,
+                replyReason: "Unread direct email likely needs a response",
+                latestSnippet: "Can you review this draft today?",
+                priority: "high",
+                approxBox: { x: 0.18, y: 0.22, width: 0.28, height: 0.08 }
+              }
+            ],
+            composer: {
+              present: false,
+              evidence: "",
+              approxBox: null
+            }
+          };
+        }
+      }
+    } as never
+  });
+
+  assert.equal(detection?.summary, "Alice - Need your review");
+  assert.equal((detection?.metadata as { recoveryAttempts?: unknown } | undefined)?.recoveryAttempts, 1);
+  assert.deepEqual(recoveryClicks, [{ x: 283.5, y: 518 }]);
+});
+
+test("outlook desktop pack prefers target-specific vision grounding for the click point", async () => {
+  const capturePath = `/tmp/outlook-vision-grounding-${Date.now()}.png`;
+  await fs.writeFile(capturePath, createPngHeaderBuffer(1200, 800));
+  const worldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-outlook-vision-grounding",
+    appContext: {
+      appName: "Microsoft Outlook",
+      windows: [
+        {
+          ownerName: "Microsoft Outlook",
+          windowName: "Microsoft Outlook",
+          bounds: { x: 100, y: 40, width: 1200, height: 800, centerX: 700, centerY: 440 }
+        }
+      ]
+    },
+    capture: {
+      id: "artifact-outlook-vision-grounding",
+      taskId: "task-outlook-vision-grounding",
+      traceId: null,
+      kind: "screenshot",
+      label: "Outlook vision grounding state",
+      path: capturePath,
+      metadata: {},
+      createdAt: new Date().toISOString()
+    },
+    ocrBlocks: [],
+    interactionCandidates: [],
+    visibleText: "Outlook\nCurrent thread\n严珊珊",
+    recentActions: [],
+    summary: "Outlook",
+    timestamp: new Date().toISOString()
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({})
+  });
+  const pack = registry.get("outlook-desktop");
+  const rule: WatchRule = {
+    id: "watch-outlook-vision-grounding",
+    goal: "Always watch Outlook and prefill replies for unread mail",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "outlook-desktop-main",
+    skillName: null,
+    appTarget: "Microsoft Outlook",
+    livePack: "outlook-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-outlook-vision-grounding",
+    name: "outlook-desktop-main",
+    rootPath: "/tmp/outlook-desktop-main",
+    profilePath: "/tmp/outlook-desktop-main/profile",
+    downloadsPath: "/tmp/outlook-desktop-main/downloads",
+    artifactsPath: "/tmp/outlook-desktop-main/artifacts",
+    scratchPath: "/tmp/outlook-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: worldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        analyzeImageJson: async ({ schemaName }: { schemaName?: string }) => {
+          if (schemaName === "agentos_outlook_thread_grounding") {
+            return {
+              targetVisible: true,
+              evidence: "The 严珊珊 row is visible in the middle message list",
+              clickPoint: { x: 0.28, y: 0.58 },
+              rowBox: { x: 0.18, y: 0.52, width: 0.22, height: 0.1 }
+            };
+          }
+          return {
+            scene: "list",
+            openThread: null,
+            visibleUnreadThreads: [
+              {
+                name: "严珊珊",
+                evidence: "blue unread dot on the row",
+                conversationKind: "direct",
+                shouldReply: true,
+                replyable: true,
+                latestSnippet: "老板下午好，我...",
+                replyReason: "Personal greeting message",
+                approxBox: { x: 0.17, y: 0.5, width: 0.2, height: 0.11 }
+              }
+            ],
+            composer: {
+              present: false,
+              evidence: "",
+              approxBox: null
+            }
+          };
+        }
+      }
+    } as never
+  });
+
+  await fs.unlink(capturePath).catch(() => null);
+
+  assert.equal(detection?.summary, "严珊珊");
+  assert.equal(
+    (detection?.metadata as { threadGrounding?: { targetVisible?: unknown } } | undefined)?.threadGrounding?.targetVisible,
+    true
+  );
+  assert.equal(
+    Math.round(Number((detection?.metadata as { openPoint?: { x?: unknown } } | undefined)?.openPoint?.x ?? 0)),
+    506
+  );
+  assert.equal(
+    Math.round(Number((detection?.metadata as { openPoint?: { y?: unknown } } | undefined)?.openPoint?.y ?? 0)),
+    496
+  );
+});
+
+test("outlook desktop pack falls back to the original unread row when target grounding drifts to a duplicate sender row", async () => {
+  const worldState = {
+    version: 1,
+    surface: "desktop",
+    workspaceId: "workspace-outlook-duplicate-sender-grounding",
+    appContext: {
+      appName: "Microsoft Outlook",
+      windows: [
+        {
+          ownerName: "Microsoft Outlook",
+          windowName: "Microsoft Outlook",
+          bounds: { x: 100, y: 40, width: 1200, height: 800, centerX: 700, centerY: 440 }
+        }
+      ]
+    },
+    capture: {
+      id: "artifact-outlook-duplicate-sender-grounding",
+      taskId: "task-outlook-duplicate-sender-grounding",
+      traceId: null,
+      kind: "screenshot",
+      label: "Outlook duplicate sender grounding state",
+      path: "/tmp/outlook-duplicate-sender-grounding.png",
+      metadata: {},
+      createdAt: new Date().toISOString()
+    },
+    ocrBlocks: [],
+    interactionCandidates: [],
+    visibleText: "Outlook\nJin Wang\n系统优化需求: 审批详...\nJin Wang\nBug 报告: 需...",
+    recentActions: [],
+    summary: "Outlook",
+    timestamp: new Date().toISOString()
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({})
+  });
+  const pack = registry.get("outlook-desktop");
+  const rule: WatchRule = {
+    id: "watch-outlook-duplicate-sender-grounding",
+    goal: "Always watch Outlook and prefill replies for unread mail",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "outlook-desktop-main",
+    skillName: null,
+    appTarget: "Microsoft Outlook",
+    livePack: "outlook-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-outlook-duplicate-sender-grounding",
+    name: "outlook-desktop-main",
+    rootPath: "/tmp/outlook-desktop-main",
+    profilePath: "/tmp/outlook-desktop-main/profile",
+    downloadsPath: "/tmp/outlook-desktop-main/downloads",
+    artifactsPath: "/tmp/outlook-desktop-main/artifacts",
+    scratchPath: "/tmp/outlook-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: worldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        analyzeImageJson: async ({ schemaName }: { schemaName?: string }) => {
+          if (schemaName === "agentos_outlook_thread_grounding") {
+            return {
+              targetVisible: true,
+              evidence: "Matched a lower duplicate Jin Wang row",
+              clickPoint: { x: 0.28, y: 0.58 },
+              rowBox: { x: 0.18, y: 0.46, width: 0.24, height: 0.08 }
+            };
+          }
+          return {
+            scene: "list",
+            openThread: null,
+            visibleUnreadThreads: [
+              {
+                name: "Jin Wang",
+                evidence: "Unread blue-dot row for the newer approval thread",
+                conversationKind: "mail",
+                shouldReply: true,
+                replyable: true,
+                latestSnippet: "系统优化需求: 审批详...",
+                replyReason: "Unread work thread that likely needs a reply.",
+                priority: "high",
+                approxBox: { x: 0.18, y: 0.24, width: 0.24, height: 0.08 }
+              }
+            ],
+            composer: {
+              present: false,
+              evidence: "",
+              approxBox: null
+            }
+          };
+        }
+      }
+    } as never
+  });
+
+  assert.equal(detection?.summary, "Jin Wang");
+  assert.equal(
+    Math.round(Number((detection?.metadata as { openPoint?: { x?: unknown } } | undefined)?.openPoint?.x ?? 0)),
+    508
+  );
+  assert.equal(
+    Math.round(Number((detection?.metadata as { openPoint?: { y?: unknown } } | undefined)?.openPoint?.y ?? 0)),
+    440
+  );
 });
 
 test("boss browser pack can extract candidate thread context and build approval-first reply steps", async () => {

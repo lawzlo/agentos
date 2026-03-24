@@ -31,6 +31,7 @@ import { LearningService } from "./learning-service.js";
 import { withLivePackHealth } from "./live-pack-health.js";
 import { getDaemonInstallStatus } from "../daemon-autostart.js";
 import { createDiagnosticBundle } from "../diagnostics.js";
+import { LicenseService } from "../license.js";
 import { getRuntimeVersionInfo } from "../version.js";
 import type { AgentOsConfig } from "../config.js";
 import type {
@@ -122,6 +123,7 @@ export class ControlPlane {
   learningService: LearningService;
   automationJobService: AutomationJobService;
   startupRecovery: DaemonStartupRecovery | null;
+  licenseService: LicenseService;
 
   constructor(config: AgentOsConfig) {
     this.config = config;
@@ -140,6 +142,7 @@ export class ControlPlane {
     });
     this.policyEngine = new PolicyEngine();
     this.modelClient = new OpenAICompatibleModelClient(config.model);
+    this.licenseService = new LicenseService(config);
     this.groundingEngine = new GroundingEngine({ traceStore: this.traceStore });
     this.surfaceRegistry = new SurfaceRegistry({
       browser: new BrowserSurfaceAdapter({
@@ -204,7 +207,8 @@ export class ControlPlane {
       eventBus: this.eventBus,
       livePackRegistry: this.livePackRegistry,
       connectors: this.connectors,
-      config
+      config,
+      licenseService: this.licenseService
     });
     this.draftService = new DraftService({
       store: this.store,
@@ -309,12 +313,18 @@ export class ControlPlane {
 
   async listLivePackInfo(): Promise<LivePackInfo[]> {
     const native = await this.#collectNativeDiagnostics();
+    const license = this.licenseService.refresh();
     return this.livePackRegistry.listInfo().map((pack) =>
       withLivePackHealth(pack, {
         config: this.config,
-        native
+        native,
+        license
       })
     );
+  }
+
+  getLicenseState() {
+    return this.licenseService.refresh();
   }
 
   listSkills(): SkillDefinition[] {
@@ -549,7 +559,8 @@ export class ControlPlane {
     const livePacks = this.livePackRegistry.listInfo().map((pack) =>
       withLivePackHealth(pack, {
         config: this.config,
-        native
+        native,
+        license: this.licenseService.refresh()
       })
     );
     const learning = this.learningService.status();
@@ -630,6 +641,7 @@ export class ControlPlane {
       modelBaseUrl: model.baseUrl,
       modelTier: model.tier,
       learning,
+      license: this.licenseService.getState(),
       version,
       install,
       livePackCount: livePacks.length,

@@ -306,6 +306,7 @@ export class BrowserSurfaceAdapter extends SurfaceAdapter {
     const filePath = path.join(workspace.artifactsPath, `${Date.now()}-${label.replaceAll(/\s+/g, "-")}.png`);
     await page.screenshot({ path: filePath, fullPage: true });
     return this.artifactStore.registerExistingFile({
+      workspace,
       taskId: task.id,
       traceId,
       kind: "screenshot",

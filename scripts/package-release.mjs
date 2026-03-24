@@ -23,6 +23,8 @@ const bundledRuntimeInput = args.get("--node-runtime") ?? process.env.AGENTOS_BU
 const nativeBinaryInput = args.get("--native-binary") ?? process.env.AGENTOS_NATIVE_BINARY_PATH ?? null;
 const releaseDirInput = args.get("--release-dir") ?? process.env.AGENTOS_RELEASE_DIR ?? null;
 const skipBundledRuntime = args.get("--no-bundled-runtime") === true || process.env.AGENTOS_SKIP_BUNDLED_RUNTIME === "1";
+const buildChannel = String(args.get("--channel") ?? process.env.AGENTOS_BUILD_CHANNEL ?? "stable");
+const licenseEnforced = !(args.get("--source-mode") === true || process.env.AGENTOS_LICENSE_ENFORCED === "false");
 
 function extensionForPlatform(targetPlatform) {
   return targetPlatform === "win32" ? ".exe" : "";
@@ -196,6 +198,8 @@ async function main() {
     version,
     platform,
     stagedAt: new Date().toISOString(),
+    buildChannel,
+    licenseEnforced,
     bundledRuntime: Boolean(bundledRuntime),
     runtimeExecutable: null
   };
@@ -221,6 +225,8 @@ async function main() {
           source: "macos_pkg",
           installRoot: `/opt/agentos/${version}`,
           wrapperPath: "/usr/local/bin/agentos",
+          buildChannel,
+          licenseEnforced,
           bundledRuntime: Boolean(runtimeExecutable),
           runtimeExecutablePath: runtimeExecutable
         },
@@ -262,6 +268,8 @@ set -eu
           source: "windows_msi",
           installRoot: `AgentOS\\${version}`,
           wrapperPath: "agentos.cmd",
+          buildChannel,
+          licenseEnforced,
           bundledRuntime: Boolean(runtimeExecutable),
           runtimeExecutablePath: runtimeExecutable ? `%ProgramFiles%\\${runtimeExecutable}` : null
         },

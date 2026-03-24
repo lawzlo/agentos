@@ -4,6 +4,7 @@
 #import <ApplicationServices/ApplicationServices.h>
 #import <CoreGraphics/CoreGraphics.h>
 #import <ImageIO/ImageIO.h>
+#import <unistd.h>
 
 static char *agentos_json_string(id object) {
     NSError *error = nil;
@@ -150,6 +151,8 @@ static CGEventFlags agentos_modifier_flags(NSString *modifiersCSV) {
             flags |= kCGEventFlagMaskControl;
         } else if ([item isEqualToString:@"option"] || [item isEqualToString:@"alt"]) {
             flags |= kCGEventFlagMaskAlternate;
+        } else if ([item isEqualToString:@"fn"] || [item isEqualToString:@"function"]) {
+            flags |= kCGEventFlagMaskSecondaryFn;
         }
     }
 
@@ -158,6 +161,52 @@ static CGEventFlags agentos_modifier_flags(NSString *modifiersCSV) {
 
 static BOOL agentos_lookup_key_code(NSString *key, CGKeyCode *code) {
     NSDictionary<NSString *, NSNumber *> *codes = @{
+        @"a": @0,
+        @"s": @1,
+        @"d": @2,
+        @"f": @3,
+        @"h": @4,
+        @"g": @5,
+        @"z": @6,
+        @"x": @7,
+        @"c": @8,
+        @"v": @9,
+        @"b": @11,
+        @"q": @12,
+        @"w": @13,
+        @"e": @14,
+        @"r": @15,
+        @"y": @16,
+        @"t": @17,
+        @"1": @18,
+        @"2": @19,
+        @"3": @20,
+        @"4": @21,
+        @"6": @22,
+        @"5": @23,
+        @"=": @24,
+        @"9": @25,
+        @"7": @26,
+        @"-": @27,
+        @"8": @28,
+        @"0": @29,
+        @"]": @30,
+        @"o": @31,
+        @"u": @32,
+        @"[": @33,
+        @"i": @34,
+        @"p": @35,
+        @"l": @37,
+        @"j": @38,
+        @"'": @39,
+        @"k": @40,
+        @";": @41,
+        @"\\": @42,
+        @",": @43,
+        @"/": @44,
+        @"n": @45,
+        @"m": @46,
+        @".": @47,
         @"return": @36,
         @"enter": @36,
         @"tab": @48,
@@ -166,6 +215,18 @@ static BOOL agentos_lookup_key_code(NSString *key, CGKeyCode *code) {
         @"esc": @53,
         @"delete": @51,
         @"backspace": @51,
+        @"f1": @122,
+        @"f2": @120,
+        @"f3": @99,
+        @"f4": @118,
+        @"f5": @96,
+        @"f6": @97,
+        @"f7": @98,
+        @"f8": @100,
+        @"f9": @101,
+        @"f10": @109,
+        @"f11": @103,
+        @"f12": @111,
         @"left": @123,
         @"right": @124,
         @"down": @125,
@@ -417,7 +478,9 @@ char *agentos_macos_click_at_json(double x, double y) {
     @autoreleasepool {
         CGPoint point = CGPointMake(x, y);
         agentos_post_mouse_event(kCGEventMouseMoved, point, kCGMouseButtonLeft);
+        usleep(12000);
         agentos_post_mouse_event(kCGEventLeftMouseDown, point, kCGMouseButtonLeft);
+        usleep(18000);
         agentos_post_mouse_event(kCGEventLeftMouseUp, point, kCGMouseButtonLeft);
         return agentos_json_string(@{
             @"ok": @YES,

@@ -4,6 +4,9 @@ import path from "node:path";
 import { boolOption, config, print, type CliOptions } from "../cli-utils.js";
 import { collectDesktopProbe, type DesktopProbeDeps, type DesktopProbeReport, type DesktopProbeRequest } from "./desktop-command.js";
 import { BrowserSurfaceAdapter } from "../../src/runtime/adapters/browser-surface.js";
+import { defaultBrowserStartUrlForPack } from "../../src/runtime/browser-pack-defaults.js";
+import { detectInstallSourceSync } from "../../src/install-source.js";
+import { resolveLicenseState } from "../../src/license.js";
 import {
   analyzeConversationPack,
   detectBrowserManualIntervention,
@@ -110,10 +113,12 @@ function genericSceneFromPackAnalysis(packAnalysis: DesktopConversationPackAnaly
 
 function browserSceneFromState({
   request,
+  worldState,
   packAnalysis,
   manualIntervention
 }: {
   request: SurfaceStateRequest;
+  worldState: WorldState;
   packAnalysis: DesktopConversationPackAnalysis | null;
   manualIntervention: ReturnType<typeof detectBrowserManualIntervention> | null;
 }): {
@@ -149,6 +154,16 @@ function browserSceneFromState({
       scene: "foreign_view",
       selectedTarget: null,
       skipReasons: ["blocked_access_denied"],
+      recoverySuggested: "takeover"
+    };
+  }
+
+  if (!String(worldState.visibleText ?? "").trim()) {
+    return {
+      runnerType,
+      scene: "unknown",
+      selectedTarget: null,
+      skipReasons: ["needs_takeover"],
       recoverySuggested: "takeover"
     };
   }
@@ -422,16 +437,16 @@ function deriveBrowserReadiness({
     blockers.push("blocked_access_denied");
   }
 
+  if (!blockers.length && !String(worldState.visibleText ?? "").trim()) {
+    blockers.push("needs_takeover");
+  }
+
   if (!blockers.length && request.packName && packAnalysis) {
     if (!packAnalysis.unreadCandidate) {
       blockers.push("no_visible_thread");
     } else if (!packAnalysis.composeCandidate && request.packName !== "boss-browser") {
       blockers.push("no_visible_composer");
     }
-  }
-
-  if (!blockers.length && !String(worldState.visibleText ?? "").trim()) {
-    blockers.push("needs_takeover");
   }
 
   return {
@@ -536,9 +551,10 @@ async function collectBrowserState(
   const adapter = deps.browserAdapter ?? createBrowserAdapter();
   const workspace = deps.workspace ?? (await createStateWorkspace(request, nowIso));
   const task = buildStateTask("browser", request.packName ?? request.url ?? "browser", nowIso);
+  const effectiveUrl = request.url ?? defaultBrowserStartUrlForPack(request.packName);
 
   try {
-    if (request.url) {
+    if (effectiveUrl) {
       await adapter.act({
         task,
         workspace,
@@ -546,7 +562,7 @@ async function collectBrowserState(
         step: {
           action: "openUrl",
           params: {
-            url: request.url,
+            url: effectiveUrl,
             waitUntil: "domcontentloaded",
             timeoutMs: request.timeoutMs
           }
@@ -565,7 +581,10 @@ async function collectBrowserState(
       ? detectBrowserManualIntervention({
           packName: request.packName,
           worldState,
-          rule: buildSyntheticStateRule(request),
+          rule: buildSyntheticStateRule({
+            ...request,
+            url: effectiveUrl
+          }),
           dedupeState: {}
         })
       : null;
@@ -577,6 +596,7 @@ async function collectBrowserState(
     });
     const sceneState = browserSceneFromState({
       request,
+      worldState,
       packAnalysis,
       manualIntervention
     });
@@ -720,6 +740,14 @@ export async function commandState(subcommand: string | undefined, positionals: 
 
   if (surface === "desktop" && !request.appName) {
     throw new Error("state --surface desktop requires --app <name> or a desktop pack that implies an app target");
+  }
+
+  const license = resolveLicenseState(config, detectInstallSourceSync());
+  if ((request.packName ?? null) && String(request.packName).trim().length && String(request.packName).trim().toLowerCase() !== "browser-state") {
+    const requiresPro = String(request.packName).trim().toLowerCase();
+    if (["wechat-desktop", "slack-desktop", "outlook-desktop", "boss-browser"].includes(requiresPro) && !license.capabilities.premiumPacksEnabled) {
+      throw new Error(`${request.packName} requires AgentOS Pro.`);
+    }
   }
 
   const report = await collectSurfaceState(request);

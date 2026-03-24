@@ -1,6 +1,10 @@
+import fs from "node:fs/promises";
+
 import { nowIso } from "./id.js";
 import { materializeWatchActionTemplate } from "./watch-profile.js";
+import { inferReplyLanguage } from "./reply-language.js";
 import { clearExpiredReplyApprovalGrant, deriveReplyThreadKey, hasActiveReplyApprovalGrant } from "./reply-policy.js";
+import { ModelBudgetExceededError, type ModelUsageBudget } from "./model-client.js";
 import {
   deriveConversationThreadKey,
   findConversationThreadByTaskId,
@@ -25,15 +29,21 @@ import type { DecoratedDraftRecord } from "./watch-presenters.js";
 import type { ControlPlaneStore } from "./store.js";
 import type {
   DraftRecord,
+  ArtifactUsage,
   RiskGateDecision,
+  RunBudgetStatus,
   RuntimeStep,
+  StorageGuardStatus,
+  SurfaceHealthState,
   TaskRecord,
   TaskSpec,
   TeachTemplateInput,
+  UsageSummary,
   WatchDetection,
   WatchGovernance,
   WatchRule,
-  WorldState
+  WorldState,
+  WorkspaceProfile
 } from "../types/runtime-schema.js";
 
 interface TaskLike {
@@ -41,6 +51,13 @@ interface TaskLike {
   status: string;
   error?: string | null;
   updatedAt?: string;
+}
+
+class UnresolvedTaskTemplateError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UnresolvedTaskTemplateError";
+  }
 }
 
 function isActiveTask(task?: TaskLike | null): boolean {
@@ -70,8 +87,169 @@ function clearWatchFailureState(dedupeState: Record<string, unknown> = {}) {
     lastNoTriggerScene: null,
     lastNoTriggerSelectedTarget: null,
     lastNoTriggerSkipReasons: [],
-    lastNoTriggerRecoveryAction: null
+    lastNoTriggerRecoveryAction: null,
+    repeatedNoTriggerCount: 0,
+    storageGuard: null
   };
+}
+
+const WATCH_MODEL_MAX_REQUESTS = 8;
+const DESKTOP_VLM_MODEL_MAX_REQUESTS = 6;
+const DESKTOP_SURFACE_COOLDOWN_MS = 5 * 60_000;
+const REPEATED_NO_TRIGGER_COOLDOWN_THRESHOLD = 2;
+const STORAGE_GUARD_BACKOFF_MS = 30 * 60_000;
+const DEFAULT_STORAGE_GUARD_MAX_USED_PERCENT = 85;
+
+function storageGuardMaximumUsedPercent(): number {
+  const override = Number(process.env.AGENTOS_STORAGE_GUARD_MAX_USED_PERCENT ?? "");
+  if (Number.isFinite(override) && override > 0) {
+    return Math.min(100, Math.max(1, override));
+  }
+  return DEFAULT_STORAGE_GUARD_MAX_USED_PERCENT;
+}
+
+function usageSummaryFromBudget(
+  budget: {
+    usage?: UsageSummary;
+    status?: RunBudgetStatus;
+  } | null | undefined
+): UsageSummary {
+  return {
+    requestCount: Number(budget?.usage?.requestCount ?? 0),
+    inputTokens: Number(budget?.usage?.inputTokens ?? 0),
+    outputTokens: Number(budget?.usage?.outputTokens ?? 0),
+    totalTokens: Number(budget?.usage?.totalTokens ?? 0),
+    estimatedCostUsd:
+      Number.isFinite(Number(budget?.usage?.estimatedCostUsd))
+        ? Number(budget?.usage?.estimatedCostUsd)
+        : null
+  };
+}
+
+function budgetStatusFromBudget(
+  budget: {
+    status?: RunBudgetStatus;
+  } | null | undefined
+): RunBudgetStatus {
+  return budget?.status ?? "ok";
+}
+
+function recordUsageMetadata(
+  dedupeState: Record<string, unknown>,
+  budget: {
+    usage?: UsageSummary;
+    status?: RunBudgetStatus;
+  } | null | undefined,
+  artifactUsage: ArtifactUsage | null
+): Record<string, unknown> {
+  return {
+    ...dedupeState,
+    budgetStatus: budgetStatusFromBudget(budget),
+    usageSummary: usageSummaryFromBudget(budget),
+    artifactUsage: artifactUsage
+      ? {
+          ...artifactUsage
+        }
+      : dedupeState.artifactUsage ?? null
+  };
+}
+
+async function collectStorageGuardStatus(workspace: WorkspaceProfile): Promise<StorageGuardStatus | null> {
+  try {
+    const stats = await fs.statfs(workspace.rootPath);
+    const freeBytes = Number(stats.bavail) * Number(stats.bsize);
+    const totalBlocks = Number(stats.blocks);
+    const availableBlocks = Number(stats.bavail);
+    const usedBlocks = totalBlocks - availableBlocks;
+    const usedPercent =
+      Number.isFinite(totalBlocks) && totalBlocks > 0 && Number.isFinite(usedBlocks) && usedBlocks >= 0
+        ? (usedBlocks / totalBlocks) * 100
+        : null;
+    return {
+      active:
+        Number.isFinite(Number(usedPercent)) &&
+        Number(usedPercent) > storageGuardMaximumUsedPercent(),
+      freeBytes: Number.isFinite(freeBytes) ? freeBytes : null,
+      usedPercent: Number.isFinite(Number(usedPercent)) ? Number(usedPercent) : null,
+      maximumUsedPercent: storageGuardMaximumUsedPercent()
+    };
+  } catch {
+    return null;
+  }
+}
+
+function isDesktopSurfaceRule(rule: WatchRule): boolean {
+  return runnerTypeForPack(rule.livePack, rule.preferredSurface) !== "browser_native";
+}
+
+function desktopCooldownEligible(rule: WatchRule): boolean {
+  return rule.livePack === "slack-desktop" || rule.livePack === "outlook-desktop";
+}
+
+function clearExpiredSurfaceHealthState(dedupeState: Record<string, unknown> = {}): Record<string, unknown> {
+  const cooldownUntil = Number(dedupeState.surfaceHealthCooldownUntil ?? 0);
+  if (cooldownUntil && cooldownUntil > Date.now()) {
+    return dedupeState;
+  }
+
+  return {
+    ...dedupeState,
+    surfaceHealth: cooldownUntil ? "healthy" : dedupeState.surfaceHealth ?? "healthy",
+    surfaceHealthCooldownUntil: null
+  };
+}
+
+function surfaceHealthCooldownActive(dedupeState: Record<string, unknown> = {}): boolean {
+  const cooldownUntil = Number(dedupeState.surfaceHealthCooldownUntil ?? 0);
+  return cooldownUntil > Date.now();
+}
+
+function recordSurfaceHealth(
+  dedupeState: Record<string, unknown>,
+  {
+    state,
+    cooldownUntil
+  }: {
+    state: SurfaceHealthState;
+    cooldownUntil?: number | null;
+  }
+): Record<string, unknown> {
+  return {
+    ...dedupeState,
+    surfaceHealth: state,
+    surfaceHealthCooldownUntil: cooldownUntil && cooldownUntil > 0 ? cooldownUntil : null
+  };
+}
+
+function nextRepeatedNoTriggerCount(
+  dedupeState: Record<string, unknown>,
+  {
+    reason,
+    scene,
+    selectedTarget
+  }: {
+    reason: string;
+    scene: string | null;
+    selectedTarget: string | null;
+  }
+): number {
+  const previousReason = String(dedupeState.lastNoTriggerReason ?? "").trim();
+  const previousScene = String(dedupeState.lastNoTriggerScene ?? "").trim() || null;
+  const previousSelectedTarget = String(dedupeState.lastNoTriggerSelectedTarget ?? "").trim() || null;
+  const previousCount = Math.max(0, Number(dedupeState.repeatedNoTriggerCount ?? 0));
+  if (previousReason === reason && previousScene === scene && previousSelectedTarget === selectedTarget) {
+    return previousCount + 1;
+  }
+  return 1;
+}
+
+function modelRequestBudgetForRule(rule: WatchRule): number {
+  if (rule.livePack === "outlook-desktop") {
+    return WATCH_MODEL_MAX_REQUESTS;
+  }
+  return runnerTypeForPack(rule.livePack, rule.preferredSurface) === "desktop_vlm"
+    ? DESKTOP_VLM_MODEL_MAX_REQUESTS
+    : WATCH_MODEL_MAX_REQUESTS;
 }
 
 function hasExplicitConversationThread(detection: WatchDetection | null | undefined): boolean {
@@ -161,6 +339,7 @@ interface WatchExecutionServiceOptions {
   controlPlane: Pick<
     ControlPlane,
     | "modelClient"
+    | "artifactStore"
     | "createTask"
     | "workspaceManager"
     | "watchService"
@@ -196,6 +375,19 @@ const DEFAULT_SCAN_STAGE_TIMEOUT_MS: Record<WatchScanStage, number> = {
 
 const WECHAT_SCAN_STAGE_TIMEOUT_MS: Partial<Record<WatchScanStage, number>> = {
   detect_items: 75000,
+  extract_context: 20000,
+  draft_reply: 20000
+};
+
+const SLACK_SCAN_STAGE_TIMEOUT_MS: Partial<Record<WatchScanStage, number>> = {
+  detect_items: 60000,
+  extract_context: 20000,
+  draft_reply: 20000
+};
+
+const OUTLOOK_SCAN_STAGE_TIMEOUT_MS: Partial<Record<WatchScanStage, number>> = {
+  observe_inbox: 12000,
+  detect_items: 90000,
   extract_context: 20000,
   draft_reply: 20000
 };
@@ -313,6 +505,84 @@ function buildReplyPreview(value: unknown, maxLength = 48): string | null {
   return normalized.slice(0, maxLength);
 }
 
+function buildReplyMidPreview(value: unknown, maxLength = 48): string | null {
+  const normalized = String(value ?? "")
+    .replace(/\s+/gu, " ")
+    .trim();
+  if (!normalized) {
+    return null;
+  }
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+  const start = Math.max(0, Math.floor((normalized.length - maxLength) / 2));
+  return normalized.slice(start, start + maxLength).trim() || null;
+}
+
+function buildReplyTailPreview(value: unknown, maxLength = 48): string | null {
+  const normalized = String(value ?? "")
+    .replace(/\s+/gu, " ")
+    .trim();
+  if (!normalized) {
+    return null;
+  }
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+  return normalized.slice(-maxLength).trim() || null;
+}
+
+function buildReplySuffixPreview(value: unknown, maxLength = 14): string | null {
+  const normalized = String(value ?? "")
+    .replace(/\s+/gu, " ")
+    .trim();
+  if (!normalized) {
+    return null;
+  }
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+  return normalized.slice(-maxLength).trim() || null;
+}
+
+function collectUnresolvedTemplateTokens(value: unknown, found = new Set<string>()): Set<string> {
+  if (typeof value === "string") {
+    for (const match of value.matchAll(/\{\{([a-zA-Z0-9_]+)\}\}/gu)) {
+      const token = String(match[1] ?? "").trim();
+      if (token) {
+        found.add(token);
+      }
+    }
+    return found;
+  }
+
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      collectUnresolvedTemplateTokens(entry, found);
+    }
+    return found;
+  }
+
+  if (value && typeof value === "object") {
+    for (const entry of Object.values(value)) {
+      collectUnresolvedTemplateTokens(entry, found);
+    }
+  }
+
+  return found;
+}
+
+function assertTaskSpecTemplatesResolved(taskSpec: TaskSpec): void {
+  const unresolved = collectUnresolvedTemplateTokens(taskSpec.steps ?? []);
+  if (!unresolved.size) {
+    return;
+  }
+
+  throw new UnresolvedTaskTemplateError(
+    `Task spec still contains unresolved template inputs: ${Array.from(unresolved).sort().join(", ")}`
+  );
+}
+
 export class WatchExecutionService {
   controlPlane: WatchExecutionServiceOptions["controlPlane"];
   store: WatchExecutionServiceOptions["store"];
@@ -337,11 +607,48 @@ export class WatchExecutionService {
     };
   }
 
-  scanStageTimeoutForRule(rule: WatchRule, stage: WatchScanStage): number {
-    if (rule.livePack === "wechat-desktop") {
-      return WECHAT_SCAN_STAGE_TIMEOUT_MS[stage] ?? this.scanStageTimeoutMs[stage];
+  createModelBudget(rule: WatchRule) {
+    if (typeof this.controlPlane.modelClient.createUsageBudget === "function") {
+      return this.controlPlane.modelClient.createUsageBudget({
+        id: `watch:${rule.id}:${Date.now()}`,
+        maxRequests: modelRequestBudgetForRule(rule)
+      });
     }
-    return this.scanStageTimeoutMs[stage];
+
+    return {
+      id: `watch:${rule.id}:${Date.now()}`,
+      maxRequests: modelRequestBudgetForRule(rule),
+      status: "ok" as RunBudgetStatus,
+      usage: usageSummaryFromBudget(null)
+    };
+  }
+
+  async runWithModelBudget<TResult>(
+    budget: ModelUsageBudget,
+    work: () => Promise<TResult>
+  ): Promise<TResult> {
+    if (typeof this.controlPlane.modelClient.runWithUsageBudget === "function") {
+      return this.controlPlane.modelClient.runWithUsageBudget(budget, work);
+    }
+
+    return work();
+  }
+
+  scanStageTimeoutForRule(rule: WatchRule, stage: WatchScanStage): number {
+    const modelTimeoutMs = Number(this.controlPlane.modelClient?.config?.timeoutMs ?? 0);
+    const draftReplyFloorMs =
+      stage === "draft_reply" && modelTimeoutMs > 0 ? modelTimeoutMs + 5000 : 0;
+
+    if (rule.livePack === "wechat-desktop") {
+      return Math.max(WECHAT_SCAN_STAGE_TIMEOUT_MS[stage] ?? this.scanStageTimeoutMs[stage], draftReplyFloorMs);
+    }
+    if (rule.livePack === "slack-desktop") {
+      return Math.max(SLACK_SCAN_STAGE_TIMEOUT_MS[stage] ?? this.scanStageTimeoutMs[stage], draftReplyFloorMs);
+    }
+    if (rule.livePack === "outlook-desktop") {
+      return Math.max(OUTLOOK_SCAN_STAGE_TIMEOUT_MS[stage] ?? this.scanStageTimeoutMs[stage], draftReplyFloorMs);
+    }
+    return Math.max(this.scanStageTimeoutMs[stage], draftReplyFloorMs);
   }
 
   beginScanStage(rule: WatchRule, stage: WatchScanStage): WatchRule {
@@ -380,9 +687,13 @@ export class WatchExecutionService {
     overrides: Record<string, unknown> = {}
   ): TaskSpec {
     const detected = detection;
+    const overrideInputs = Object.fromEntries(
+      Object.entries(overrides).filter(([key]) => key !== "replyText")
+    );
     const runtimeInputs: Record<string, unknown> = {
       ...(watchRule.taskInputs ?? {}),
       ...(detected.inputs ?? {}),
+      ...overrideInputs,
       watchRuleId: watchRule.id,
       watchSummary: detected.summary ?? null,
       ...(watchRule.preferredSurface === "desktop" && watchRule.appTarget ? { desktopApp: watchRule.appTarget } : {}),
@@ -392,6 +703,18 @@ export class WatchExecutionService {
     const replyPreview = buildReplyPreview(runtimeInputs.typeText);
     if (replyPreview && runtimeInputs.typeTextPreview == null) {
       runtimeInputs.typeTextPreview = replyPreview;
+    }
+    const replyMidPreview = buildReplyMidPreview(runtimeInputs.typeText);
+    if (replyMidPreview && runtimeInputs.typeTextMiddlePreview == null) {
+      runtimeInputs.typeTextMiddlePreview = replyMidPreview;
+    }
+    const replyTailPreview = buildReplyTailPreview(runtimeInputs.typeText);
+    if (replyTailPreview && runtimeInputs.typeTextTailPreview == null) {
+      runtimeInputs.typeTextTailPreview = replyTailPreview;
+    }
+    const replySuffixPreview = buildReplySuffixPreview(runtimeInputs.typeText);
+    if (replySuffixPreview && runtimeInputs.typeTextSuffixPreview == null) {
+      runtimeInputs.typeTextSuffixPreview = replySuffixPreview;
     }
     const actionTemplate =
       !watchRule.skillName && watchRule.watchProfile?.actionTemplate?.length
@@ -418,6 +741,7 @@ export class WatchExecutionService {
     } satisfies TaskSpec;
     const explicitTaskSpec = detected.taskSpec ?? null;
     if (!explicitTaskSpec) {
+      assertTaskSpecTemplatesResolved(baseTaskSpec);
       return baseTaskSpec;
     }
 
@@ -431,7 +755,7 @@ export class WatchExecutionService {
       explicitTaskSpec.executionMode ??
       (filteredExplicitSteps?.length ? "planned" : baseTaskSpec.executionMode);
 
-    return {
+    const resolvedTaskSpec = {
       ...baseTaskSpec,
       ...explicitTaskSpec,
       inputs: {
@@ -441,6 +765,8 @@ export class WatchExecutionService {
       steps: filteredExplicitSteps,
       executionMode: resolvedExecutionMode
     };
+    assertTaskSpecTemplatesResolved(resolvedTaskSpec);
+    return resolvedTaskSpec;
   }
 
   async draftReply({
@@ -471,7 +797,10 @@ export class WatchExecutionService {
 
     const summary = String(detection?.summary ?? "").trim();
     const context = Array.isArray(detection?.context) ? detection.context : [];
-    const chinese = /[\u4e00-\u9fff]/u.test(`${watchRule.goal} ${summary} ${context.join(" ")}`);
+    const replyLanguageHint = inferReplyLanguage({ summary, context });
+    const chinese =
+      replyLanguageHint === "zh"
+      || (replyLanguageHint === null && /[\u4e00-\u9fff]/u.test(`${watchRule.goal} ${summary} ${context.join(" ")}`));
     return {
       replyText: chinese ? "收到，我会尽快处理。" : "Got it. I will follow up shortly.",
       metadata: {
@@ -538,7 +867,7 @@ export class WatchExecutionService {
       return;
     }
 
-    const cleanedDedupeState = clearExpiredReplyApprovalGrant(rule.dedupeState ?? {});
+    const cleanedDedupeState = clearExpiredSurfaceHealthState(clearExpiredReplyApprovalGrant(rule.dedupeState ?? {}));
     const grantStateChanged = JSON.stringify(cleanedDedupeState) !== JSON.stringify(rule.dedupeState ?? {});
     const hydratedRule = grantStateChanged
       ? this.store.putWatchRule({
@@ -556,6 +885,10 @@ export class WatchExecutionService {
       return;
     }
 
+    if (surfaceHealthCooldownActive(activeRule.dedupeState ?? {})) {
+      return;
+    }
+
     const pack = this.livePackRegistry.get(activeRule.livePack);
     if (!pack) {
       const degraded = this.store.putWatchRule({
@@ -566,6 +899,13 @@ export class WatchExecutionService {
       this.eventBus.broadcast("watch.updated", this.controlPlane.watchService.decorate(degraded));
       return;
     }
+
+    const modelBudget = this.createModelBudget(activeRule);
+    let workspace: WorkspaceProfile | null = null;
+    const collectArtifactUsage = async (): Promise<ArtifactUsage | null> =>
+      workspace && this.controlPlane.artifactStore && typeof this.controlPlane.artifactStore.getUsage === "function"
+        ? this.controlPlane.artifactStore.getUsage(workspace)
+        : null;
 
     try {
       const activeTaskId = String(activeRule.dedupeState?.activeTaskId ?? "") || null;
@@ -691,7 +1031,6 @@ export class WatchExecutionService {
 
       const workspaceName = activeRule.workspaceName ?? `${activeRule.livePack}-live`;
       currentScanStage = "prepare_workspace";
-      let workspace: Awaited<ReturnType<typeof this.controlPlane.workspaceManager.prepareProfile>>;
       [activeRule, workspace] = await this.runScanStage(activeRule, currentScanStage, async () =>
         this.controlPlane.workspaceManager.prepareProfile(workspaceName, {
           purpose: "live-watch",
@@ -699,6 +1038,42 @@ export class WatchExecutionService {
           appTarget: activeRule.appTarget ?? null
         })
       );
+
+      const storageGuard = await collectStorageGuardStatus(workspace);
+      if (storageGuard?.active) {
+        const retryAt = Date.now() + STORAGE_GUARD_BACKOFF_MS;
+        const artifactUsage = await collectArtifactUsage();
+        const dedupeState = recordUsageMetadata(
+          {
+            ...(activeRule.dedupeState ?? {}),
+            retryAfter: retryAt,
+            backoffMs: STORAGE_GUARD_BACKOFF_MS,
+            storageGuard
+          },
+          {
+            status: "paused",
+            usage: this.controlPlane.modelClient.usageSummary(modelBudget)
+          },
+          artifactUsage
+        );
+        activeRule = this.store.putWatchRule({
+          ...activeRule,
+          lastObservedAt: nowIso(),
+          lastError: `storage_guard_triggered: disk used ${storageGuard.usedPercent ?? "unknown"}% above maximum ${storageGuard.maximumUsedPercent}%`,
+          status: "backoff",
+          dedupeState
+        });
+        this.eventBus.broadcast("watch.updated", this.controlPlane.watchService.decorate(activeRule));
+        this.eventBus.broadcast("watch.backoff", {
+          rule: activeRule,
+          backoffMs: STORAGE_GUARD_BACKOFF_MS
+        });
+        this.eventBus.broadcast("watch.error", {
+          rule: activeRule,
+          error: activeRule.lastError
+        });
+        return;
+      }
 
       currentScanStage = "activate_pack";
       [activeRule] = await this.runScanStage(activeRule, currentScanStage, async () => {
@@ -727,14 +1102,16 @@ export class WatchExecutionService {
       currentScanStage = "detect_items";
       let detection: WatchDetection | null;
       [activeRule, detection] = await this.runScanStage(activeRule, currentScanStage, async () =>
-        pack.detectNewItems?.({
-          rule: activeRule,
-          worldState,
-          dedupeState: activeRule.dedupeState ?? {},
-          workspace,
-          surfaceRegistry: this.controlPlane.surfaceRegistry,
-          controlPlane: this.controlPlane
-        }) ?? null
+        this.runWithModelBudget(modelBudget, async () =>
+          pack.detectNewItems?.({
+            rule: activeRule,
+            worldState,
+            dedupeState: activeRule.dedupeState ?? {},
+            workspace,
+            surfaceRegistry: this.controlPlane.surfaceRegistry,
+            controlPlane: this.controlPlane
+          }) ?? null
+        )
       );
       if (!detection) {
         noTriggerReason = "no_detection";
@@ -744,14 +1121,16 @@ export class WatchExecutionService {
         currentScanStage = "extract_context";
         let context: Awaited<ReturnType<NonNullable<typeof pack.extractContext>>>;
         [activeRule, context] = await this.runScanStage(activeRule, currentScanStage, async () =>
-          pack.extractContext?.({
-            rule: activeRule,
-            detection,
-            worldState,
-            workspace,
-            controlPlane: this.controlPlane,
-            surfaceRegistry: this.controlPlane.surfaceRegistry
-          }) ?? null
+          this.runWithModelBudget(modelBudget, async () =>
+            pack.extractContext?.({
+              rule: activeRule,
+              detection,
+              worldState,
+              workspace,
+              controlPlane: this.controlPlane,
+              surfaceRegistry: this.controlPlane.surfaceRegistry
+            }) ?? null
+          )
         );
         if (!context) {
           noTriggerReason = "extract_context_empty";
@@ -781,26 +1160,49 @@ export class WatchExecutionService {
       }
 
       if (!detection) {
-        const noTriggerDebug = await this.buildNoTriggerDebug(
-          activeRule,
-          worldState,
-          noTriggerReason ?? "no_detection",
-          currentScanStage
+        const noTriggerDebug = await this.runWithModelBudget(modelBudget, async () =>
+          this.buildNoTriggerDebug(
+            activeRule,
+            worldState,
+            noTriggerReason ?? "no_detection",
+            currentScanStage
+          )
         );
         const resetDedupeState = clearWatchFailureState({
           ...(activeRule.dedupeState ?? {}),
           failureCount: 0,
           activeTaskId: null
         });
+        const repeatedNoTriggerCount = nextRepeatedNoTriggerCount(activeRule.dedupeState ?? {}, {
+          reason: String(noTriggerDebug.lastNoTriggerReason ?? noTriggerReason ?? "no_detection"),
+          scene: String(noTriggerDebug.lastNoTriggerScene ?? "").trim() || null,
+          selectedTarget: String(noTriggerDebug.lastNoTriggerSelectedTarget ?? "").trim() || null
+        });
+        const artifactUsage = await collectArtifactUsage();
+        let dedupeState = recordUsageMetadata({
+          ...resetDedupeState,
+          ...noTriggerDebug,
+          repeatedNoTriggerCount
+        }, modelBudget, artifactUsage);
+        if (desktopCooldownEligible(activeRule) && repeatedNoTriggerCount >= REPEATED_NO_TRIGGER_COOLDOWN_THRESHOLD) {
+          const cooldownUntil = Date.now() + DESKTOP_SURFACE_COOLDOWN_MS;
+          dedupeState = recordSurfaceHealth(dedupeState, {
+            state: "cooldown",
+            cooldownUntil
+          });
+          dedupeState.retryAfter = cooldownUntil;
+          dedupeState.backoffMs = DESKTOP_SURFACE_COOLDOWN_MS;
+        } else if (isDesktopSurfaceRule(activeRule)) {
+          dedupeState = recordSurfaceHealth(dedupeState, {
+            state: "healthy"
+          });
+        }
         const updated = this.store.putWatchRule({
           ...activeRule,
           lastObservedAt: nowIso(),
           lastError: null,
           status: "watching",
-          dedupeState: this.finishScanState(activeRule, {
-            ...resetDedupeState,
-            ...noTriggerDebug
-          })
+          dedupeState: this.finishScanState(activeRule, dedupeState)
         });
         this.eventBus.broadcast("watch.updated", this.controlPlane.watchService.decorate(updated));
         return;
@@ -810,12 +1212,13 @@ export class WatchExecutionService {
       const manualInterventionDetail = String(detection.metadata?.manualInterventionDetail ?? "").trim();
       const manualInterventionAction = String(detection.metadata?.manualInterventionAction ?? "").trim();
       if (detection.metadata?.requiresManualIntervention) {
+        const artifactUsage = await collectArtifactUsage();
         const updated = this.store.putWatchRule({
           ...activeRule,
           lastObservedAt: nowIso(),
           lastError: manualInterventionDetail || detection.summary || "manual intervention required",
           status: "degraded",
-          dedupeState: this.finishScanState(activeRule, {
+          dedupeState: this.finishScanState(activeRule, recordUsageMetadata({
             ...clearWatchFailureState({
               ...(activeRule.dedupeState ?? {}),
               lastFingerprint: detection.fingerprint ?? detection.summary ?? null,
@@ -827,7 +1230,7 @@ export class WatchExecutionService {
             attentionKind: manualInterventionKind,
             attentionDetail: manualInterventionDetail || null,
             attentionAction: manualInterventionAction || null
-          })
+          }, modelBudget, artifactUsage))
         });
         this.eventBus.broadcast("watch.updated", this.controlPlane.watchService.decorate(updated));
         this.eventBus.broadcast("watch.blocked", {
@@ -853,11 +1256,13 @@ export class WatchExecutionService {
       if (shouldDraftReply(activeRule, detection)) {
         currentScanStage = "draft_reply";
         [activeRule, replyDraft] = await this.runScanStage(activeRule, currentScanStage, async () =>
-          this.draftReply({
-            watchRule: activeRule,
-            detection,
-            pack
-          })
+          this.runWithModelBudget(modelBudget, async () =>
+            this.draftReply({
+              watchRule: activeRule,
+              detection,
+              pack
+            })
+          )
         );
       }
       const sendTaskSpec = this.buildTaskSpecFromWatchRule(activeRule, detection, {
@@ -883,12 +1288,13 @@ export class WatchExecutionService {
       const governance = watchGovernance(activeRule);
 
       if (automation.action !== "block" && withinCooldown(activeRule, governance)) {
+        const artifactUsage = await collectArtifactUsage();
         const updated = this.store.putWatchRule({
           ...activeRule,
           lastObservedAt: observedAt,
           lastError: null,
           status: "watching",
-          dedupeState: this.finishScanState(activeRule, observedDedupeState)
+          dedupeState: this.finishScanState(activeRule, recordUsageMetadata(observedDedupeState, modelBudget, artifactUsage))
         });
         this.eventBus.broadcast("watch.skipped", {
           rule: updated,
@@ -919,19 +1325,20 @@ export class WatchExecutionService {
       }
 
       if (governedAutomation.action === "block") {
+        const artifactUsage = await collectArtifactUsage();
         const updated = this.store.putWatchRule({
           ...activeRule,
           lastObservedAt: observedAt,
           lastError: governedAutomation.reasons.join("; ") || "automation blocked",
           status: "degraded",
-          dedupeState: this.finishScanState(activeRule, clearWatchFailureState({
+          dedupeState: this.finishScanState(activeRule, recordUsageMetadata(clearWatchFailureState({
             ...observedDedupeState,
             lastFingerprint: detection.fingerprint ?? detection.summary ?? null,
             lastSummary: detection.summary ?? null,
             lastContext: detection.context ?? [],
             activeTaskId: null,
             activeDraftId: null
-          }))
+          }), modelBudget, artifactUsage))
         });
         this.eventBus.broadcast("watch.updated", this.controlPlane.watchService.decorate(updated));
         this.eventBus.broadcast("watch.blocked", {
@@ -980,13 +1387,14 @@ export class WatchExecutionService {
             updatedAt: observedAt
           });
         }
+        const artifactUsage = await collectArtifactUsage();
         const updated = this.store.putWatchRule({
           ...activeRule,
           lastObservedAt: observedAt,
           lastTriggeredAt: observedAt,
           lastError: null,
           status: "awaiting_approval",
-          dedupeState: this.finishScanState(activeRule, dedupeState)
+          dedupeState: this.finishScanState(activeRule, recordUsageMetadata(dedupeState, modelBudget, artifactUsage))
         });
         this.eventBus.broadcast("watch.drafted", {
           rule: updated,
@@ -1023,13 +1431,14 @@ export class WatchExecutionService {
           dispatchedAt: observedAt
         });
       }
+      const artifactUsage = await collectArtifactUsage();
       const updated = this.store.putWatchRule({
         ...activeRule,
         lastObservedAt: observedAt,
         lastTriggeredAt: observedAt,
         lastError: null,
         status: "watching",
-        dedupeState: this.finishScanState(activeRule, dedupeState)
+        dedupeState: this.finishScanState(activeRule, recordUsageMetadata(dedupeState, modelBudget, artifactUsage))
       });
       this.eventBus.broadcast("watch.triggered", {
         rule: updated,
@@ -1069,10 +1478,30 @@ export class WatchExecutionService {
           cooldownUntil: retryAt
         });
       }
+      const artifactUsage = await collectArtifactUsage();
+      dedupeState = recordUsageMetadata(dedupeState, modelBudget, artifactUsage);
+      if (desktopCooldownEligible(current ?? rule) && failureCount >= REPEATED_NO_TRIGGER_COOLDOWN_THRESHOLD) {
+        const cooldownUntil = Date.now() + DESKTOP_SURFACE_COOLDOWN_MS;
+        dedupeState = recordSurfaceHealth(dedupeState, {
+          state: "cooldown",
+          cooldownUntil
+        });
+        dedupeState.retryAfter = cooldownUntil;
+        dedupeState.backoffMs = DESKTOP_SURFACE_COOLDOWN_MS;
+      } else if (isDesktopSurfaceRule(current ?? rule)) {
+        dedupeState = recordSurfaceHealth(dedupeState, {
+          state: "healthy"
+        });
+      }
       const updated = this.store.putWatchRule({
         ...(current ?? rule),
         lastObservedAt: nowIso(),
-        lastError: error instanceof Error ? error.message : String(error),
+        lastError:
+          error instanceof ModelBudgetExceededError
+            ? `Model request budget exceeded after ${error.budget.usage.requestCount} request(s)`
+            : error instanceof Error
+              ? error.message
+              : String(error),
         status: failureCount >= maxConsecutiveFailures ? "degraded" : "backoff",
         dedupeState
       });

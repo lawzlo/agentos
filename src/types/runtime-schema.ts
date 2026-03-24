@@ -258,6 +258,12 @@ export interface WatchHealth {
   selectedTarget?: string | null;
   lastSkipReasons?: string[];
   lastRecoveryAction?: SurfaceRecoveryAction | null;
+  surfaceHealth?: SurfaceHealthState | null;
+  surfaceHealthCooldownUntil?: string | null;
+  budgetStatus?: RunBudgetStatus | null;
+  usageSummary?: UsageSummary | null;
+  artifactUsage?: ArtifactUsage | null;
+  storageGuard?: StorageGuardStatus | null;
 }
 
 export type SurfaceRunnerType = "browser_native" | "desktop_ax" | "desktop_vlm";
@@ -265,6 +271,33 @@ export type SurfaceRunnerType = "browser_native" | "desktop_ax" | "desktop_vlm";
 export type SceneType = "list" | "thread" | "foreign_view" | "signin" | "verification" | "unknown";
 
 export type SurfaceRecoveryAction = "recover_to_list" | "complete_signin" | "complete_verification" | "takeover" | "none";
+
+export type SurfaceHealthState = "healthy" | "cooldown" | "unsupported" | "setup_required";
+
+export type RunBudgetStatus = "ok" | "exceeded" | "paused";
+
+export interface UsageSummary {
+  requestCount: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  estimatedCostUsd: number | null;
+}
+
+export interface ArtifactUsage {
+  workspaceArtifactBytes: number;
+  workspaceArtifactLimitBytes: number;
+  globalArtifactBytes: number | null;
+  globalArtifactLimitBytes: number | null;
+  prunedFiles: number;
+}
+
+export interface StorageGuardStatus {
+  active: boolean;
+  freeBytes: number | null;
+  usedPercent: number | null;
+  maximumUsedPercent: number;
+}
 
 export interface ConversationThreadState {
   threadKey: string;
@@ -495,6 +528,7 @@ export interface LivePackInfo {
   capabilities: LivePackCapability[];
   defaultReplyPolicy: Exclude<ReplyPolicyMode, "pack_default">;
   description: string;
+  minimumLicenseTier?: "free" | "pro" | null;
   ready?: boolean;
   healthChecks?: LivePackHealthCheck[];
 }

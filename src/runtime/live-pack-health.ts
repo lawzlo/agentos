@@ -1,18 +1,29 @@
 import type { AgentOsConfig } from "../config.js";
 import type { LivePackHealthCheck, LivePackInfo } from "../types/runtime-schema.js";
-import type { NativeDiagnostics } from "../types/system.js";
+import type { LicenseState, NativeDiagnostics } from "../types/system.js";
 
 export function withLivePackHealth(
   pack: LivePackInfo,
   {
     config,
-    native
+    native,
+    license
   }: {
     config: Pick<AgentOsConfig, "browserExecutable">;
     native: NativeDiagnostics;
+    license: LicenseState;
   }
 ): LivePackInfo {
   const healthChecks: LivePackHealthCheck[] = [];
+
+  if ((pack.minimumLicenseTier ?? "free") === "pro" && !license.capabilities.premiumPacksEnabled) {
+    healthChecks.push({
+      id: "license-tier",
+      label: "License tier",
+      status: "blocked",
+      detail: `${pack.name} requires AgentOS Pro.`
+    });
+  }
 
   if (pack.surface === "browser") {
     healthChecks.push(

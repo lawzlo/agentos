@@ -14,7 +14,10 @@ test("resolveConfig uses precedence between environment and explicit overrides",
     AGENTOS_DATA_DIR: process.env.AGENTOS_DATA_DIR,
     AGENTOS_HEADLESS: process.env.AGENTOS_HEADLESS,
     AGENTOS_LEARNING_ENABLED: process.env.AGENTOS_LEARNING_ENABLED,
-    MODEL_TIMEOUT_MS: process.env.MODEL_TIMEOUT_MS
+    MODEL_TIMEOUT_MS: process.env.MODEL_TIMEOUT_MS,
+    AGENTOS_LICENSE_BASE_URL: process.env.AGENTOS_LICENSE_BASE_URL,
+    AGENTOS_LICENSE_OFFLINE_GRACE_DAYS: process.env.AGENTOS_LICENSE_OFFLINE_GRACE_DAYS,
+    AGENTOS_LICENSE_ENFORCE_IN_SOURCE: process.env.AGENTOS_LICENSE_ENFORCE_IN_SOURCE
   };
 
   process.env.AGENTOS_DATA_DIR = path.join(dataRoot, "from-env");
@@ -22,6 +25,9 @@ test("resolveConfig uses precedence between environment and explicit overrides",
   process.env.AGENTOS_LEARNING_ENABLED = "false";
   process.env.MODEL_TIMEOUT_MS = "12000";
   process.env.AGENTOS_BROWSER_EXECUTABLE = browserBinary;
+  process.env.AGENTOS_LICENSE_BASE_URL = "https://license.agentos.local";
+  process.env.AGENTOS_LICENSE_OFFLINE_GRACE_DAYS = "21";
+  process.env.AGENTOS_LICENSE_ENFORCE_IN_SOURCE = "1";
 
   try {
     const config = resolveConfig({
@@ -47,6 +53,10 @@ test("resolveConfig uses precedence between environment and explicit overrides",
     assert.equal(config.learning.maxDepth, 9);
     assert.equal(config.model.baseUrl, "https://model.local");
     assert.equal(config.model.timeoutMs, 3000);
+    assert.equal(config.license.baseUrl, "https://license.agentos.local");
+    assert.equal(config.license.offlineGraceDays, 21);
+    assert.equal(config.license.enforceInSource, true);
+    assert.equal(config.license.sourceCheckoutTier, "pro");
     assert.equal(config.dbPath, path.join(config.dataDir, "agentos.sqlite"));
     assert.equal(config.masterKeyPath, path.join(config.dataDir, "master.key"));
     assert.equal(config.inboxDir, path.join(config.dataDir, "inbox"));
@@ -70,6 +80,21 @@ test("resolveConfig uses precedence between environment and explicit overrides",
       delete process.env.MODEL_TIMEOUT_MS;
     } else {
       process.env.MODEL_TIMEOUT_MS = previousValues.MODEL_TIMEOUT_MS;
+    }
+    if (previousValues.AGENTOS_LICENSE_BASE_URL === undefined) {
+      delete process.env.AGENTOS_LICENSE_BASE_URL;
+    } else {
+      process.env.AGENTOS_LICENSE_BASE_URL = previousValues.AGENTOS_LICENSE_BASE_URL;
+    }
+    if (previousValues.AGENTOS_LICENSE_OFFLINE_GRACE_DAYS === undefined) {
+      delete process.env.AGENTOS_LICENSE_OFFLINE_GRACE_DAYS;
+    } else {
+      process.env.AGENTOS_LICENSE_OFFLINE_GRACE_DAYS = previousValues.AGENTOS_LICENSE_OFFLINE_GRACE_DAYS;
+    }
+    if (previousValues.AGENTOS_LICENSE_ENFORCE_IN_SOURCE === undefined) {
+      delete process.env.AGENTOS_LICENSE_ENFORCE_IN_SOURCE;
+    } else {
+      process.env.AGENTOS_LICENSE_ENFORCE_IN_SOURCE = previousValues.AGENTOS_LICENSE_ENFORCE_IN_SOURCE;
     }
     delete process.env.AGENTOS_BROWSER_EXECUTABLE;
   }
@@ -137,4 +162,24 @@ test("resolveConfig reads saved model config from the data directory", async () 
   assert.equal(config.model.apiKey, "sk-ant-test");
   assert.equal(config.model.name, "claude-sonnet-4-5");
   assert.equal(config.model.baseUrl, "https://api.anthropic.com");
+});
+
+test("resolveConfig supports the claude_code_cli provider without API credentials", async () => {
+  const dataDir = await createTempDir("agentos-config-claude-code-");
+  await fs.writeFile(
+    path.join(dataDir, "model-config.json"),
+    JSON.stringify({
+      provider: "claude_code_cli",
+      tier: "balanced",
+      name: "sonnet"
+    }),
+    "utf8"
+  );
+
+  const config = resolveConfig({ dataDir });
+  assert.equal(config.model.provider, "claude_code_cli");
+  assert.equal(config.model.tier, "balanced");
+  assert.equal(config.model.name, "sonnet");
+  assert.equal(config.model.apiKey, undefined);
+  assert.equal(config.model.baseUrl, undefined);
 });

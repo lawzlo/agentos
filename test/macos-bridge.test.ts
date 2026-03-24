@@ -7,6 +7,8 @@ import { createTempDir } from "./helpers.js";
 import { MacOSHostBridge } from "../src/runtime/host-bridges/macos-bridge.js";
 
 const isMac = process.platform === "darwin";
+const ONE_BY_ONE_PNG_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wn8n1sAAAAASUVORK5CYII=";
 
 test("macOS host bridge delegates desktop methods to the sidecar", { skip: !isMac }, async () => {
   const tempDir = await createTempDir("agentos-bridge-");
@@ -249,6 +251,247 @@ rl.on("line", (line) => {
     const frontmost = await bridge.getFrontmostApp() as Record<string, unknown>;
     assert.equal(typeof frontmost.appName, "string");
     assert.notEqual(String(frontmost.appName ?? "").trim(), "");
+    await bridge.shutdown();
+  } finally {
+    if (previousSidecar === undefined) {
+      delete process.env.AGENTOS_NATIVE_SIDECAR;
+    } else {
+      process.env.AGENTOS_NATIVE_SIDECAR = previousSidecar;
+    }
+    if (previousDisable === undefined) {
+      delete process.env.AGENTOS_DISABLE_RUST_SIDECAR;
+    } else {
+      process.env.AGENTOS_DISABLE_RUST_SIDECAR = previousDisable;
+    }
+  }
+});
+
+test("macOS host bridge falls back when the sidecar returns an empty frontmost app", { skip: !isMac }, async () => {
+  const tempDir = await createTempDir("agentos-sidecar-empty-frontmost-");
+  const sidecarPath = path.join(tempDir, "empty-frontmost-sidecar.mjs");
+  const previousSidecar = process.env.AGENTOS_NATIVE_SIDECAR;
+  const previousDisable = process.env.AGENTOS_DISABLE_RUST_SIDECAR;
+
+  await fs.writeFile(
+    sidecarPath,
+    `#!/usr/bin/env node
+import readline from "node:readline";
+const rl = readline.createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+  const request = JSON.parse(line);
+  if (request.method === "frontmost_app") {
+    process.stdout.write(JSON.stringify({ id: request.id, ok: true, result: { appName: "", bundleIdentifier: "" } }) + "\\n");
+    return;
+  }
+  process.stdout.write(JSON.stringify({ id: request.id, ok: true, result: { ok: true } }) + "\\n");
+});`,
+    "utf8"
+  );
+  await fs.chmod(sidecarPath, 0o755);
+
+  process.env.AGENTOS_NATIVE_SIDECAR = sidecarPath;
+  delete process.env.AGENTOS_DISABLE_RUST_SIDECAR;
+
+  try {
+    const bridge = new MacOSHostBridge({
+      dataDir: tempDir
+    });
+    const frontmost = await bridge.getFrontmostApp() as Record<string, unknown>;
+    assert.equal(typeof frontmost.appName, "string");
+    assert.notEqual(String(frontmost.appName ?? "").trim(), "");
+    await bridge.shutdown();
+  } finally {
+    if (previousSidecar === undefined) {
+      delete process.env.AGENTOS_NATIVE_SIDECAR;
+    } else {
+      process.env.AGENTOS_NATIVE_SIDECAR = previousSidecar;
+    }
+    if (previousDisable === undefined) {
+      delete process.env.AGENTOS_DISABLE_RUST_SIDECAR;
+    } else {
+      process.env.AGENTOS_DISABLE_RUST_SIDECAR = previousDisable;
+    }
+  }
+});
+
+test("macOS host bridge falls back to the first window owner when the sidecar reports loginwindow", { skip: !isMac }, async () => {
+  const tempDir = await createTempDir("agentos-sidecar-loginwindow-frontmost-");
+  const sidecarPath = path.join(tempDir, "loginwindow-frontmost-sidecar.mjs");
+  const previousSidecar = process.env.AGENTOS_NATIVE_SIDECAR;
+  const previousDisable = process.env.AGENTOS_DISABLE_RUST_SIDECAR;
+
+  await fs.writeFile(
+    sidecarPath,
+    `#!/usr/bin/env node
+import readline from "node:readline";
+const rl = readline.createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+  const request = JSON.parse(line);
+  if (request.method === "frontmost_app") {
+    process.stdout.write(JSON.stringify({ id: request.id, ok: true, result: { appName: "loginwindow", bundleIdentifier: "com.apple.loginwindow" } }) + "\\n");
+    return;
+  }
+  if (request.method === "list_windows") {
+    process.stdout.write(JSON.stringify({ id: request.id, ok: true, result: { windows: [{ ownerName: "Microsoft Outlook", windowName: "Inbox", ownerPID: 99, windowNumber: 1, layer: 0, alpha: 1, bounds: { x: 1, y: 2, width: 3, height: 4, centerX: 2.5, centerY: 4 } }] } }) + "\\n");
+    return;
+  }
+  process.stdout.write(JSON.stringify({ id: request.id, ok: true, result: { ok: true } }) + "\\n");
+});`,
+    "utf8"
+  );
+  await fs.chmod(sidecarPath, 0o755);
+
+  process.env.AGENTOS_NATIVE_SIDECAR = sidecarPath;
+  delete process.env.AGENTOS_DISABLE_RUST_SIDECAR;
+
+  try {
+    const bridge = new MacOSHostBridge({
+      dataDir: tempDir
+    });
+    const frontmost = await bridge.getFrontmostApp() as Record<string, unknown>;
+    assert.equal(frontmost.appName, "Microsoft Outlook");
+    await bridge.shutdown();
+  } finally {
+    if (previousSidecar === undefined) {
+      delete process.env.AGENTOS_NATIVE_SIDECAR;
+    } else {
+      process.env.AGENTOS_NATIVE_SIDECAR = previousSidecar;
+    }
+    if (previousDisable === undefined) {
+      delete process.env.AGENTOS_DISABLE_RUST_SIDECAR;
+    } else {
+      process.env.AGENTOS_DISABLE_RUST_SIDECAR = previousDisable;
+    }
+  }
+});
+
+test("macOS host bridge falls back when the sidecar returns no windows", { skip: !isMac }, async () => {
+  const tempDir = await createTempDir("agentos-sidecar-empty-windows-");
+  const sidecarPath = path.join(tempDir, "empty-windows-sidecar.mjs");
+  const previousSidecar = process.env.AGENTOS_NATIVE_SIDECAR;
+  const previousDisable = process.env.AGENTOS_DISABLE_RUST_SIDECAR;
+
+  await fs.writeFile(
+    sidecarPath,
+    `#!/usr/bin/env node
+import readline from "node:readline";
+const rl = readline.createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+  const request = JSON.parse(line);
+  if (request.method === "list_windows") {
+    process.stdout.write(JSON.stringify({ id: request.id, ok: true, result: { windows: [] } }) + "\\n");
+    return;
+  }
+  process.stdout.write(JSON.stringify({ id: request.id, ok: true, result: { ok: true } }) + "\\n");
+});`,
+    "utf8"
+  );
+  await fs.chmod(sidecarPath, 0o755);
+
+  process.env.AGENTOS_NATIVE_SIDECAR = sidecarPath;
+  delete process.env.AGENTOS_DISABLE_RUST_SIDECAR;
+
+  try {
+    const bridge = new MacOSHostBridge({
+      dataDir: tempDir
+    });
+    const windows = await bridge.listWindows();
+    assert.ok(Array.isArray(windows.windows));
+    assert.ok(windows.windows.length > 0);
+    assert.equal(typeof windows.windows[0]?.ownerName, "string");
+    await bridge.shutdown();
+  } finally {
+    if (previousSidecar === undefined) {
+      delete process.env.AGENTOS_NATIVE_SIDECAR;
+    } else {
+      process.env.AGENTOS_NATIVE_SIDECAR = previousSidecar;
+    }
+    if (previousDisable === undefined) {
+      delete process.env.AGENTOS_DISABLE_RUST_SIDECAR;
+    } else {
+      process.env.AGENTOS_DISABLE_RUST_SIDECAR = previousDisable;
+    }
+  }
+});
+
+test("macOS host bridge falls back when the sidecar errors on permissions status", { skip: !isMac }, async () => {
+  const tempDir = await createTempDir("agentos-sidecar-permissions-fallback-");
+  const sidecarPath = path.join(tempDir, "permissions-error-sidecar.mjs");
+  const previousSidecar = process.env.AGENTOS_NATIVE_SIDECAR;
+  const previousDisable = process.env.AGENTOS_DISABLE_RUST_SIDECAR;
+
+  await fs.writeFile(
+    sidecarPath,
+    `#!/usr/bin/env node
+import readline from "node:readline";
+const rl = readline.createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+  const request = JSON.parse(line);
+  if (request.method === "permissions_status") {
+    process.stdout.write(JSON.stringify({ id: request.id, ok: false, error: "boom" }) + "\\n");
+    return;
+  }
+  process.stdout.write(JSON.stringify({ id: request.id, ok: true, result: { ok: true } }) + "\\n");
+});`,
+    "utf8"
+  );
+  await fs.chmod(sidecarPath, 0o755);
+
+  process.env.AGENTOS_NATIVE_SIDECAR = sidecarPath;
+  delete process.env.AGENTOS_DISABLE_RUST_SIDECAR;
+
+  try {
+    const bridge = new MacOSHostBridge({ dataDir: tempDir });
+    const permissions = await bridge.getPermissionsStatus();
+    assert.equal(typeof permissions.accessibility, "boolean");
+    assert.equal(typeof permissions.screenRecording, "boolean");
+    await bridge.shutdown();
+  } finally {
+    if (previousSidecar === undefined) {
+      delete process.env.AGENTOS_NATIVE_SIDECAR;
+    } else {
+      process.env.AGENTOS_NATIVE_SIDECAR = previousSidecar;
+    }
+    if (previousDisable === undefined) {
+      delete process.env.AGENTOS_DISABLE_RUST_SIDECAR;
+    } else {
+      process.env.AGENTOS_DISABLE_RUST_SIDECAR = previousDisable;
+    }
+  }
+});
+
+test("macOS host bridge falls back when the sidecar errors on OCR", { skip: !isMac }, async () => {
+  const tempDir = await createTempDir("agentos-sidecar-ocr-fallback-");
+  const sidecarPath = path.join(tempDir, "ocr-error-sidecar.mjs");
+  const imagePath = path.join(tempDir, "tiny.png");
+  const previousSidecar = process.env.AGENTOS_NATIVE_SIDECAR;
+  const previousDisable = process.env.AGENTOS_DISABLE_RUST_SIDECAR;
+
+  await fs.writeFile(imagePath, Buffer.from(ONE_BY_ONE_PNG_BASE64, "base64"));
+  await fs.writeFile(
+    sidecarPath,
+    `#!/usr/bin/env node
+import readline from "node:readline";
+const rl = readline.createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+  const request = JSON.parse(line);
+  if (request.method === "ocr_image") {
+    process.stdout.write(JSON.stringify({ id: request.id, ok: false, error: "boom" }) + "\\n");
+    return;
+  }
+  process.stdout.write(JSON.stringify({ id: request.id, ok: true, result: { ok: true } }) + "\\n");
+});`,
+    "utf8"
+  );
+  await fs.chmod(sidecarPath, 0o755);
+
+  process.env.AGENTOS_NATIVE_SIDECAR = sidecarPath;
+  delete process.env.AGENTOS_DISABLE_RUST_SIDECAR;
+
+  try {
+    const bridge = new MacOSHostBridge({ dataDir: tempDir });
+    const ocr = await bridge.ocrImage(imagePath);
+    assert.ok(Array.isArray(ocr.observations));
     await bridge.shutdown();
   } finally {
     if (previousSidecar === undefined) {

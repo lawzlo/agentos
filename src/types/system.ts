@@ -12,6 +12,9 @@ import type { AgentModelProvider, AgentModelTier } from "../config.js";
 
 export type InstallSource = "source" | "macos_pkg" | "windows_msi" | "unknown";
 
+export type LicenseTier = "free" | "pro";
+export type LicenseStatus = "active" | "expired" | "grace" | "unlicensed" | "invalid";
+
 export interface InstallSourceInfo {
   source: InstallSource;
   label: string;
@@ -22,6 +25,42 @@ export interface InstallSourceInfo {
   bundledRuntime: boolean;
   runtimeExecutablePath?: string | null;
   uninstallHint?: string | null;
+  buildChannel?: string | null;
+  licenseEnforced?: boolean | null;
+}
+
+export interface LicenseLease {
+  accountId: string;
+  deviceId: string;
+  tier: LicenseTier;
+  issuedAt: string;
+  expiresAt: string;
+  graceEndsAt: string;
+  signature: string;
+}
+
+export interface LicenseCapabilities {
+  maxWatches: number;
+  premiumPacksEnabled: boolean;
+  advancedDebugEnabled: boolean;
+  claudeCodeCliEnabled: boolean;
+  autoUpdateChannel: "none" | "stable";
+}
+
+export interface LicenseState {
+  status: LicenseStatus;
+  tier: LicenseTier;
+  claimedTier: LicenseTier | null;
+  accountId: string | null;
+  deviceId: string | null;
+  issuedAt: string | null;
+  expiresAt: string | null;
+  graceEndsAt: string | null;
+  developerMode: boolean;
+  installSource: InstallSource;
+  capabilities: LicenseCapabilities;
+  reason: string | null;
+  minimumPackTier: LicenseTier;
 }
 
 export interface DaemonInstallStatus {
@@ -81,6 +120,7 @@ export interface DaemonStatus {
   pendingDraftCount?: number;
   pendingProposalCount?: number;
   installSource?: InstallSourceInfo;
+  license?: LicenseState;
   lifecycle?: DaemonLifecycle | null;
   startupRecovery?: DaemonStartupRecovery | null;
   recentErrors?: Array<{
@@ -127,6 +167,7 @@ export interface DoctorReport {
   learning: LearningStatus;
   version: RuntimeVersionInfo;
   install: DaemonInstallStatus;
+  license: LicenseState;
   lifecycle?: DaemonLifecycle | null;
   startupRecovery?: DaemonStartupRecovery | null;
   recentErrors: Array<{

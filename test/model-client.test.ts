@@ -228,6 +228,73 @@ test("anthropic model client can analyze an image into structured JSON", async (
   }
 });
 
+test("anthropic model client tolerates extra trailing prose around image JSON output", async () => {
+  const server = await startCaptureServer(() => ({
+    payload: {
+      content: [
+        {
+          type: "text",
+          text: [
+            "Here is the grounded result:",
+            JSON.stringify({
+              openThread: "Tan",
+              visibleUnreadThreads: [],
+              composer: {
+                present: true,
+                evidence: "bottom input",
+                approxBox: { x: 0.3, y: 0.84, width: 0.6, height: 0.12 }
+              }
+            }),
+            "Done."
+          ].join("\n")
+        }
+      ]
+    }
+  }));
+
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agentos-model-image-trailing-"));
+  const imagePath = path.join(tempDir, "wechat.png");
+
+  try {
+    await fs.writeFile(imagePath, Buffer.from("89504e470d0a1a0a", "hex"));
+    const client = new AgentModelClient({
+      provider: "anthropic",
+      baseUrl: server.baseUrl,
+      apiKey: "sk-ant-test",
+      name: "claude-opus-4-6",
+      tier: "strong",
+      timeoutMs: 5000
+    });
+
+    const payload = await client.analyzeImageJson<{
+      openThread: string | null;
+      visibleUnreadThreads: unknown[];
+      composer: { present: boolean };
+    }>({
+      schemaName: "agentos_wechat_visual_trailing",
+      schema: {
+        type: "object",
+        properties: {
+          openThread: { type: ["string", "null"] },
+          visibleUnreadThreads: { type: "array" },
+          composer: { type: "object" }
+        },
+        required: ["openThread", "visibleUnreadThreads", "composer"],
+        additionalProperties: false
+      },
+      systemPrompt: "Analyze the image and return structured UI data.",
+      userPrompt: "Find the unread thread and composer.",
+      imagePath
+    });
+
+    assert.equal(payload.openThread, "Tan");
+    assert.equal(payload.composer.present, true);
+  } finally {
+    await server.close();
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("gemini model client uses generateContent with JSON schema output", async () => {
   let captured: Record<string, unknown> | null = null;
   const server = await startCaptureServer((request) => {
@@ -280,5 +347,329 @@ test("gemini model client uses generateContent with JSON schema output", async (
     );
   } finally {
     await server.close();
+  }
+});
+
+test("gemini model client can analyze an image into structured JSON", async () => {
+  let captured: Record<string, unknown> | null = null;
+  const server = await startCaptureServer((request) => {
+    captured = request as Record<string, unknown>;
+    return {
+      payload: {
+        candidates: [
+          {
+            content: {
+              parts: [
+                {
+                  text: JSON.stringify({
+                    openThread: "Inbox",
+                    visibleUnreadThreads: [
+                      {
+                        name: "Inbox",
+                        evidence: "bold unread row",
+                        approxBox: { x: 0.2, y: 0.25, width: 0.2, height: 0.08 }
+                      }
+                    ],
+                    composer: {
+                      present: true,
+                      evidence: "message box",
+                      approxBox: { x: 0.3, y: 0.82, width: 0.6, height: 0.13 }
+                    }
+                  })
+                }
+              ]
+            }
+          }
+        ]
+      }
+    };
+  });
+
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agentos-model-gemini-image-"));
+  const imagePath = path.join(tempDir, "slack.png");
+
+  try {
+    await fs.writeFile(imagePath, Buffer.from("89504e470d0a1a0a", "hex"));
+    const client = new AgentModelClient({
+      provider: "gemini",
+      baseUrl: server.baseUrl,
+      apiKey: "gem-test-key",
+      name: "gemini-2.5-flash",
+      tier: "balanced",
+      timeoutMs: 5000
+    });
+
+    const payload = await client.analyzeImageJson<{
+      openThread: string | null;
+      visibleUnreadThreads: unknown[];
+      composer: { present: boolean };
+    }>({
+      schemaName: "agentos_desktop_visual",
+      schema: {
+        type: "object",
+        properties: {
+          openThread: { type: ["string", "null"] },
+          visibleUnreadThreads: { type: "array" },
+          composer: { type: "object" }
+        },
+        required: ["openThread", "visibleUnreadThreads", "composer"],
+        additionalProperties: false
+      },
+      systemPrompt: "Analyze the desktop screenshot and return structured UI state.",
+      userPrompt: "Find the unread thread and message composer.",
+      imagePath
+    });
+
+    assert.equal(payload.openThread, "Inbox");
+    assert.equal(payload.composer.present, true);
+    assert.match(String(captured?.url ?? ""), /\/models\/gemini-2\.5-flash:generateContent\?key=gem-test-key$/u);
+    const body = captured?.body as Record<string, unknown>;
+    const parts =
+      (((body.contents as Array<{ parts?: Array<Record<string, unknown>> }>)?.[0]?.parts ?? []) as Array<Record<string, unknown>>);
+    const imagePart = parts.find((part) => "inline_data" in part) as
+      | { inline_data?: { mime_type?: string; data?: string } }
+      | undefined;
+    assert.equal(imagePart?.inline_data?.mime_type, "image/png");
+    assert.equal(typeof imagePart?.inline_data?.data, "string");
+    assert.equal(
+      ((body.generationConfig as { responseMimeType?: string })?.responseMimeType ?? null),
+      "application/json"
+    );
+  } finally {
+    await server.close();
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("model client tracks usage and enforces a per-run request budget", async () => {
+  let requestCount = 0;
+  const server = await startCaptureServer(() => {
+    requestCount += 1;
+    return {
+      payload: {
+        usage: {
+          prompt_tokens: 11,
+          completion_tokens: 7,
+          total_tokens: 18
+        },
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                replyText: "Budgeted reply"
+              })
+            }
+          }
+        ]
+      }
+    };
+  });
+
+  try {
+    const client = new AgentModelClient({
+      provider: "openai_compatible",
+      baseUrl: server.baseUrl,
+      apiKey: "sk-openai-test",
+      name: "demo-model",
+      tier: "balanced",
+      timeoutMs: 5000
+    });
+    const budget = client.createUsageBudget({
+      id: "watch:test-budget",
+      maxRequests: 1
+    });
+
+    const reply = await client.runWithUsageBudget(budget, async () =>
+      client.draftReply({
+        goal: "Reply politely",
+        livePack: "slack-desktop",
+        summary: "Budget check",
+        context: ["Can you confirm the budget guard?"]
+      })
+    );
+
+    assert.equal(reply.replyText, "Budgeted reply");
+    assert.equal(budget.usage.requestCount, 1);
+    assert.equal(budget.usage.inputTokens, 11);
+    assert.equal(budget.usage.outputTokens, 7);
+    assert.equal(budget.usage.totalTokens, 18);
+
+    await assert.rejects(
+      () =>
+        client.runWithUsageBudget(budget, async () =>
+          client.draftReply({
+            goal: "Reply politely",
+            livePack: "slack-desktop",
+            summary: "Budget check again",
+            context: ["Second call should be blocked."]
+          })
+        ),
+      /budget exceeded/i
+    );
+    assert.equal(requestCount, 1);
+  } finally {
+    await server.close();
+  }
+});
+
+test("claude_code_cli model client uses local Claude Code print mode for structured plans and drafts", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agentos-claude-code-cli-"));
+  const fakeCliPath = path.join(tempDir, "fake-claude");
+  const capturePath = path.join(tempDir, "capture.json");
+  const previousCli = process.env.AGENTOS_CLAUDE_CODE_BIN;
+  process.env.AGENTOS_CLAUDE_CODE_BIN = fakeCliPath;
+
+  try {
+    await fs.writeFile(
+      fakeCliPath,
+      `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+fs.writeFileSync(process.env.AGENTOS_CLAUDE_CODE_CAPTURE, JSON.stringify({ args }, null, 2), "utf8");
+const schemaIndex = args.indexOf("--json-schema");
+const schema = schemaIndex >= 0 ? JSON.parse(args[schemaIndex + 1]) : {};
+if (schema.properties && schema.properties.steps) {
+  process.stdout.write(JSON.stringify({
+    type: "result",
+    subtype: "success",
+    is_error: false,
+    result: "",
+    structured_output: {
+      summary: "Local Claude Code plan",
+      steps: [
+        {
+          label: "Focus Slack",
+          surface: "desktop",
+          action: "focusApp",
+          params: { name: "Slack" }
+        }
+      ]
+    }
+  }));
+} else {
+  process.stdout.write(JSON.stringify({
+    type: "result",
+    subtype: "success",
+    is_error: false,
+    result: "",
+    structured_output: {
+      replyText: "Local Claude Code reply",
+      confidence: 0.91
+    }
+  }));
+}
+`,
+      "utf8"
+    );
+    await fs.chmod(fakeCliPath, 0o755);
+    process.env.AGENTOS_CLAUDE_CODE_CAPTURE = capturePath;
+
+    const client = new AgentModelClient({
+      provider: "claude_code_cli",
+      name: "sonnet",
+      tier: "balanced",
+      timeoutMs: 5000
+    });
+
+    const plan = await client.planTask({
+      goal: "Focus Slack",
+      preferredSurface: "desktop",
+      inputs: {},
+      steps: []
+    });
+    assert.equal(plan.summary, "Local Claude Code plan");
+    assert.equal(plan.steps[0]?.action, "focusApp");
+
+    const draft = await client.draftReply({
+      goal: "Reply politely",
+      livePack: "slack-desktop",
+      summary: "Need a quick reply",
+      context: ["Can you send a quick acknowledgment?"]
+    });
+    assert.equal(draft.replyText, "Local Claude Code reply");
+
+    const captured = JSON.parse(await fs.readFile(capturePath, "utf8"));
+    assert.equal(captured.args.includes("-p"), true);
+    assert.equal(captured.args.includes("--no-session-persistence"), true);
+    assert.equal(captured.args.includes("--bare"), false);
+    assert.equal(captured.args.includes("--json-schema"), true);
+    assert.equal(captured.args.includes("--output-format"), true);
+    assert.equal(captured.args[captured.args.indexOf("--output-format") + 1], "json");
+    assert.equal(captured.args.includes("--system-prompt"), true);
+    assert.equal(captured.args.includes("--permission-mode"), true);
+    assert.equal(captured.args[captured.args.indexOf("--permission-mode") + 1], "plan");
+    assert.equal(captured.args.includes("--tools"), true);
+    assert.equal(captured.args[captured.args.indexOf("--tools") + 1], "");
+    assert.equal(captured.args[captured.args.indexOf("--model") + 1], "sonnet");
+  } finally {
+    if (previousCli === undefined) {
+      delete process.env.AGENTOS_CLAUDE_CODE_BIN;
+    } else {
+      process.env.AGENTOS_CLAUDE_CODE_BIN = previousCli;
+    }
+    delete process.env.AGENTOS_CLAUDE_CODE_CAPTURE;
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("claude_code_cli closes stdin so the local CLI does not fail waiting for piped input", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agentos-claude-code-stdin-"));
+  const fakeCliPath = path.join(tempDir, "fake-claude-stdin");
+  const previousCli = process.env.AGENTOS_CLAUDE_CODE_BIN;
+  process.env.AGENTOS_CLAUDE_CODE_BIN = fakeCliPath;
+
+  try {
+    await fs.writeFile(
+      fakeCliPath,
+      `#!/usr/bin/env node
+let settled = false;
+function finish() {
+  if (settled) return;
+  settled = true;
+  process.stdout.write(JSON.stringify({
+    type: "result",
+    subtype: "success",
+    is_error: false,
+    result: "",
+    structured_output: {
+      replyText: "stdin closed reply"
+    }
+  }));
+}
+process.stdin.setEncoding("utf8");
+process.stdin.on("end", finish);
+process.stdin.resume();
+setTimeout(() => {
+  if (settled) return;
+  console.error("Warning: no stdin data received in 3s, proceeding without it.");
+  process.exit(1);
+}, 50);
+`,
+      "utf8"
+    );
+    await fs.chmod(fakeCliPath, 0o755);
+
+    const client = new AgentModelClient({
+      provider: "claude_code_cli",
+      name: "sonnet",
+      tier: "balanced",
+      timeoutMs: 5000
+    });
+
+    const draft = await client.draftReply({
+      goal: "Reply politely",
+      livePack: "outlook-desktop",
+      summary: "Need a quick reply",
+      context: ["Please confirm receipt."]
+    });
+
+    assert.equal(draft.replyText, "stdin closed reply");
+  } finally {
+    if (previousCli === undefined) {
+      delete process.env.AGENTOS_CLAUDE_CODE_BIN;
+    } else {
+      process.env.AGENTOS_CLAUDE_CODE_BIN = previousCli;
+    }
+    await fs.rm(tempDir, { recursive: true, force: true });
   }
 });

@@ -5,6 +5,7 @@ import { detectInstallSource } from "../../src/install-source.js";
 import type { LivePackInfo } from "../../src/types/runtime-schema.js";
 import type {
   DoctorReport,
+  LicenseState,
   SetupCommandTemplate,
   SetupGuide,
   SetupPackSummary,
@@ -106,7 +107,7 @@ function buildSuggestedCommands({
       id: "model-setup",
       label: "Model setup",
       command: "agentos model setup",
-      reason: "Choose GPT, Claude, Gemini, or a custom OpenAI-compatible endpoint so planning and drafting are fully enabled.",
+      reason: "Choose GPT, Claude, Gemini, Claude Code CLI, or a custom OpenAI-compatible endpoint so planning and drafting are fully enabled.",
       category: "smoke_test",
       risk: "low"
     });
@@ -200,6 +201,45 @@ function buildSuggestedCommands({
   return commands.slice(0, 3);
 }
 
+function fallbackLicenseState(report: {
+  installSource: SetupReport["installSource"];
+  doctor: DoctorReport;
+}): LicenseState {
+  const developerMode =
+    report.installSource.source === "source"
+    && report.installSource.licenseEnforced === false
+    && config.license.enforceInSource !== true;
+  return {
+    status: developerMode ? "active" : "unlicensed",
+    tier: developerMode ? "pro" : "free",
+    claimedTier: developerMode ? "pro" : null,
+    accountId: null,
+    deviceId: null,
+    issuedAt: null,
+    expiresAt: null,
+    graceEndsAt: null,
+    developerMode,
+    installSource: report.installSource.source,
+    capabilities: {
+      maxWatches: developerMode ? 10 : 1,
+      premiumPacksEnabled: developerMode,
+      advancedDebugEnabled: developerMode,
+      claudeCodeCliEnabled: developerMode,
+      autoUpdateChannel: developerMode ? "stable" : "none"
+    },
+    reason: developerMode ? "Source checkout defaults to developer mode." : "No cached Pro license lease found.",
+    minimumPackTier: "pro"
+  };
+}
+
+function effectiveSetupLicense(report: {
+  installSource: SetupReport["installSource"];
+  doctor: DoctorReport;
+  daemon?: SetupReport["daemon"];
+}): LicenseState {
+  return report.doctor.license ?? report.daemon?.license ?? fallbackLicenseState(report);
+}
+
 function buildStatusChecks({
   doctor,
   startedDaemon,
@@ -219,6 +259,11 @@ function buildStatusChecks({
   const fixedAutostart = appliedFixes.includes("Install daemon auto-start for the current user.");
   const blockedPackCount = packSummaries.filter((pack) => pack.status === "blocking").length;
   const warningPackCount = packSummaries.filter((pack) => pack.status === "warning").length;
+  const license = effectiveSetupLicense({
+    installSource,
+    doctor
+  });
+  const developerMode = license.developerMode === true;
   const startupRecovery = doctor.startupRecovery ?? doctor.lifecycle?.startupRecovery ?? null;
   const previousExit = doctor.lifecycle?.previousExit ?? null;
   const hasRecoveryAttention =
@@ -228,6 +273,46 @@ function buildStatusChecks({
   const unexpectedPreviousExit = previousExit?.kind === "crash" || previousExit?.kind === "stale_runtime";
 
   return [
+    {
+      id: "license",
+      label: "License",
+      status:
+        developerMode
+          ? "info"
+          : license.status === "active"
+            ? "ready"
+            : license.status === "grace" || license.status === "expired" || license.status === "invalid"
+              ? "warning"
+              : "info",
+      actionKind:
+        developerMode
+          ? "none"
+          : license.status === "grace" || license.status === "expired" || license.status === "invalid"
+            ? "manual"
+            : license.status === "active"
+              ? "none"
+              : "none",
+      detail:
+        developerMode
+          ? "This source checkout runs in developer mode and does not require activation."
+          : license.status === "active"
+            ? `AgentOS ${license.tier.toUpperCase()} is active${license.accountId ? ` for ${license.accountId}` : ""}.`
+            : license.status === "grace"
+              ? "The cached Pro license is in offline grace and should be refreshed soon."
+              : license.status === "expired" || license.status === "invalid"
+                ? license.reason ?? "The cached Pro license is not usable."
+                : "This install is running in Free mode until a Pro license is activated.",
+      nextStep:
+        developerMode
+          ? null
+          : license.status === "active"
+            ? null
+            : license.status === "grace"
+              ? "Run `agentos license refresh` while online to refresh the cached Pro lease."
+              : license.status === "expired" || license.status === "invalid"
+                ? "Run `agentos license activate --token <value>` to restore Pro, or continue in Free mode."
+                : "Continue in Free mode, or run `agentos license activate --token <value>` to unlock Pro."
+    },
     {
       id: "daemon",
       label: "Daemon runtime",
@@ -338,7 +423,7 @@ function buildStatusChecks({
       detail: doctor.modelConfigured
         ? `Model access is configured${doctor.modelProviderLabel ? ` via ${doctor.modelProviderLabel}` : ""}${doctor.modelName ? ` (${doctor.modelName})` : ""}.`
         : "Model access is missing, so planning and reply drafting will stay degraded.",
-      nextStep: doctor.modelConfigured ? null : "Run `agentos model setup` and choose a provider plus API key."
+      nextStep: doctor.modelConfigured ? null : "Run `agentos model setup` and choose a provider. Remote providers need an API key; Claude Code CLI can reuse your local Claude session."
     },
     {
       id: "native-sidecar",
@@ -426,6 +511,8 @@ function uniqueActions(actions: string[]) {
 }
 
 function buildOnboardingGuides(report: SetupReport): SetupGuide[] {
+  const license = effectiveSetupLicense(report);
+  const developerMode = license.developerMode === true;
   const modelCheck = findCheck(report, "model");
   const browserRuntime = findCheck(report, "browser-runtime");
   const browserSessions = findCheck(report, "browser-sessions");
@@ -436,6 +523,50 @@ function buildOnboardingGuides(report: SetupReport): SetupGuide[] {
   const blockedBrowserPackCount = report.packSummaries.filter((pack) => pack.surface === "browser" && pack.status !== "ready").length;
 
   const guides: SetupGuide[] = [
+    {
+      id: "license",
+      title: "License and activation",
+      status:
+        developerMode
+          ? "ready"
+          : license.status === "active"
+            ? "ready"
+            : license.status === "grace" || license.status === "expired" || license.status === "invalid"
+              ? "warning"
+              : "ready",
+      actionKind:
+        developerMode
+          ? "none"
+          : license.status === "grace" || license.status === "expired" || license.status === "invalid"
+            ? "manual"
+            : "none",
+      summary:
+        developerMode
+          ? "This source checkout runs in developer mode, so Pro capabilities are available without activation."
+          : license.status === "active"
+            ? `AgentOS ${license.tier.toUpperCase()} is active${license.accountId ? ` for ${license.accountId}` : ""}.`
+            : license.status === "grace"
+              ? "AgentOS Pro is still available in offline grace, but you should refresh it while online."
+              : license.status === "expired" || license.status === "invalid"
+                ? "This install can still run in Free mode, but the cached Pro lease is no longer valid."
+                : "This install starts in Free mode. Activate Pro only when you want premium packs, higher watch limits, and advanced integrations.",
+      whyItMatters: "Free mode keeps the local product usable, while Pro unlocks premium packs, higher watch limits, and advanced integrations such as Claude Code CLI.",
+      actions:
+        developerMode
+          ? ["No activation is required in source checkout developer mode."]
+          : license.status === "active"
+            ? ["Run `agentos license status` any time to inspect the cached tier, device binding, and expiry."]
+            : license.status === "grace"
+              ? [
+                  "Run `agentos license refresh` while online to renew the cached Pro lease before grace ends.",
+                  "If refresh fails, run `agentos license activate --token <value>`."
+                ]
+              : [
+                  "Continue in Free mode if you only need the base local runtime.",
+                  "When you want Pro, run `agentos license activate --token <value>`.",
+                  "Run `agentos license status` to inspect the current cached tier and device binding."
+                ]
+    },
     {
       id: "model-access",
       title: "Model access",
@@ -449,7 +580,7 @@ function buildOnboardingGuides(report: SetupReport): SetupGuide[] {
       actions:
         modelCheck?.status === "blocking"
           ? [
-              "Run `agentos model setup`, choose OpenAI, Claude, Gemini, or a custom OpenAI-compatible provider, then paste the API key. AgentOS will fetch the models available to that key and recommend a short list.",
+              "Run `agentos model setup`, choose OpenAI, Claude, Gemini, Claude Code CLI, or a custom OpenAI-compatible provider. Remote providers use an API key; Claude Code CLI reuses your local Claude session. AgentOS will fetch live model choices when that provider supports discovery.",
               "Rerun `agentos setup` to confirm planning and drafting are enabled."
             ]
           : [`Model access is ready${report.doctor.modelProviderLabel ? ` via ${report.doctor.modelProviderLabel}` : ""}. You can move on to browser or desktop setup.`]
@@ -600,6 +731,15 @@ function buildQuickstartCommands(report: SetupReport, category: SetupCommandTemp
 
 function buildStarterActions(report: SetupReport) {
   const actions: string[] = [];
+  const license = effectiveSetupLicense(report);
+
+  if (
+    report.installSource.managedInstallation &&
+    report.installSource.licenseEnforced !== false &&
+    license.status === "unlicensed"
+  ) {
+    actions.push("Continue in Free mode, or run `agentos license activate --token <value>` to unlock Pro.");
+  }
 
   actions.push(...report.fixableActions.slice(0, 2));
   actions.push(...report.manualSteps.slice(0, 2));

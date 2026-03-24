@@ -677,4 +677,10 @@ Manual publishing options:
 
 ## License
 
-MIT. See [LICENSE](./LICENSE).
+AgentOS is currently distributed as a closed local product.
+
+- The packaged macOS `.pkg` and Windows `.msi` installers are intended for end users.
+- Free and Pro are feature-gated in the same app build.
+- Source checkout remains a developer workflow while the product is still moving quickly.
+
+See [LICENSE](./LICENSE) for the current proprietary terms.

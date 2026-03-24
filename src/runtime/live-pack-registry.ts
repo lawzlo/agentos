@@ -1,7 +1,14 @@
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { minimumLicenseTierForPack } from "../license.js";
 import type { ControlPlane } from "./control-plane.js";
+import {
+  browserPackLabel,
+  defaultBrowserStartUrlForPack,
+  inferBrowserManualInterventionFromUrl
+} from "./browser-pack-defaults.js";
+import { inferReplyLanguage } from "./reply-language.js";
 import { packDefaultReplyPolicy } from "./reply-policy.js";
 import type { SurfaceRegistry } from "./surface-registry.js";
 import type {
@@ -71,6 +78,7 @@ interface WeChatVisualThreadSummary {
   conversationKind: "direct" | "group" | "official_account" | "service" | "unknown";
   shouldReply: boolean;
   replyReason: string;
+  subjectCue: string;
   latestSnippet: string;
   priority: "high" | "medium" | "low";
 }
@@ -82,6 +90,43 @@ interface WeChatVisualComposerBox {
   height: number;
 }
 
+interface DesktopVisualThreadSummary {
+  name: string;
+  evidence: string;
+  approxBox: WeChatVisualComposerBox | null;
+  replyable: boolean;
+  conversationKind: string;
+  shouldReply: boolean;
+  replyReason: string;
+  subjectCue: string;
+  latestSnippet: string;
+  priority: "high" | "medium" | "low";
+}
+
+interface DesktopVisualAnalysis {
+  openThread: string | null;
+  selectedRow?: string | null;
+  visibleUnreadThreads: DesktopVisualThreadSummary[];
+  composer: {
+    present: boolean;
+    evidence: string;
+    approxBox: WeChatVisualComposerBox | null;
+    entryPoint: { x: number; y: number } | null;
+    hasDraftText: boolean | null;
+    draftPreview: string | null;
+  };
+  scene: SceneType;
+  sceneEvidence: string;
+  recommendedRecoveryAction: SurfaceRecoveryAction | null;
+  recoveryControl: {
+    present: boolean;
+    evidence: string;
+    approxBox: WeChatVisualComposerBox | null;
+  };
+  targetThreadOpen?: boolean | null;
+  prefillVisible?: boolean | null;
+}
+
 interface WeChatVisualAnalysis {
   openThread: string | null;
   visibleUnreadThreads: WeChatVisualThreadSummary[];
@@ -89,6 +134,9 @@ interface WeChatVisualAnalysis {
     present: boolean;
     evidence: string;
     approxBox: WeChatVisualComposerBox | null;
+    entryPoint: { x: number; y: number } | null;
+    hasDraftText: boolean | null;
+    draftPreview: string | null;
   };
   scene: SceneType;
   sceneEvidence: string;
@@ -113,6 +161,11 @@ interface WeChatVisualThreadGrounding {
   rowBox: WeChatVisualComposerBox | null;
 }
 
+interface VisionImageSize {
+  width: number;
+  height: number;
+}
+
 function defaultDesktopAppTargetForLivePack(livePack: string | null | undefined): string | null {
   switch (String(livePack ?? "")) {
     case "slack-desktop":
@@ -130,7 +183,7 @@ function defaultDesktopAppTargetForLivePack(livePack: string | null | undefined)
 
 export function runnerTypeForPack(packName: string | null | undefined, surface: LivePackSurface | null = null): SurfaceRunnerType {
   const normalized = String(packName ?? "").trim();
-  if (normalized === "wechat-desktop") {
+  if (normalized === "wechat-desktop" || normalized === "slack-desktop" || normalized === "outlook-desktop") {
     return "desktop_vlm";
   }
   if (surface === "desktop" || normalized.endsWith("-desktop")) {
@@ -460,7 +513,10 @@ function draftHeuristicReply({
   stylePreferences?: string[];
 }): LivePackDraftResponse {
   const combinedContext = [summary, ...context].filter(Boolean).join("\n");
-  const chinese = /[\u4e00-\u9fff]/u.test(`${goal} ${combinedContext}`);
+  const replyLanguageHint = inferReplyLanguage({ summary, context });
+  const chinese =
+    replyLanguageHint === "zh"
+    || (replyLanguageHint === null && /[\u4e00-\u9fff]/u.test(`${goal} ${combinedContext}`));
   const styleHints = stylePreferences.join(" ").toLowerCase();
   const wantsConcise = /(short|concise|brief|terse|直接|简短|简洁)/iu.test(styleHints);
   const wantsWarm = /(warm|friendly|polite|礼貌|温和|友好)/iu.test(styleHints);
@@ -537,51 +593,68 @@ async function draftPackReply({
     livePack,
     preferredSurface
   });
+  let modelError: string | null = null;
   if (controlPlane.modelClient.isConfigured()) {
-    const drafted = await controlPlane.modelClient.draftReply({
-      goal,
-      livePack,
-      summary,
-      context,
-      stylePreferences
-    });
-    return {
-      replyText: String(drafted.replyText ?? "").trim(),
-      metadata: {
-        confidence: drafted.confidence ?? null,
-        rationale: drafted.rationale ?? null,
-        source: "model",
-        stylePreferences
-      }
-    };
+    try {
+      const drafted = await controlPlane.modelClient.draftReply({
+        goal,
+        livePack,
+        summary,
+        context,
+        stylePreferences,
+        replyLanguageHint: inferReplyLanguage({ summary, context })
+      });
+      return {
+        replyText: String(drafted.replyText ?? "").trim(),
+        metadata: {
+          confidence: drafted.confidence ?? null,
+          rationale: drafted.rationale ?? null,
+          source: "model",
+          stylePreferences
+        }
+      };
+    } catch (error) {
+      modelError = error instanceof Error ? error.message : String(error ?? "model draft failed");
+    }
   }
 
   if (livePack === "boss-browser") {
-    const chinese = /[\u4e00-\u9fff]/u.test(`${goal} ${summary} ${context.join(" ")} ${stylePreferences.join(" ")}`);
+    const replyLanguageHint = inferReplyLanguage({ summary, context });
+    const chinese =
+      replyLanguageHint === "zh"
+      || (replyLanguageHint === null && /[\u4e00-\u9fff]/u.test(`${goal} ${summary} ${context.join(" ")} ${stylePreferences.join(" ")}`));
     return {
       replyText: chinese
         ? /(?:short|concise|brief|直接|简短|简洁)/iu.test(stylePreferences.join(" "))
           ? "你好，已看到你的信息，我会尽快跟进。"
           : "你好，我已看到你的信息，会尽快查看并和你沟通后续。"
         : /(?:short|concise|brief)/iu.test(stylePreferences.join(" "))
-          ? "Thanks, I saw your message and will follow up soon."
+            ? "Thanks, I saw your message and will follow up soon."
           : "Thanks for reaching out. I reviewed your profile and will follow up shortly.",
       metadata: {
         confidence: null,
-        rationale: "heuristic recruiting follow-up",
+        rationale: modelError ? `heuristic recruiting follow-up after model failure: ${modelError}` : "heuristic recruiting follow-up",
         source: "heuristic",
-        stylePreferences
+        stylePreferences,
+        ...(modelError ? { modelError } : {})
       }
     };
   }
 
-  return draftHeuristicReply({
+  const heuristic = draftHeuristicReply({
     family,
     goal,
     summary,
     context,
     stylePreferences
   });
+  return {
+    ...heuristic,
+    metadata: {
+      ...(heuristic.metadata ?? {}),
+      ...(modelError ? { modelError, rationale: `heuristic fallback after model failure: ${modelError}` } : {})
+    }
+  };
 }
 
 function defaultPackCategory(family: LivePackInfo["family"]): LivePackCategory {
@@ -660,6 +733,7 @@ function normalizePackInfo(name: string, info: Partial<LivePackInfo> | null | un
         : defaultPackCapabilities({ name, family, supportsDrafts, supportsAutoSend })) as LivePackCapability[],
     defaultReplyPolicy: info?.defaultReplyPolicy ?? packDefaultReplyPolicy(name),
     description: String(info?.description ?? "Custom live pack"),
+    minimumLicenseTier: info?.minimumLicenseTier ?? minimumLicenseTierForPack(name),
     ...(typeof info?.ready === "boolean" ? { ready: info.ready } : {}),
     ...(Array.isArray(info?.healthChecks) ? { healthChecks: info.healthChecks } : {})
   };
@@ -793,6 +867,27 @@ function prefillVerificationExpectation(appName: string): Record<string, unknown
   };
 }
 
+function desktopVisionThreadExpectation(appName: string, type: string): Record<string, unknown> {
+  return {
+    frontmostApp: appName,
+    visualCheck: {
+      type,
+      targetThread: "{{threadTitle}}"
+    }
+  };
+}
+
+function desktopVisionPrefillExpectation(appName: string, type: string): Record<string, unknown> {
+  return {
+    frontmostApp: appName,
+    visualCheck: {
+      type,
+      targetThread: "{{threadTitle}}",
+      replyPreview: "{{typeTextPreview}}"
+    }
+  };
+}
+
 function wechatVisionThreadExpectation(): Record<string, unknown> {
   return {
     frontmostApp: "WeChat",
@@ -908,24 +1003,35 @@ function isSlackDesktopForeground(worldState: WorldState | null): boolean {
   return appName.includes("slack");
 }
 
-function isWeChatDesktopForeground(worldState: WorldState | null): boolean {
+function isExpectedDesktopForeground(worldState: WorldState | null, targetAppName: string): boolean {
   if (!worldState || worldState.surface !== "desktop") {
     return true;
   }
 
   const appContext = (worldState.appContext ?? {}) as Record<string, unknown>;
-  const appName = String(appContext.appName ?? "").trim().toLowerCase();
-  return appName.includes("wechat") || appName.includes("微信");
+  const currentAppName = String(appContext.appName ?? "").trim().toLowerCase();
+  const normalizedTarget = String(targetAppName ?? "").trim().toLowerCase();
+  if (!normalizedTarget) {
+    return true;
+  }
+
+  const aliases =
+    normalizedTarget.includes("outlook")
+      ? ["outlook"]
+      : normalizedTarget.includes("wechat") || normalizedTarget.includes("微信")
+        ? ["wechat", "微信"]
+        : normalizedTarget.includes("slack")
+          ? ["slack"]
+          : [normalizedTarget];
+  return aliases.some((alias) => currentAppName.includes(alias));
+}
+
+function isWeChatDesktopForeground(worldState: WorldState | null): boolean {
+  return isExpectedDesktopForeground(worldState, "WeChat");
 }
 
 function isOutlookDesktopForeground(worldState: WorldState | null): boolean {
-  if (!worldState || worldState.surface !== "desktop") {
-    return true;
-  }
-
-  const appContext = (worldState.appContext ?? {}) as Record<string, unknown>;
-  const appName = String(appContext.appName ?? "").trim().toLowerCase();
-  return appName.includes("outlook");
+  return isExpectedDesktopForeground(worldState, "Microsoft Outlook");
 }
 
 function isAccessibilityCandidate(candidate: InteractionCandidate | null | undefined): boolean {
@@ -1212,6 +1318,201 @@ function clampUnit(value: unknown, fallback = 0): number {
   return Math.max(0, Math.min(1, numeric));
 }
 
+function normalizeVisionBox(
+  raw: Record<string, unknown> | null | undefined,
+  imageSize: VisionImageSize | null = null
+): WeChatVisualComposerBox | null {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+  if (!["x", "y", "width", "height"].every((key) => Number.isFinite(Number(raw[key])))) {
+    return null;
+  }
+  const x = Number(raw.x);
+  const y = Number(raw.y);
+  const width = Number(raw.width);
+  const height = Number(raw.height);
+  if ([x, y, width, height].some((value) => value > 1) && imageSize && imageSize.width > 0 && imageSize.height > 0) {
+    return {
+      x: clampUnit(x / imageSize.width, 0),
+      y: clampUnit(y / imageSize.height, 0),
+      width: clampUnit(width / imageSize.width, 0),
+      height: clampUnit(height / imageSize.height, 0)
+    };
+  }
+  return {
+    x: clampUnit(x, 0),
+    y: clampUnit(y, 0),
+    width: clampUnit(width, 0),
+    height: clampUnit(height, 0)
+  };
+}
+
+function normalizeVisualScene(raw: Record<string, unknown>, unreadCount: number, composerPresent: boolean): SceneType {
+  const scene = String(raw.scene ?? "").trim().toLowerCase();
+  if (scene === "chat_list" || scene === "list") {
+    return "list";
+  }
+  if (scene === "thread_open" || scene === "thread") {
+    return "thread";
+  }
+  if (scene === "foreign_view") {
+    return "foreign_view";
+  }
+  if (scene === "signin") {
+    return "signin";
+  }
+  if (scene === "verification") {
+    return "verification";
+  }
+  if (typeof raw.targetThreadOpen === "boolean" && raw.targetThreadOpen) {
+    return "thread";
+  }
+  if (composerPresent && String(raw.openThread ?? "").trim()) {
+    return "thread";
+  }
+  if (unreadCount > 0) {
+    return "list";
+  }
+  return "unknown";
+}
+
+function normalizeRecoveryAction(raw: Record<string, unknown>, scene: SceneType): SurfaceRecoveryAction | null {
+  const action = String(raw.recommendedRecoveryAction ?? "").trim().toLowerCase();
+  if (action === "recover_to_list" || action === "complete_signin" || action === "complete_verification" || action === "takeover") {
+    return action as SurfaceRecoveryAction;
+  }
+  if (action === "none") {
+    return "none" as const;
+  }
+  return scene === "foreign_view" ? "recover_to_list" : null;
+}
+
+function normalizeDesktopVisualThreads(
+  raw: Record<string, unknown> | null | undefined,
+  {
+    normalizeName = (value: unknown) => String(value ?? "").trim(),
+    imageSize = null
+  }: {
+    normalizeName?: (value: unknown) => string;
+    imageSize?: VisionImageSize | null;
+  } = {}
+): DesktopVisualThreadSummary[] {
+  const rawThreads = Array.isArray(raw?.visibleUnreadThreads)
+    ? raw.visibleUnreadThreads
+    : raw?.bestUnreadThread && typeof raw.bestUnreadThread === "object"
+      ? [raw.bestUnreadThread]
+      : [];
+
+  return rawThreads
+    .map((entry) => {
+      if (!entry || typeof entry !== "object") {
+        return null;
+      }
+      if (
+        "present" in entry &&
+        typeof (entry as { present?: unknown }).present === "boolean" &&
+        !Boolean((entry as { present?: unknown }).present)
+      ) {
+        return null;
+      }
+      const name = normalizeName((entry as { name?: unknown }).name);
+      if (!name) {
+        return null;
+      }
+      return {
+        name,
+        evidence: String((entry as { evidence?: unknown }).evidence ?? "").trim(),
+        approxBox: normalizeVisionBox(
+          ((entry as { approxBox?: unknown }).approxBox ?? null) as Record<string, unknown> | null,
+          imageSize
+        ),
+        replyable:
+          typeof (entry as { replyable?: unknown }).replyable === "boolean"
+            ? Boolean((entry as { replyable?: unknown }).replyable)
+            : true,
+        conversationKind: String((entry as { conversationKind?: unknown }).conversationKind ?? "unknown").trim() || "unknown",
+        shouldReply:
+          typeof (entry as { shouldReply?: unknown }).shouldReply === "boolean"
+            ? Boolean((entry as { shouldReply?: unknown }).shouldReply)
+            : typeof (entry as { replyable?: unknown }).replyable === "boolean"
+              ? Boolean((entry as { replyable?: unknown }).replyable)
+              : true,
+        replyReason: String((entry as { replyReason?: unknown }).replyReason ?? "").trim(),
+        subjectCue: String((entry as { subjectCue?: unknown }).subjectCue ?? "").trim(),
+        latestSnippet: String((entry as { latestSnippet?: unknown }).latestSnippet ?? "").trim(),
+        priority: normalizeWeChatPriority((entry as { priority?: unknown }).priority, "low")
+      } satisfies DesktopVisualThreadSummary;
+    })
+    .filter((entry): entry is DesktopVisualThreadSummary => Boolean(entry));
+}
+
+function normalizeDesktopVisualAnalysis(
+  raw: Record<string, unknown> | null | undefined,
+  {
+    normalizeName = (value: unknown) => String(value ?? "").trim(),
+    imageSize = null
+  }: {
+    normalizeName?: (value: unknown) => string;
+    imageSize?: VisionImageSize | null;
+  } = {}
+): DesktopVisualAnalysis | null {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+
+  const visibleUnreadThreads = normalizeDesktopVisualThreads(raw, { normalizeName, imageSize });
+  const composerRaw = (raw.composer ?? null) as Record<string, unknown> | null;
+  const recoveryRaw = (raw.recoveryControl ?? null) as Record<string, unknown> | null;
+  const composerBox = normalizeVisionBox((composerRaw?.approxBox ?? null) as Record<string, unknown> | null, imageSize);
+  const composerEntryPointRaw = (composerRaw?.entryPoint ?? null) as Record<string, unknown> | null;
+  const composerEntryPoint =
+    composerEntryPointRaw &&
+    Number.isFinite(Number(composerEntryPointRaw.x)) &&
+    Number.isFinite(Number(composerEntryPointRaw.y))
+      ? {
+          x: clampUnit(composerEntryPointRaw.x, 0),
+          y: clampUnit(composerEntryPointRaw.y, 0)
+        }
+      : null;
+  const recoveryBox = normalizeVisionBox((recoveryRaw?.approxBox ?? null) as Record<string, unknown> | null, imageSize);
+  const composerPresent = Boolean(composerRaw?.present);
+  const scene = normalizeVisualScene(raw, visibleUnreadThreads.length, composerPresent);
+
+  return {
+    openThread: normalizeName(raw.openThread) || null,
+    selectedRow: normalizeName(raw.selectedRow) || null,
+    visibleUnreadThreads,
+    composer: {
+      present: composerPresent,
+      evidence: String(composerRaw?.evidence ?? "").trim(),
+      approxBox: composerBox,
+      entryPoint: composerEntryPoint,
+      hasDraftText:
+        typeof composerRaw?.hasDraftText === "boolean"
+          ? composerRaw.hasDraftText
+          : null,
+      draftPreview: String(composerRaw?.draftPreview ?? "").trim() || null
+    },
+    scene,
+    sceneEvidence: String(raw.sceneEvidence ?? raw.openThread ?? composerRaw?.evidence ?? "").trim(),
+    recommendedRecoveryAction: normalizeRecoveryAction(raw, scene),
+    recoveryControl: {
+      present: Boolean(recoveryRaw?.present) || Boolean(recoveryBox),
+      evidence: String(recoveryRaw?.evidence ?? "").trim(),
+      approxBox: recoveryBox
+    },
+    targetThreadOpen:
+      typeof raw.targetThreadOpen === "boolean"
+        ? raw.targetThreadOpen
+        : null,
+    prefillVisible:
+      typeof raw.prefillVisible === "boolean"
+        ? raw.prefillVisible
+        : null
+  };
+}
+
 function normalizeWeChatVisualAnalysis(raw: Record<string, unknown> | null | undefined): WeChatVisualAnalysis | null {
   if (!raw || typeof raw !== "object") {
     return null;
@@ -1264,6 +1565,7 @@ function normalizeWeChatVisualAnalysis(raw: Record<string, unknown> | null | und
                   ? Boolean((entry as { replyable?: unknown }).replyable)
                   : true,
             replyReason: String((entry as { replyReason?: unknown }).replyReason ?? "").trim(),
+            subjectCue: String((entry as { subjectCue?: unknown }).subjectCue ?? "").trim(),
             latestSnippet: String((entry as { latestSnippet?: unknown }).latestSnippet ?? "").trim(),
             priority: normalizeWeChatPriority(
               (entry as { priority?: unknown }).priority,
@@ -1287,6 +1589,16 @@ function normalizeWeChatVisualAnalysis(raw: Record<string, unknown> | null | und
           y: clampUnit(composerBoxRaw.y, 0),
           width: clampUnit(composerBoxRaw.width, 0),
           height: clampUnit(composerBoxRaw.height, 0)
+        }
+      : null;
+  const composerEntryPointRaw = (composerRaw?.entryPoint ?? null) as Record<string, unknown> | null;
+  const composerEntryPoint =
+    composerEntryPointRaw &&
+    Number.isFinite(Number(composerEntryPointRaw.x)) &&
+    Number.isFinite(Number(composerEntryPointRaw.y))
+      ? {
+          x: clampUnit(composerEntryPointRaw.x, 0),
+          y: clampUnit(composerEntryPointRaw.y, 0)
         }
       : null;
   const recoveryRaw = (raw.recoveryControl ?? null) as Record<string, unknown> | null;
@@ -1347,7 +1659,13 @@ function normalizeWeChatVisualAnalysis(raw: Record<string, unknown> | null | und
     composer: {
       present: Boolean(composerRaw?.present),
       evidence: String(composerRaw?.evidence ?? "").trim(),
-      approxBox: composerBox
+      approxBox: composerBox,
+      entryPoint: composerEntryPoint,
+      hasDraftText:
+        typeof composerRaw?.hasDraftText === "boolean"
+          ? composerRaw.hasDraftText
+          : null,
+      draftPreview: String(composerRaw?.draftPreview ?? "").trim() || null
     },
     scene: normalizedScene,
     sceneEvidence: String(raw.sceneEvidence ?? raw.openThread ?? composerRaw?.evidence ?? "").trim(),
@@ -1516,6 +1834,42 @@ function deriveWeChatSkipReasons({
   if (vision.scene === "thread" && !vision.composer.present) {
     reasons.push("no_visible_composer");
   }
+  if (vision.composer.present && vision.composer.hasDraftText === true) {
+    reasons.push("existing_draft_visible");
+  }
+
+  return uniqueStrings([
+    ...reasons,
+    ...(vision.composer.hasDraftText && vision.composer.draftPreview
+      ? [`draft:${vision.composer.draftPreview}`]
+      : []),
+    ...vision.visibleUnreadThreads
+      .filter((thread) => !thread.shouldReply || !thread.replyable)
+      .map((thread) => thread.replyReason || `skip:${thread.name}`)
+  ]).slice(0, 6);
+}
+
+function deriveDesktopVisualSkipReasons({
+  vision,
+  unreadThread
+}: {
+  vision: DesktopVisualAnalysis;
+  unreadThread: DesktopVisualThreadSummary | null;
+}): string[] {
+  const reasons: string[] = [];
+  if (vision.scene === "foreign_view") {
+    reasons.push("foreign_view");
+  }
+  if (!unreadThread) {
+    if (vision.visibleUnreadThreads.some((thread) => !thread.shouldReply || !thread.replyable)) {
+      reasons.push("no_reply_worthy_thread");
+    } else {
+      reasons.push("no_visible_thread");
+    }
+  }
+  if (vision.scene === "thread" && !vision.composer.present) {
+    reasons.push("no_visible_composer");
+  }
 
   return uniqueStrings([
     ...reasons,
@@ -1523,6 +1877,414 @@ function deriveWeChatSkipReasons({
       .filter((thread) => !thread.shouldReply || !thread.replyable)
       .map((thread) => thread.replyReason || `skip:${thread.name}`)
   ]).slice(0, 6);
+}
+
+function visionErrorSkipReasons(base: DesktopConversationPackAnalysis | null, error: unknown): string[] {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return uniqueStrings([
+    ...(Array.isArray(base?.skipReasons) ? base.skipReasons : []),
+    message ? `vision_error:${message}` : "vision_error"
+  ]).slice(0, 6);
+}
+
+async function resolveDesktopVisionCandidateBounds(
+  worldState: WorldState | null,
+  appName: string,
+  box: WeChatVisualComposerBox | null
+): Promise<InteractionCandidate["bounds"] | undefined> {
+  if (!box) {
+    return undefined;
+  }
+  const frame = await resolveDesktopVisionFrame(worldState, appName);
+  if (!frame) {
+    return undefined;
+  }
+  const x = Number(frame.x ?? 0) + Number(frame.width ?? 0) * box.x;
+  const y = Number(frame.y ?? 0) + Number(frame.height ?? 0) * box.y;
+  const width = Number(frame.width ?? 0) * box.width;
+  const height = Number(frame.height ?? 0) * box.height;
+  return {
+    x,
+    y,
+    width,
+    height,
+    centerX: x + width / 2,
+    centerY: y + height / 2
+  };
+}
+
+async function resolveDesktopVisionClickPoint(
+  worldState: WorldState | null,
+  appName: string,
+  box: WeChatVisualComposerBox | null,
+  fallback: { x: number; y: number } | null = null
+): Promise<{ x: number; y: number } | null> {
+  const bounds = await resolveDesktopVisionCandidateBounds(worldState, appName, box);
+  if (bounds) {
+    return {
+      x: bounds.centerX,
+      y: bounds.centerY
+    };
+  }
+  if (!fallback) {
+    return null;
+  }
+  const frame = await resolveDesktopVisionFrame(worldState, appName);
+  if (!frame) {
+    return null;
+  }
+  return {
+    x: Number(frame.x ?? 0) + Number(frame.width ?? 0) * fallback.x,
+    y: Number(frame.y ?? 0) + Number(frame.height ?? 0) * fallback.y
+  };
+}
+
+function buildDesktopPointBounds(
+  worldState: WorldState | null,
+  appName: string,
+  point: { x: number; y: number } | null,
+  radius = 18
+): InteractionCandidate["bounds"] | null {
+  if (!point) {
+    return null;
+  }
+  const frame = findDesktopWindowBounds(worldState, appName);
+  if (!frame) {
+    return null;
+  }
+  const centerX = Number(frame.x ?? 0) + Number(frame.width ?? 0) * Number(point.x ?? 0);
+  const centerY = Number(frame.y ?? 0) + Number(frame.height ?? 0) * Number(point.y ?? 0);
+  if (!Number.isFinite(centerX) || !Number.isFinite(centerY)) {
+    return null;
+  }
+  return {
+    x: centerX - radius,
+    y: centerY - radius,
+    width: radius * 2,
+    height: radius * 2,
+    centerX,
+    centerY
+  };
+}
+
+function clampNormalizedUnit(value: number) {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.min(1, Math.max(0, value));
+}
+
+function isPointWithinNormalizedBox(
+  point: { x: number; y: number } | null | undefined,
+  box: WeChatVisualComposerBox | null | undefined
+) {
+  if (!point || !box) {
+    return false;
+  }
+  return (
+    Number(point.x) >= Number(box.x) &&
+    Number(point.x) <= Number(box.x) + Number(box.width) &&
+    Number(point.y) >= Number(box.y) &&
+    Number(point.y) <= Number(box.y) + Number(box.height)
+  );
+}
+
+function deriveOutlookComposerBodyPoint({
+  approxBox,
+  entryPoint
+}: {
+  approxBox: WeChatVisualComposerBox | null | undefined;
+  entryPoint: { x: number; y: number } | null | undefined;
+}): { x: number; y: number } | null {
+  const box = approxBox ?? null;
+  const candidate = entryPoint ?? null;
+  if (box && candidate && isPointWithinNormalizedBox(candidate, box)) {
+    const minBodyY = Number(box.y) + Math.max(Number(box.height) * 0.14, 0.045);
+    const maxBodyY = Number(box.y) + Number(box.height) * 0.62;
+    const minBodyX = Number(box.x) + Math.min(Number(box.width) * 0.04, 0.035);
+    const maxBodyX = Number(box.x) + Number(box.width) * 0.82;
+    if (
+      Number(candidate.x) >= minBodyX &&
+      Number(candidate.x) <= maxBodyX &&
+      Number(candidate.y) >= minBodyY &&
+      Number(candidate.y) <= maxBodyY
+    ) {
+      return {
+        x: clampNormalizedUnit(Number(candidate.x)),
+        y: clampNormalizedUnit(Number(candidate.y))
+      };
+    }
+  }
+
+  if (!box) {
+    return candidate
+      ? {
+          x: clampNormalizedUnit(Number(candidate.x)),
+          y: clampNormalizedUnit(Number(candidate.y))
+        }
+      : null;
+  }
+
+  return {
+    x: clampNormalizedUnit(Number(box.x) + Math.min(Math.max(Number(box.width) * 0.1, 0.035), Number(box.width) * 0.22)),
+    y: clampNormalizedUnit(Number(box.y) + Math.min(Math.max(Number(box.height) * 0.18, 0.06), Number(box.height) * 0.34))
+  };
+}
+
+function deriveOutlookComposerVerifyRegionFromVisual(
+  composer: { approxBox: WeChatVisualComposerBox | null | undefined; entryPoint: { x: number; y: number } | null | undefined } | null
+): { x: number; y: number; width: number; height: number } | null {
+  const box = composer?.approxBox ?? null;
+  const bodyPoint = deriveOutlookComposerBodyPoint({
+    approxBox: box,
+    entryPoint: composer?.entryPoint ?? null
+  });
+  if (!box || !bodyPoint) {
+    return null;
+  }
+
+  const left = Math.max(
+    Number(box.x) + Math.min(Number(box.width) * 0.03, 0.025),
+    Number(bodyPoint.x) - Math.min(Number(box.width) * 0.03, 0.025)
+  );
+  const top = Math.max(
+    Number(box.y) + Math.max(Number(box.height) * 0.16, 0.055),
+    Number(bodyPoint.y) - Math.min(Number(box.height) * 0.035, 0.04)
+  );
+  const right = Math.min(1, Number(box.x) + Number(box.width) * 0.88);
+  const bottom = Math.min(1, Number(box.y) + Number(box.height) * 0.42);
+  const width = Math.max(0.18, right - left);
+  const height = Math.max(0.08, bottom - top);
+  return {
+    x: clampNormalizedUnit(left),
+    y: clampNormalizedUnit(top),
+    width: clampNormalizedUnit(width),
+    height: clampNormalizedUnit(height)
+  };
+}
+
+function resolveDesktopNormalizedRegionBounds(
+  worldState: WorldState | null,
+  appName: string,
+  region: { x: number; y: number; width: number; height: number } | null | undefined
+): InteractionCandidate["bounds"] | null {
+  const frame = findDesktopWindowBounds(worldState, appName);
+  if (!frame || !region) {
+    return null;
+  }
+  const frameX = Number(frame.x ?? NaN);
+  const frameY = Number(frame.y ?? NaN);
+  const frameWidth = Number(frame.width ?? NaN);
+  const frameHeight = Number(frame.height ?? NaN);
+  const x = Number(region.x ?? NaN);
+  const y = Number(region.y ?? NaN);
+  const width = Number(region.width ?? NaN);
+  const height = Number(region.height ?? NaN);
+  if (![frameX, frameY, frameWidth, frameHeight, x, y, width, height].every((value) => Number.isFinite(value)) || frameWidth <= 0 || frameHeight <= 0) {
+    return null;
+  }
+  const absoluteX = frameX + frameWidth * x;
+  const absoluteY = frameY + frameHeight * y;
+  const absoluteWidth = frameWidth * width;
+  const absoluteHeight = frameHeight * height;
+  return {
+    x: absoluteX,
+    y: absoluteY,
+    width: absoluteWidth,
+    height: absoluteHeight,
+    centerX: absoluteX + absoluteWidth / 2,
+    centerY: absoluteY + absoluteHeight / 2
+  };
+}
+
+function collectDesktopOcrLinesInRegion(
+  worldState: WorldState | null,
+  appName: string,
+  region: { x: number; y: number; width: number; height: number } | null | undefined
+): string[] {
+  const bounds = resolveDesktopNormalizedRegionBounds(worldState, appName, region);
+  if (!bounds) {
+    return [];
+  }
+  return (Array.isArray(worldState?.ocrBlocks) ? worldState.ocrBlocks : [])
+    .filter((block) => {
+      const centerX = Number(block?.bounds?.centerX ?? NaN);
+      const centerY = Number(block?.bounds?.centerY ?? NaN);
+      return (
+        Number.isFinite(centerX)
+        && Number.isFinite(centerY)
+        && centerX >= Number(bounds.x)
+        && centerX <= Number(bounds.x) + Number(bounds.width)
+        && centerY >= Number(bounds.y)
+        && centerY <= Number(bounds.y) + Number(bounds.height)
+      );
+    })
+    .sort((left, right) => {
+      const leftY = Number(left?.bounds?.centerY ?? 0);
+      const rightY = Number(right?.bounds?.centerY ?? 0);
+      if (Math.abs(leftY - rightY) > 8) {
+        return leftY - rightY;
+      }
+      return Number(left?.bounds?.centerX ?? 0) - Number(right?.bounds?.centerX ?? 0);
+    })
+    .map((block) => String(block?.text ?? "").replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+}
+
+const OUTLOOK_QUOTE_MARKER_PATTERN = /^(on .+wrote:|from:|date:|subject:|cc:|bcc:|get outlook for mac|>)/iu;
+const OUTLOOK_COMPOSER_NOISE_PATTERN = /^(reply|send|discard|attach|loop components|signature|importance|from|to|cc|bcc|aptos|\d+)$/iu;
+
+function outlookComposerContainsAuthoredDraftText(lines: string[]): boolean {
+  const normalizedLines = lines
+    .map((line) => String(line ?? "").replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  const quoteIndex = normalizedLines.findIndex((line) => OUTLOOK_QUOTE_MARKER_PATTERN.test(line));
+  const authoredLines = (quoteIndex === -1 ? normalizedLines : normalizedLines.slice(0, quoteIndex)).filter(
+    (line) => !OUTLOOK_COMPOSER_NOISE_PATTERN.test(line)
+  );
+  return authoredLines.some((line) => /[\p{L}\p{N}]/u.test(line));
+}
+
+function reconcileOutlookVisualDraftState(
+  worldState: WorldState | null,
+  vision: DesktopVisualAnalysis | null
+): DesktopVisualAnalysis | null {
+  if (!vision?.composer.present || vision.composer.hasDraftText !== true) {
+    return vision;
+  }
+  if (String(vision.composer.draftPreview ?? "").trim()) {
+    return vision;
+  }
+  const composeVerifyRegion = deriveOutlookComposerVerifyRegionFromVisual(vision.composer);
+  const composeLines = collectDesktopOcrLinesInRegion(worldState, "Microsoft Outlook", composeVerifyRegion);
+  if (outlookComposerContainsAuthoredDraftText(composeLines)) {
+    return vision;
+  }
+  return {
+    ...vision,
+    composer: {
+      ...vision.composer,
+      hasDraftText: false,
+      draftPreview: null
+    }
+  };
+}
+
+function deriveOutlookComposerBodyBounds(
+  bounds: InteractionCandidate["bounds"] | null | undefined
+): InteractionCandidate["bounds"] | null {
+  if (!bounds) {
+    return null;
+  }
+  const x = Number(bounds.x ?? NaN);
+  const y = Number(bounds.y ?? NaN);
+  const width = Number(bounds.width ?? NaN);
+  const height = Number(bounds.height ?? NaN);
+  if (![x, y, width, height].every((value) => Number.isFinite(value)) || width <= 0 || height <= 0) {
+    return null;
+  }
+
+  const bodyX = x + Math.min(Math.max(width * 0.08, 28), width * 0.24);
+  const bodyY = y + Math.min(Math.max(height * 0.18, 54), height * 0.34);
+  const bodyWidth = Math.min(Math.max(width * 0.52, 220), width * 0.74);
+  const bodyHeight = Math.min(Math.max(height * 0.16, 80), height * 0.24);
+  return {
+    x: bodyX,
+    y: bodyY,
+    width: bodyWidth,
+    height: bodyHeight,
+    centerX: bodyX + Math.min(48, bodyWidth / 2),
+    centerY: bodyY + Math.min(22, bodyHeight / 2)
+  };
+}
+
+function buildDesktopNormalizedRegionFromBounds(
+  worldState: WorldState | null,
+  appName: string,
+  bounds: InteractionCandidate["bounds"] | null | undefined
+): { x: number; y: number; width: number; height: number } | null {
+  const frame = findDesktopWindowBounds(worldState, appName);
+  if (!frame || !bounds) {
+    return null;
+  }
+  const frameX = Number(frame.x ?? NaN);
+  const frameY = Number(frame.y ?? NaN);
+  const frameWidth = Number(frame.width ?? NaN);
+  const frameHeight = Number(frame.height ?? NaN);
+  const x = Number(bounds.x ?? NaN);
+  const y = Number(bounds.y ?? NaN);
+  const width = Number(bounds.width ?? NaN);
+  const height = Number(bounds.height ?? NaN);
+  if (![frameX, frameY, frameWidth, frameHeight, x, y, width, height].every((value) => Number.isFinite(value)) || frameWidth <= 0 || frameHeight <= 0) {
+    return null;
+  }
+  return {
+    x: clampNormalizedUnit((x - frameX) / frameWidth),
+    y: clampNormalizedUnit((y - frameY) / frameHeight),
+    width: clampNormalizedUnit(width / frameWidth),
+    height: clampNormalizedUnit(height / frameHeight)
+  };
+}
+
+async function summarizeDesktopVisualThreadCandidates(
+  worldState: WorldState | null,
+  appName: string,
+  prefix: string,
+  threads: DesktopVisualThreadSummary[]
+): Promise<DesktopProbeCandidateSummary[]> {
+  const summaries: DesktopProbeCandidateSummary[] = [];
+  for (const thread of threads) {
+    summaries.push({
+      id: `${prefix}-vision-unread`,
+      text: thread.name,
+      role: "text",
+      interactive: true,
+      source: "vision",
+      score: 100,
+      bounds: await resolveDesktopVisionCandidateBounds(worldState, appName, thread.approxBox),
+      hints: [
+        thread.evidence,
+        thread.latestSnippet,
+        thread.replyReason,
+        `conversation:${thread.conversationKind}`,
+        `priority:${thread.priority}`,
+        thread.replyable ? "replyable" : "non-replyable",
+        thread.shouldReply ? "should-reply" : "skip-reply"
+      ].filter(Boolean)
+    });
+  }
+  return summaries;
+}
+
+function pickDesktopVisualUnreadThread(vision: DesktopVisualAnalysis | null): DesktopVisualThreadSummary | null {
+  if (!vision) {
+    return null;
+  }
+
+  const eligible = vision.visibleUnreadThreads.filter((thread) => thread.replyable && thread.shouldReply);
+  const scored = eligible.slice().sort((left, right) => {
+    const priority = (value: DesktopVisualThreadSummary): number => {
+      if (value.priority === "high") {
+        return 3;
+      }
+      if (value.priority === "medium") {
+        return 2;
+      }
+      return 1;
+    };
+    const kind = (value: DesktopVisualThreadSummary): number => {
+      if (value.conversationKind === "direct") {
+        return 3;
+      }
+      if (value.conversationKind === "thread" || value.conversationKind === "mail") {
+        return 2;
+      }
+      return 1;
+    };
+    return priority(right) - priority(left) || kind(right) - kind(left);
+  });
+
+  return scored[0] ?? null;
 }
 
 function resolveWeChatGroundedOpenPoint(
@@ -1583,6 +2345,121 @@ function resolveWeChatGroundedOpenPoint(
   }
 
   return null;
+}
+
+function buildAbsolutePointBounds(
+  point: { x: number; y: number } | null,
+  radius = 18
+): InteractionCandidate["bounds"] | null {
+  if (!point) {
+    return null;
+  }
+
+  const centerX = Number(point.x ?? NaN);
+  const centerY = Number(point.y ?? NaN);
+  if (!Number.isFinite(centerX) || !Number.isFinite(centerY)) {
+    return null;
+  }
+
+  return {
+    x: centerX - radius,
+    y: centerY - radius,
+    width: radius * 2,
+    height: radius * 2,
+    centerX,
+    centerY
+  };
+}
+
+function resolveOutlookGroundedOpenPoint(
+  bounds: InteractionCandidate["bounds"] | null,
+  groundedTarget: WeChatVisualThreadGrounding | null,
+  fallbackOpenPoint: { x?: number; y?: number } | null
+): { x: number; y: number } | null {
+  const normalizedFallbackPoint =
+    fallbackOpenPoint
+    && Number.isFinite(Number(fallbackOpenPoint.x ?? NaN))
+    && Number.isFinite(Number(fallbackOpenPoint.y ?? NaN))
+      ? {
+          x: Number(fallbackOpenPoint.x),
+          y: Number(fallbackOpenPoint.y)
+        }
+      : null;
+  if (!bounds) {
+    return normalizedFallbackPoint;
+  }
+
+  const rowBox = groundedTarget?.targetVisible ? groundedTarget.rowBox ?? null : null;
+  const clickPoint = groundedTarget?.targetVisible ? groundedTarget.clickPoint ?? null : null;
+  const normalizedY =
+    rowBox
+      ? clampUnit(rowBox.y + rowBox.height * 0.5, clickPoint ? clampUnit(clickPoint.y, 0.5) : 0.5)
+      : clickPoint
+        ? clampUnit(clickPoint.y, 0.5)
+        : null;
+  const preferredX =
+    rowBox
+      ? clampUnit(rowBox.x + rowBox.width * 0.72, 0.28)
+      : clickPoint
+        ? clampUnit(clickPoint.x, 0.28)
+        : null;
+  const normalizedX = preferredX === null ? null : Math.max(0.24, Math.min(0.34, preferredX));
+
+  if (normalizedX === null || normalizedY === null) {
+    return normalizedFallbackPoint;
+  }
+
+  const x = Number(bounds.x ?? 0) + Number(bounds.width ?? 0) * normalizedX;
+  const y = Number(bounds.y ?? 0) + Number(bounds.height ?? 0) * normalizedY;
+  if (!Number.isFinite(x) || !Number.isFinite(y)) {
+    return normalizedFallbackPoint;
+  }
+
+  return { x, y };
+}
+
+function boundsCenter(bounds: InteractionCandidate["bounds"] | null | undefined): { x: number; y: number } | null {
+  if (!bounds) {
+    return null;
+  }
+  const centerX = Number(bounds.centerX ?? NaN);
+  const centerY = Number(bounds.centerY ?? NaN);
+  if (Number.isFinite(centerX) && Number.isFinite(centerY)) {
+    return { x: centerX, y: centerY };
+  }
+
+  const x = Number(bounds.x ?? NaN);
+  const y = Number(bounds.y ?? NaN);
+  const width = Number(bounds.width ?? NaN);
+  const height = Number(bounds.height ?? NaN);
+  if ([x, y, width, height].every((value) => Number.isFinite(value))) {
+    return {
+      x: x + width / 2,
+      y: y + height / 2
+    };
+  }
+
+  return null;
+}
+
+function boundsDiverge(
+  primary: InteractionCandidate["bounds"] | null | undefined,
+  secondary: InteractionCandidate["bounds"] | null | undefined
+): boolean {
+  const primaryCenter = boundsCenter(primary);
+  const secondaryCenter = boundsCenter(secondary);
+  if (!primaryCenter || !secondaryCenter) {
+    return false;
+  }
+
+  const primaryWidth = Number(primary?.width ?? 0);
+  const primaryHeight = Number(primary?.height ?? 0);
+  const thresholdX = Math.max(primaryWidth * 0.45, 26);
+  const thresholdY = Math.max(primaryHeight * 0.6, 20);
+  return (
+    Math.abs(primaryCenter.x - secondaryCenter.x) > thresholdX
+    || Math.abs(primaryCenter.y - secondaryCenter.y) > thresholdY
+  );
 }
 
 async function analyzeWeChatDesktopVisualState({
@@ -1772,6 +2649,815 @@ async function analyzeWeChatDesktopVisualState({
   }
 }
 
+async function analyzeSlackDesktopVisualState({
+  modelClient,
+  worldState,
+  timeoutMs = 20000
+}: {
+  modelClient: Pick<LivePackControlPlane["modelClient"], "supportsImageJson" | "analyzeImageJson"> | null | undefined;
+  worldState: WorldState | null;
+  timeoutMs?: number;
+}): Promise<DesktopVisualAnalysis | null> {
+  if (!modelClient?.supportsImageJson?.()) {
+    return null;
+  }
+
+  const imagePath = String(worldState?.capture?.path ?? "").trim();
+  if (!imagePath) {
+    return null;
+  }
+
+  const lines = visibleLines(worldState).slice(0, 12);
+  const imageSize = await readCaptureImageSize(imagePath);
+  const payload = [
+    "Analyze this Slack desktop screenshot and return strict JSON only.",
+    "Use one of these scenes: list, thread, foreign_view, unknown.",
+    "list means the visible Slack conversation list can open an unread reply-worthy DM or channel.",
+    "thread means a specific DM or channel is open and the bottom message composer is visible.",
+    "foreign_view means modal, settings, profile, file preview, search, or another non-reply surface that should be dismissed.",
+    "If recovery is needed, set recommendedRecoveryAction to recover_to_list and return the best visible recoveryControl.",
+    "Return only the single best unread reply-worthy thread as bestUnreadThread.",
+    "Never return navigation chrome such as Home, DMs, Activity, Files, Later, More, or section headers as bestUnreadThread.",
+    "Only include a thread when there is clear unread evidence such as bold styling, mention badge, unread badge, blue dot, or unread count.",
+    "Prefer direct messages and explicit mentions over noisy channels.",
+    "All approxBox values must be normalized 0..1 relative to the screenshot.",
+    lines.length ? `Visible OCR lines:\n${lines.join("\n")}` : "",
+    "Keep evidence and snippets short."
+  ].filter(Boolean).join("\n\n");
+
+  let timeoutHandle: NodeJS.Timeout | null = null;
+  try {
+    const result = await Promise.race([
+      modelClient.analyzeImageJson<Record<string, unknown>>({
+        schemaName: "agentos_slack_desktop_visual",
+        schema: {
+          type: "object",
+          properties: {
+            scene: { type: "string", enum: ["list", "thread", "foreign_view", "unknown"] },
+            sceneEvidence: { type: "string" },
+            recommendedRecoveryAction: {
+              type: "string",
+              enum: ["recover_to_list", "complete_signin", "complete_verification", "takeover", "none"]
+            },
+            recoveryControl: {
+              type: "object",
+              properties: {
+                present: { type: "boolean" },
+                evidence: { type: "string" },
+                approxBox: {
+                  type: ["object", "null"],
+                  properties: {
+                    x: { type: "number" },
+                    y: { type: "number" },
+                    width: { type: "number" },
+                    height: { type: "number" }
+                  },
+                  required: ["x", "y", "width", "height"],
+                  additionalProperties: false
+                }
+              },
+              required: ["present", "evidence", "approxBox"],
+              additionalProperties: false
+            },
+            openThread: { type: ["string", "null"] },
+            bestUnreadThread: {
+              type: "object",
+              properties: {
+                present: { type: "boolean" },
+                name: { type: "string" },
+                evidence: { type: "string" },
+                replyable: { type: "boolean" },
+                conversationKind: { type: "string", enum: ["direct", "channel", "group", "unknown"] },
+                shouldReply: { type: "boolean" },
+                replyReason: { type: "string" },
+                subjectCue: { type: "string" },
+                latestSnippet: { type: "string" },
+                priority: { type: "string", enum: ["high", "medium", "low"] },
+                approxBox: {
+                  type: ["object", "null"],
+                  properties: {
+                    x: { type: "number" },
+                    y: { type: "number" },
+                    width: { type: "number" },
+                    height: { type: "number" }
+                  },
+                  required: ["x", "y", "width", "height"],
+                  additionalProperties: false
+                }
+              },
+              required: [
+                "present",
+                "name",
+                "evidence",
+                "replyable",
+                "conversationKind",
+                "shouldReply",
+                "replyReason",
+                "subjectCue",
+                "latestSnippet",
+                "priority",
+                "approxBox"
+              ],
+              additionalProperties: false
+            },
+            composer: {
+              type: "object",
+              properties: {
+                present: { type: "boolean" },
+                evidence: { type: "string" },
+                approxBox: {
+                  type: ["object", "null"],
+                  properties: {
+                    x: { type: "number" },
+                    y: { type: "number" },
+                    width: { type: "number" },
+                    height: { type: "number" }
+                  },
+                  required: ["x", "y", "width", "height"],
+                  additionalProperties: false
+                }
+              },
+              required: ["present", "evidence", "approxBox"],
+              additionalProperties: false
+            }
+          },
+          required: ["scene", "sceneEvidence", "recommendedRecoveryAction", "recoveryControl", "openThread", "bestUnreadThread", "composer"],
+          additionalProperties: false
+        },
+        systemPrompt:
+          "You are a strict UI grounding model for AgentOS. Analyze Slack desktop screenshots for unread conversation selection and recovery. Return JSON only.",
+        userPrompt: payload,
+        imagePath,
+        temperature: 0
+      }),
+      new Promise<never>((_, reject) => {
+        timeoutHandle = setTimeout(() => {
+          reject(new Error(`Slack desktop vision analysis timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+      })
+    ]);
+
+    return normalizeDesktopVisualAnalysis(result, {
+      normalizeName: (value) => normalizeSlackSummary(String(value ?? "")),
+      imageSize
+    });
+  } finally {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
+  }
+}
+
+const SLACK_DESKTOP_DETECT_ANALYZE_TIMEOUT_MS = 12000;
+const OUTLOOK_DESKTOP_DETECT_ANALYZE_TIMEOUT_MS = 30000;
+const DESKTOP_VLM_SCROLL_SCAN_MAX_PASSES = 3;
+
+async function analyzeOutlookDesktopVisualState({
+  modelClient,
+  worldState,
+  timeoutMs = 20000
+}: {
+  modelClient: Pick<LivePackControlPlane["modelClient"], "supportsImageJson" | "analyzeImageJson"> | null | undefined;
+  worldState: WorldState | null;
+  timeoutMs?: number;
+}): Promise<DesktopVisualAnalysis | null> {
+  if (!modelClient?.supportsImageJson?.()) {
+    return null;
+  }
+
+  const imagePath = String(worldState?.capture?.path ?? "").trim();
+  if (!imagePath) {
+    return null;
+  }
+
+  const lines = visibleLines(worldState).slice(0, 12);
+  const imageSize = await readCaptureImageSize(imagePath);
+  const payload = [
+    "Analyze this Microsoft Outlook desktop screenshot and return strict JSON only.",
+    "Use one of these scenes: list, thread, foreign_view, unknown.",
+    "list means the visible message list can open an unread reply-worthy message.",
+    "thread means a specific email thread or message is open in the reading pane, even if no reply composer is visible yet.",
+    "Set composer.present independently. When the thread is open but no inline reply editor is visible, still use scene=thread and composer.present=false.",
+    "foreign_view means search results, calendar, settings, folder dialog, attachment preview, modal, or another non-reply surface that should be dismissed.",
+    "If recovery is needed, set recommendedRecoveryAction to recover_to_list and return the best visible recoveryControl.",
+    "If the current folder is not a reply-worthy Inbox view, and a visible control such as Inbox, Other, Focused, or Load more conversations would recover a better unread list, use recover_to_list and point recoveryControl at that control.",
+    "Return only the single best unread reply-worthy message row as bestUnreadThread.",
+    "Never return toolbar or mailbox chrome as bestUnreadThread.",
+    "Only include a row when there is clear unread evidence such as a blue unread dot, explicit unread badge/count, or unmistakable unread styling.",
+    "Do not treat a selected row or reading-pane highlight as unread by itself.",
+    "Bold sender or subject alone is not enough if the row appears selected or already open in the reading pane.",
+    "Set selectedRow to the sender or short subject/title of the currently highlighted row in the center message list. Use null when the selected row is unclear or the message list is not visible.",
+    "Set bestUnreadThread.subjectCue to the short subject or title visible for that unread row. Use an empty string when no distinct subject/title is visible.",
+    "Prefer person-to-person email over newsletters and system notifications.",
+    "If composer.present is true, approxBox should cover the visible reply composer area and entryPoint should be a single normalized x/y point inside the editable reply body where typing should start.",
+    "Do not place composer.entryPoint on the Send button, toolbar, From/To/Subject fields, or quoted original message.",
+    "If composer.present is true, set composer.hasDraftText=true only when the editable reply body already contains authored draft text above the quoted original message.",
+    "If composer.hasDraftText is true, set composer.draftPreview to a short preview of that authored draft text.",
+    "Do not treat the quoted original email, recipient chips, toolbar labels, or signatures as composer draft text.",
+    "All approxBox values must be normalized 0..1 relative to the screenshot.",
+    lines.length ? `Visible OCR lines:\n${lines.join("\n")}` : "",
+    "Keep evidence and snippets short."
+  ].filter(Boolean).join("\n\n");
+
+  let timeoutHandle: NodeJS.Timeout | null = null;
+  try {
+    const result = await Promise.race([
+      modelClient.analyzeImageJson<Record<string, unknown>>({
+        schemaName: "agentos_outlook_desktop_visual",
+        schema: {
+          type: "object",
+          properties: {
+            scene: { type: "string", enum: ["list", "thread", "foreign_view", "unknown"] },
+            sceneEvidence: { type: "string" },
+            recommendedRecoveryAction: {
+              type: "string",
+              enum: ["recover_to_list", "complete_signin", "complete_verification", "takeover", "none"]
+            },
+            recoveryControl: {
+              type: "object",
+              properties: {
+                present: { type: "boolean" },
+                evidence: { type: "string" },
+                approxBox: {
+                  type: ["object", "null"],
+                  properties: {
+                    x: { type: "number" },
+                    y: { type: "number" },
+                    width: { type: "number" },
+                    height: { type: "number" }
+                  },
+                  required: ["x", "y", "width", "height"],
+                  additionalProperties: false
+                }
+              },
+              required: ["present", "evidence", "approxBox"],
+              additionalProperties: false
+            },
+            openThread: { type: ["string", "null"] },
+            selectedRow: { type: ["string", "null"] },
+            bestUnreadThread: {
+              type: "object",
+              properties: {
+                present: { type: "boolean" },
+                name: { type: "string" },
+                evidence: { type: "string" },
+                replyable: { type: "boolean" },
+                conversationKind: { type: "string", enum: ["mail", "newsletter", "system", "unknown"] },
+                shouldReply: { type: "boolean" },
+                replyReason: { type: "string" },
+                subjectCue: { type: "string" },
+                latestSnippet: { type: "string" },
+                priority: { type: "string", enum: ["high", "medium", "low"] },
+                approxBox: {
+                  type: ["object", "null"],
+                  properties: {
+                    x: { type: "number" },
+                    y: { type: "number" },
+                    width: { type: "number" },
+                    height: { type: "number" }
+                  },
+                  required: ["x", "y", "width", "height"],
+                  additionalProperties: false
+                }
+              },
+              required: [
+                "present",
+                "name",
+                "evidence",
+                "replyable",
+                "conversationKind",
+                "shouldReply",
+                "replyReason",
+                "subjectCue",
+                "latestSnippet",
+                "priority",
+                "approxBox"
+              ],
+              additionalProperties: false
+            },
+            composer: {
+              type: "object",
+              properties: {
+                present: { type: "boolean" },
+                evidence: { type: "string" },
+                hasDraftText: { type: ["boolean", "null"] },
+                draftPreview: { type: ["string", "null"] },
+                entryPoint: {
+                  type: ["object", "null"],
+                  properties: {
+                    x: { type: "number" },
+                    y: { type: "number" }
+                  },
+                  required: ["x", "y"],
+                  additionalProperties: false
+                },
+                approxBox: {
+                  type: ["object", "null"],
+                  properties: {
+                    x: { type: "number" },
+                    y: { type: "number" },
+                    width: { type: "number" },
+                    height: { type: "number" }
+                  },
+                  required: ["x", "y", "width", "height"],
+                  additionalProperties: false
+                }
+              },
+              required: ["present", "evidence", "hasDraftText", "draftPreview", "approxBox"],
+              additionalProperties: false
+            }
+          },
+          required: ["scene", "sceneEvidence", "recommendedRecoveryAction", "recoveryControl", "openThread", "selectedRow", "bestUnreadThread", "composer"],
+          additionalProperties: false
+        },
+        systemPrompt:
+          "You are a strict UI grounding model for AgentOS. Analyze Outlook desktop screenshots for unread message selection and recovery. Return JSON only.",
+        userPrompt: payload,
+        imagePath,
+        temperature: 0
+      }),
+      new Promise<never>((_, reject) => {
+        timeoutHandle = setTimeout(() => {
+          reject(new Error(`Outlook desktop vision analysis timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+      })
+    ]);
+
+    return normalizeDesktopVisualAnalysis(result, {
+      normalizeName: (value) => normalizeMailSummary(String(value ?? "")),
+      imageSize
+    });
+  } finally {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
+  }
+}
+
+const OUTLOOK_INBOX_RECOVERY_PATTERN = /\binbox\b/iu;
+const OUTLOOK_NON_INBOX_FOLDER_PATTERN = /\b(deleted items|junk email|archive|sent|drafts)\b/iu;
+
+function hasOutlookInboxRecoveryHint(lines: string[]) {
+  return lines.some((line) => OUTLOOK_INBOX_RECOVERY_PATTERN.test(line)) &&
+    lines.some((line) => OUTLOOK_NON_INBOX_FOLDER_PATTERN.test(line));
+}
+
+function findOutlookInboxRecoveryPoint(worldState: WorldState | null): { x: number; y: number } | null {
+  const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
+  const ocrBlocks = Array.isArray(worldState?.ocrBlocks) ? worldState.ocrBlocks : [];
+  const windowBounds = findDesktopWindowBounds(worldState, "Microsoft Outlook");
+  const maxSidebarX = windowBounds
+    ? windowBounds.x + windowBounds.width * 0.38
+    : Number.POSITIVE_INFINITY;
+  const ranked = [
+    ...candidates.map((candidate) => ({
+      text: String(candidate?.text ?? "").trim(),
+      bounds: candidate?.bounds ?? null,
+      score: (candidate?.isInteractive ? 10 : 0) + (candidate?.role === "button" ? 5 : 0)
+    })),
+    ...ocrBlocks.map((block) => ({
+      text: String(block?.text ?? "").trim(),
+      bounds: (block?.bounds ?? null) as InteractionCandidate["bounds"] | null,
+      score: 3
+    }))
+  ]
+    .filter((candidate) => {
+      const text = String(candidate.text ?? "").trim();
+      const bounds = candidate.bounds;
+      return (
+        OUTLOOK_INBOX_RECOVERY_PATTERN.test(text) &&
+        bounds &&
+        Number.isFinite(bounds.centerX) &&
+        Number.isFinite(bounds.centerY) &&
+        Number(bounds.centerX) <= maxSidebarX
+      );
+    })
+    .sort((left, right) => {
+      return Number(right.score ?? 0) - Number(left.score ?? 0)
+        || Number(left.bounds?.centerY ?? Number.POSITIVE_INFINITY) - Number(right.bounds?.centerY ?? Number.POSITIVE_INFINITY);
+    });
+  const match = ranked[0];
+  if (!match?.bounds || !Number.isFinite(Number(match.bounds.centerX)) || !Number.isFinite(Number(match.bounds.centerY))) {
+    return null;
+  }
+  return {
+    x: Number(match.bounds.centerX),
+    y: Number(match.bounds.centerY)
+  };
+}
+
+async function groundOutlookDesktopRecoveryPoint({
+  modelClient,
+  worldState,
+  timeoutMs = 25000
+}: {
+  modelClient: Pick<LivePackControlPlane["modelClient"], "supportsImageJson" | "analyzeImageJson"> | null | undefined;
+  worldState: WorldState | null;
+  timeoutMs?: number;
+}): Promise<{ x: number; y: number } | null> {
+  if (!modelClient?.supportsImageJson?.()) {
+    return null;
+  }
+
+  const imagePath = String(worldState?.capture?.path ?? "").trim();
+  if (!imagePath) {
+    return null;
+  }
+
+  const lines = visibleLines(worldState).slice(0, 24);
+  const imageSize = await readCaptureImageSize(imagePath);
+  const hasLoadMoreConversations = lines.some((line) => /load more conversations/iu.test(line));
+  const hasInboxRecoveryHint = hasOutlookInboxRecoveryHint(lines);
+  const appContext = (worldState?.appContext ?? null) as Record<string, unknown> | null;
+  const captureWindowNumber = Number(appContext?.captureWindowNumber ?? NaN);
+  const rawInboxFallbackPoint = findOutlookInboxRecoveryPoint(worldState);
+  const inboxFallbackPoint = hasInboxRecoveryHint
+    ? Number.isFinite(captureWindowNumber)
+      ? await resolveDesktopObservedPoint(worldState, "Microsoft Outlook", rawInboxFallbackPoint)
+      : rawInboxFallbackPoint
+    : null;
+  if (hasInboxRecoveryHint && inboxFallbackPoint) {
+    return inboxFallbackPoint;
+  }
+  let timeoutHandle: NodeJS.Timeout | null = null;
+  try {
+    const result = await Promise.race([
+      modelClient.analyzeImageJson<Record<string, unknown>>({
+        schemaName: "agentos_outlook_desktop_recovery_control",
+        schema: {
+          type: "object",
+          properties: {
+            present: { type: "boolean" },
+            evidence: { type: "string" },
+            approxBox: {
+              type: ["object", "null"],
+              properties: {
+                x: { type: "number" },
+                y: { type: "number" },
+                width: { type: "number" },
+                height: { type: "number" }
+              },
+              required: ["x", "y", "width", "height"],
+              additionalProperties: false
+            }
+          },
+          required: ["present", "evidence", "approxBox"],
+          additionalProperties: false
+        },
+        systemPrompt:
+          hasInboxRecoveryHint
+            ? "You are a strict Outlook desktop grounding model for AgentOS. The current screenshot is on a non-Inbox folder or list while a visible Inbox row should be used to recover before scanning unread mail. Ground the Inbox row exactly unless it is clearly absent. Do not choose Load more conversations while a visible Inbox recovery row is present. Only if Inbox is not actually visible may you fall back to Other tab, Focused tab, Load more conversations, or another mailbox row that would expose unread mail. Return JSON only."
+            : hasLoadMoreConversations
+            ? "You are a strict Outlook desktop grounding model for AgentOS. The current screenshot shows an empty or filtered message list and a visible 'Load more conversations' control. Ground that control exactly unless it is clearly absent. Only if it is not actually visible may you fall back to Other tab, Focused tab, a visible Inbox row with unread count, or another mailbox row that would expose unread mail. Return JSON only."
+            : hasInboxRecoveryHint
+              ? "You are a strict Outlook desktop grounding model for AgentOS. The current screenshot is not on the best reply-worthy folder and a visible Inbox row should be used to recover before scanning unread mail. Ground the Inbox row exactly unless it is clearly absent. Only if Inbox is not actually visible may you fall back to Other tab, Focused tab, Load more conversations, or another mailbox row that would expose unread mail. Return JSON only."
+              : "You are a strict Outlook desktop grounding model for AgentOS. Identify the single visible control that would most likely reveal unread reply-worthy mail from the current screenshot. Prefer, in order: Other tab, Focused tab, Load more conversations, a visible Inbox row with unread count, or a mailbox row that would expose unread mail. Return JSON only.",
+        userPrompt: [
+          "Ground the best visible Outlook recovery control.",
+          "Return a normalized approxBox from 0 to 1 relative to the screenshot.",
+          "Do not return toolbar buttons, search, or the message pane.",
+          hasInboxRecoveryHint ? "If a visible Inbox row would recover from Deleted Items, Junk Email, Archive, Sent, or Drafts, return the Inbox row." : "",
+          hasLoadMoreConversations ? "If 'Load more conversations' is visible and no Inbox recovery row is needed, return that control." : "",
+          lines.length ? `Visible OCR lines:\n${lines.join("\n")}` : ""
+        ].filter(Boolean).join("\n\n"),
+        imagePath,
+        temperature: 0
+      }),
+      new Promise<never>((_, reject) => {
+        timeoutHandle = setTimeout(() => {
+          reject(new Error(`Outlook recovery grounding timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+      })
+    ]);
+
+    const box = normalizeVisionBox(
+      ((result.approxBox ?? null) as Record<string, unknown> | null),
+      imageSize
+    );
+    if (!result.present || !box) {
+      return inboxFallbackPoint;
+    }
+    const groundedPoint = await resolveDesktopVisionClickPoint(worldState, "Microsoft Outlook", box);
+    if (hasInboxRecoveryHint && inboxFallbackPoint && groundedPoint) {
+      const frame = await resolveDesktopVisionFrame(worldState, "Microsoft Outlook");
+      const sidebarLimit = frame
+        ? Number(frame.x ?? 0) + Number(frame.width ?? 0) * 0.35
+        : Number.POSITIVE_INFINITY;
+      if (!Number.isFinite(Number(groundedPoint.x)) || Number(groundedPoint.x) >= sidebarLimit) {
+        return inboxFallbackPoint;
+      }
+    }
+    return groundedPoint ?? inboxFallbackPoint;
+  } finally {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
+  }
+}
+
+async function groundDesktopVisualDismissPoint({
+  modelClient,
+  worldState,
+  appName,
+  capturePath,
+  captureBounds,
+  captureIsModal = false,
+  timeoutMs = 25000
+}: {
+  modelClient: Pick<LivePackControlPlane["modelClient"], "supportsImageJson" | "analyzeImageJson"> | null | undefined;
+  worldState: WorldState | null;
+  appName: string;
+  capturePath?: string | null;
+  captureBounds?: InteractionCandidate["bounds"] | null;
+  captureIsModal?: boolean;
+  timeoutMs?: number;
+}): Promise<{ x: number; y: number } | null> {
+  if (!modelClient?.supportsImageJson?.()) {
+    return null;
+  }
+
+  const imagePath = String(capturePath ?? worldState?.capture?.path ?? "").trim();
+  if (!imagePath) {
+    return null;
+  }
+
+  const imageSize = await readCaptureImageSize(imagePath);
+  if (!imageSize) {
+    return null;
+  }
+
+  const modalScopedCapture = captureIsModal && captureBounds
+    ? imageLikelyMatchesWindowBounds(imageSize, captureBounds)
+    : false;
+
+  if (modalScopedCapture) {
+    const frameBounds = captureBounds;
+    if (!frameBounds) {
+      return null;
+    }
+    const lines = visibleLines(worldState).slice(0, 20);
+    let timeoutHandle: NodeJS.Timeout | null = null;
+    try {
+      const result = await Promise.race([
+        modelClient.analyzeImageJson<Record<string, unknown>>({
+          schemaName: "agentos_desktop_modal_dismiss_control",
+          schema: {
+            type: "object",
+            properties: {
+              present: { type: "boolean" },
+              evidence: { type: "string" },
+              approxBox: {
+                type: ["object", "null"],
+                properties: {
+                  x: { type: "number" },
+                  y: { type: "number" },
+                  width: { type: "number" },
+                  height: { type: "number" }
+                },
+                required: ["x", "y", "width", "height"],
+                additionalProperties: false
+              }
+            },
+            required: ["present", "evidence", "approxBox"],
+            additionalProperties: false
+          },
+          systemPrompt:
+            `You are a strict desktop UI grounding model for AgentOS. This screenshot contains only a blocking ${appName} modal window. Identify the single visible control that would dismiss it and return JSON only.`,
+          userPrompt: [
+            `Analyze this ${appName} modal-window screenshot.`,
+            "Return the single best visible dismiss control that would close the modal or overlay.",
+            "Prefer, in order: Cancel, Close, Done, Back, Not now, Skip, or a visible X close button.",
+            "Do not return the list body, search field, or any control that keeps the modal open.",
+            "Return a normalized approxBox from 0 to 1 relative to the screenshot.",
+            lines.length ? `Visible OCR lines from the surrounding UI:\n${lines.join("\n")}` : ""
+          ].filter(Boolean).join("\n\n"),
+          imagePath,
+          temperature: 0
+        }),
+        new Promise<never>((_, reject) => {
+          timeoutHandle = setTimeout(() => {
+            reject(new Error(`${appName} modal dismiss grounding timed out after ${timeoutMs}ms`));
+          }, timeoutMs);
+        })
+      ]);
+
+      const box = normalizeVisionBox(
+        ((result.approxBox ?? null) as Record<string, unknown> | null),
+        imageSize
+      );
+      if (!result.present || !box) {
+        return null;
+      }
+      return resolveDesktopVisionBoxPoint({
+        bounds: frameBounds,
+        box
+      });
+    } finally {
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+      }
+    }
+  }
+
+  const modalBounds = findBlockingDesktopModalWindowBounds(worldState, appName);
+  if (!modalBounds) {
+    return null;
+  }
+
+  const frameBounds = await resolveDesktopVisionFrame(worldState, appName) ?? captureBounds ?? null;
+  if (!frameBounds) {
+    return null;
+  }
+
+  const frameWidth = Number(frameBounds.width ?? 0);
+  const frameHeight = Number(frameBounds.height ?? 0);
+  if (!(frameWidth > 0 && frameHeight > 0)) {
+    return null;
+  }
+
+  const modalNormalized = {
+    x: Math.max(0, Math.min(1, (Number(modalBounds.x ?? 0) - Number(frameBounds.x ?? 0)) / frameWidth)),
+    y: Math.max(0, Math.min(1, (Number(modalBounds.y ?? 0) - Number(frameBounds.y ?? 0)) / frameHeight)),
+    width: Math.max(0.01, Math.min(1, Number(modalBounds.width ?? 0) / frameWidth)),
+    height: Math.max(0.01, Math.min(1, Number(modalBounds.height ?? 0) / frameHeight))
+  };
+  if (modalNormalized.x + modalNormalized.width > 1) {
+    modalNormalized.width = Math.max(0.01, 1 - modalNormalized.x);
+  }
+  if (modalNormalized.y + modalNormalized.height > 1) {
+    modalNormalized.height = Math.max(0.01, 1 - modalNormalized.y);
+  }
+
+  const lines = visibleLines(worldState).slice(0, 20);
+  let timeoutHandle: NodeJS.Timeout | null = null;
+  try {
+    const result = await Promise.race([
+      modelClient.analyzeImageJson<Record<string, unknown>>({
+        schemaName: "agentos_desktop_modal_dismiss_control",
+        schema: {
+          type: "object",
+          properties: {
+            present: { type: "boolean" },
+            evidence: { type: "string" },
+            approxBox: {
+              type: ["object", "null"],
+              properties: {
+                x: { type: "number" },
+                y: { type: "number" },
+                width: { type: "number" },
+                height: { type: "number" }
+              },
+              required: ["x", "y", "width", "height"],
+              additionalProperties: false
+            }
+          },
+          required: ["present", "evidence", "approxBox"],
+          additionalProperties: false
+        },
+        systemPrompt:
+          `You are a strict desktop UI grounding model for AgentOS. Identify the single visible control that would dismiss the current ${appName} modal or foreign overlay and return JSON only.`,
+        userPrompt: [
+          `Analyze this ${appName} desktop screenshot.`,
+          "A blocking modal window is visible inside the app.",
+          `The modal occupies screenshot-normalized bounds x=${modalNormalized.x.toFixed(4)}, y=${modalNormalized.y.toFixed(4)}, width=${modalNormalized.width.toFixed(4)}, height=${modalNormalized.height.toFixed(4)}.`,
+          "Ignore everything outside that modal window.",
+          "Return the single best visible dismiss control that would close that modal or overlay.",
+          "Prefer, in order: Cancel, Close, Done, Back, Not now, Skip, or a visible X close button.",
+          "Do not return the underlying list, inbox, sidebar, toolbar, or main thread area.",
+          "Return a normalized approxBox from 0 to 1 relative to the full screenshot.",
+          "The returned control must still lie inside the modal window bounds given above.",
+          lines.length ? `Visible OCR lines:\n${lines.join("\n")}` : ""
+        ].filter(Boolean).join("\n\n"),
+        imagePath,
+        temperature: 0
+      }),
+      new Promise<never>((_, reject) => {
+        timeoutHandle = setTimeout(() => {
+          reject(new Error(`${appName} modal dismiss grounding timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+      })
+    ]);
+
+    const box = normalizeVisionBox(
+      ((result.approxBox ?? null) as Record<string, unknown> | null),
+      imageSize
+    );
+    if (!result.present || !box) {
+      return null;
+    }
+    return resolveDesktopVisionBoxPoint({
+      bounds: frameBounds,
+      box
+    });
+  } finally {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
+  }
+}
+
+async function recoverOutlookInboxWithoutVision({
+  rule,
+  workspace,
+  surfaceRegistry,
+  worldState,
+  analyzeState
+}: LivePackDetectionArgs & {
+  worldState: WorldState | null;
+  analyzeState: (worldState: WorldState | null) => Promise<DesktopVisualAnalysis | null>;
+}): Promise<{
+  worldState: WorldState | null;
+  vision: DesktopVisualAnalysis | null;
+  recoveryAttempts: number;
+}> {
+  const recoveryPoint = findOutlookInboxRecoveryPoint(worldState);
+  const adapter = surfaceRegistry.get("desktop");
+  if (
+    !recoveryPoint
+    || !adapter
+    || typeof (adapter as { act?: unknown }).act !== "function"
+    || typeof (adapter as { observe?: unknown }).observe !== "function"
+  ) {
+    return {
+      worldState,
+      vision: null,
+      recoveryAttempts: 0
+    };
+  }
+
+  const watchTask = createWatchTask(rule);
+  const watchWorkspace = profileAsWorkspace(rule, workspace);
+  const act = (adapter as { act: (args: unknown) => Promise<unknown> }).act.bind(adapter);
+  const observe = (adapter as { observe: (args: unknown) => Promise<WorldState> }).observe.bind(adapter);
+  let currentState = worldState;
+  let currentVision: DesktopVisualAnalysis | null = null;
+
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    const previousSignature = buildWorldStateFingerprint(currentState);
+    await act({
+      task: watchTask,
+      workspace: watchWorkspace,
+      traceId: null,
+      outputs: {},
+      step: {
+        id: `watch-outlook-inbox-fallback-${rule.id}-${attempt}`,
+        label: "Recover Outlook to inbox list",
+        surface: "desktop",
+        action: "clickAt",
+        params: recoveryPoint,
+        checkpoint: false
+      }
+    } as never).catch(() => null);
+
+    await act({
+      task: watchTask,
+      workspace: watchWorkspace,
+      traceId: null,
+      outputs: {},
+      step: {
+        id: `watch-outlook-inbox-fallback-wait-${rule.id}-${attempt}`,
+        label: "Wait for Outlook recovery",
+        surface: "desktop",
+        action: "wait",
+        params: { ms: 500 },
+        checkpoint: false
+      }
+    } as never).catch(() => null);
+
+    currentState = await observe({
+      task: watchTask,
+      workspace: watchWorkspace,
+      traceId: null,
+      label: `watch-outlook-inbox-fallback-${attempt}`,
+      targetAppName: rule.appTarget ?? "Microsoft Outlook"
+    } as never).catch(() => currentState);
+    if (!isExpectedDesktopForeground(currentState, rule.appTarget ?? "Microsoft Outlook")) {
+      break;
+    }
+    currentVision = await analyzeState(currentState).catch(() => null);
+
+    const currentSignature = buildWorldStateFingerprint(currentState);
+    if (
+      pickDesktopVisualUnreadThread(currentVision)
+      || findOutlookComposeCandidate(currentState)
+      || findOutlookUnreadCandidate(currentState)
+      || currentSignature !== previousSignature
+    ) {
+      return {
+        worldState: currentState,
+        vision: currentVision,
+        recoveryAttempts: attempt
+      };
+    }
+  }
+
+  return {
+    worldState: currentState,
+    vision: currentVision,
+    recoveryAttempts: 2
+  };
+}
+
 async function groundWeChatTargetThreadClickPoint({
   modelClient,
   worldState,
@@ -1857,6 +3543,422 @@ async function groundWeChatTargetThreadClickPoint({
       normalizeWeChatVisualThreadGrounding((result as Record<string, unknown> | null) ?? null),
       await readCaptureImageSize(imagePath)
     );
+  } finally {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
+  }
+}
+
+async function groundOutlookTargetThreadClickPoint({
+  modelClient,
+  worldState,
+  targetThread,
+  targetSnippet = null,
+  timeoutMs = 12000
+}: {
+  modelClient: Pick<LivePackControlPlane["modelClient"], "supportsImageJson" | "analyzeImageJson"> | null | undefined;
+  worldState: WorldState | null;
+  targetThread: string;
+  targetSnippet?: string | null;
+  timeoutMs?: number;
+}): Promise<WeChatVisualThreadGrounding | null> {
+  if (!modelClient?.supportsImageJson?.()) {
+    return null;
+  }
+
+  const imagePath = String(worldState?.capture?.path ?? "").trim();
+  const target = normalizeMailSummary(String(targetThread ?? "").trim());
+  const snippet = String(targetSnippet ?? "").trim();
+  if (!imagePath || !target) {
+    return null;
+  }
+
+  const lines = visibleLines(worldState).slice(0, 24);
+  const payload = [
+    "Analyze this Outlook desktop screenshot and ground the target conversation row in the center message list.",
+    "Return a click point that safely selects the target row inside the message list, not the sidebar folder list, search field, toolbar, calendar pane, or reading pane.",
+    "Return clickPoint and rowBox in normalized screenshot coordinates from 0 to 1, not pixels.",
+    "If Outlook is currently showing a different open message on the right, still ground the target unread row in the center list.",
+    `Target thread: ${target}`,
+    snippet ? `Target preview snippet or subject cue: ${snippet}` : "",
+    snippet ? "If multiple rows share the same sender name, use the preview snippet or subject cue to choose the correct one." : "",
+    lines.length ? `Visible OCR lines:\n${lines.join("\n")}` : "",
+    "Return strict JSON."
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
+  let timeoutHandle: NodeJS.Timeout | null = null;
+  try {
+    const result = await Promise.race([
+      modelClient.analyzeImageJson<Record<string, unknown>>({
+        schemaName: "agentos_outlook_thread_grounding",
+        schema: {
+          type: "object",
+          properties: {
+            targetVisible: { type: "boolean" },
+            evidence: { type: "string" },
+            clickPoint: {
+              type: ["object", "null"],
+              properties: {
+                x: { type: "number" },
+                y: { type: "number" }
+              },
+              required: ["x", "y"],
+              additionalProperties: false
+            },
+            rowBox: {
+              type: ["object", "null"],
+              properties: {
+                x: { type: "number" },
+                y: { type: "number" },
+                width: { type: "number" },
+                height: { type: "number" }
+              },
+              required: ["x", "y", "width", "height"],
+              additionalProperties: false
+            }
+          },
+          required: ["targetVisible", "evidence", "clickPoint", "rowBox"],
+          additionalProperties: false
+        },
+        systemPrompt:
+          "You are a strict UI grounding model for AgentOS. Find the target Outlook conversation row in the center message list and return JSON only.",
+        userPrompt: payload,
+        imagePath,
+        temperature: 0
+      }),
+      new Promise<never>((_, reject) => {
+        timeoutHandle = setTimeout(() => {
+          reject(new Error(`Outlook thread grounding timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+      })
+    ]);
+
+    return normalizeWeChatGroundingWithImageSize(
+      normalizeWeChatVisualThreadGrounding((result as Record<string, unknown> | null) ?? null),
+      await readCaptureImageSize(imagePath)
+    );
+  } finally {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
+  }
+}
+
+function isOutlookThreadOpenForTarget(
+  vision: DesktopVisualAnalysis | null,
+  targetThread: string,
+  targetCue: string | null = null
+): boolean {
+  return didOutlookThreadSelectionAdvance({ vision, targetThread, targetCue });
+}
+
+function didOutlookThreadSelectionAdvance({
+  vision,
+  targetThread,
+  targetCue = null,
+  previousOpenThread = null
+}: {
+  vision: DesktopVisualAnalysis | null;
+  targetThread: string;
+  targetCue?: string | null;
+  previousOpenThread?: string | null;
+}): boolean {
+  if (!vision) {
+    return false;
+  }
+  if (vision.targetThreadOpen === true) {
+    return true;
+  }
+
+  const normalizedTarget = normalizeMailSummary(targetThread);
+  const normalizedOpenThread = normalizeMailSummary(String(vision.openThread ?? ""));
+  const normalizedSelectedRow = normalizeMailSummary(String(vision.selectedRow ?? ""));
+  const normalizedCue = normalizeMailSummary(String(targetCue ?? ""));
+  if (mailSummariesMatch(normalizedTarget, normalizedOpenThread)) {
+    return true;
+  }
+  if (mailSummariesMatch(normalizedCue, normalizedOpenThread)) {
+    return true;
+  }
+  if (mailSummariesMatch(normalizedTarget, normalizedSelectedRow)) {
+    return true;
+  }
+  if (mailSummariesMatch(normalizedCue, normalizedSelectedRow)) {
+    return true;
+  }
+  if (normalizedTarget && normalizedSelectedRow.startsWith(normalizedTarget)) {
+    return true;
+  }
+  if (normalizedCue && normalizedSelectedRow.includes(normalizedCue)) {
+    return true;
+  }
+  return false;
+}
+
+function didOutlookThreadSelectionAdvanceFromState({
+  worldState,
+  targetThread,
+  targetCue = null,
+  previousOpenThread = null,
+  requireReplySurface = false
+}: {
+  worldState: WorldState | null;
+  targetThread: string;
+  targetCue?: string | null;
+  previousOpenThread?: string | null;
+  requireReplySurface?: boolean;
+}): boolean {
+  if (!worldState || !isOutlookDesktopForeground(worldState)) {
+    return false;
+  }
+
+  const normalizedTarget = normalizeMailSummary(targetThread);
+  const normalizedCue = normalizeMailSummary(String(targetCue ?? ""));
+  const normalizedPrevious = normalizeMailSummary(String(previousOpenThread ?? ""));
+  const rawVisibleLines = visibleLines(worldState)
+    .map((line) => String(line ?? "").trim())
+    .filter(Boolean);
+  const visibleLinesNormalized = rawVisibleLines
+    .map((line) => normalizeMailSummary(line))
+    .filter(Boolean);
+  const matchesVisibleThread = [normalizedTarget, normalizedCue, normalizedPrevious]
+    .filter(Boolean)
+    .some((candidate) => visibleLinesNormalized.some((line) => mailSummariesMatch(line, candidate)));
+  const hasReplySurface = Boolean(findOutlookReplyButtonCandidate(worldState) || findOutlookComposeCandidate(worldState));
+  const hasQuotedThreadSubject = rawVisibleLines.some((line) => /^(?:re|fw|fwd)\s*[:：]/iu.test(line));
+  const unreadStillVisible = rawVisibleLines.some((line) => UNREAD_PATTERN.test(line)) || Boolean(findOutlookUnreadCandidate(worldState));
+
+  if (requireReplySurface) {
+    return hasReplySurface && matchesVisibleThread;
+  }
+
+  if (hasReplySurface && matchesVisibleThread) {
+    return true;
+  }
+
+  if (hasQuotedThreadSubject && !unreadStillVisible) {
+    if (matchesVisibleThread) {
+      return true;
+    }
+    return Boolean(normalizedPrevious || normalizedTarget || normalizedCue);
+  }
+
+  return false;
+}
+
+function isOutlookTargetUnreadStillVisible(
+  vision: DesktopVisualAnalysis | null,
+  targetThread: string,
+  targetCue: string | null = null
+): boolean {
+  if (!vision) {
+    return false;
+  }
+
+  const normalizedTarget = normalizeMailSummary(targetThread);
+  const normalizedCue = normalizeMailSummary(String(targetCue ?? ""));
+  return vision.visibleUnreadThreads.some((thread) => {
+    const threadName = normalizeMailSummary(String(thread.name ?? ""));
+    const threadSubjectCue = normalizeMailSummary(String(thread.subjectCue ?? ""));
+    return (
+      mailSummariesMatch(threadName, normalizedTarget)
+      || mailSummariesMatch(threadName, normalizedCue)
+      || mailSummariesMatch(threadSubjectCue, normalizedCue)
+    );
+  });
+}
+
+function findMatchingOutlookVisibleThread(
+  vision: DesktopVisualAnalysis | null,
+  targetThread: string,
+  targetCue: string | null = null
+): DesktopVisualThreadSummary | null {
+  if (!vision) {
+    return null;
+  }
+
+  const normalizedTarget = normalizeMailSummary(targetThread);
+  const normalizedCue = normalizeMailSummary(String(targetCue ?? ""));
+  for (const thread of vision.visibleUnreadThreads) {
+    const threadName = normalizeMailSummary(String(thread.name ?? ""));
+    const threadSubjectCue = normalizeMailSummary(String(thread.subjectCue ?? ""));
+    const threadSnippet = normalizeMailSummary(String(thread.latestSnippet ?? ""));
+    if (
+      mailSummariesMatch(threadName, normalizedTarget)
+      || mailSummariesMatch(threadName, normalizedCue)
+      || mailSummariesMatch(threadSubjectCue, normalizedCue)
+      || mailSummariesMatch(threadSnippet, normalizedCue)
+    ) {
+      return thread;
+    }
+  }
+
+  return null;
+}
+
+function traceOutlookThreadState(
+  stage: string,
+  {
+    vision,
+    targetThread,
+    targetCue,
+    previousOpenThread,
+    openAttempts
+  }: {
+    vision: DesktopVisualAnalysis | null;
+    targetThread: string;
+    targetCue: string | null;
+    previousOpenThread: string | null;
+    openAttempts: number;
+  }
+): void {
+  if (process.env.AGENTOS_TRACE_OUTLOOK_STATE !== "1") {
+    return;
+  }
+  const advanced = didOutlookThreadSelectionAdvance({
+    vision,
+    targetThread,
+    targetCue,
+    previousOpenThread
+  });
+  const unreadStillVisible = isOutlookTargetUnreadStillVisible(vision, targetThread, targetCue);
+  console.error(
+    JSON.stringify(
+      {
+        stage,
+        targetThread,
+        targetCue,
+        previousOpenThread,
+        openAttempts,
+        scene: vision?.scene ?? null,
+        openThread: vision?.openThread ?? null,
+        selectedRow: vision?.selectedRow ?? null,
+        targetThreadOpen: vision?.targetThreadOpen ?? null,
+        composerPresent: vision?.composer?.present ?? null,
+        composerEvidence: vision?.composer?.evidence ?? null,
+        visibleUnreadThreads: (vision?.visibleUnreadThreads ?? []).map((thread) => ({
+          name: thread.name ?? null,
+          subjectCue: thread.subjectCue ?? null
+        })),
+        advanced,
+        unreadStillVisible
+      },
+      null,
+      2
+    )
+  );
+}
+
+function traceOutlookAnalysisError(stage: string, error: unknown): void {
+  if (process.env.AGENTOS_TRACE_OUTLOOK_STATE !== "1") {
+    return;
+  }
+  console.error(
+    JSON.stringify(
+      {
+        stage,
+        analysisError: error instanceof Error ? error.message : String(error ?? "unknown_error")
+      },
+      null,
+      2
+    )
+  );
+}
+
+async function groundOutlookReplyControl({
+  modelClient,
+  worldState,
+  timeoutMs = 12000
+}: {
+  modelClient: Pick<LivePackControlPlane["modelClient"], "supportsImageJson" | "analyzeImageJson"> | null | undefined;
+  worldState: WorldState | null;
+  timeoutMs?: number;
+}): Promise<InteractionCandidate | null> {
+  if (!modelClient?.supportsImageJson?.()) {
+    return null;
+  }
+
+  const imagePath = String(worldState?.capture?.path ?? "").trim();
+  if (!imagePath) {
+    return null;
+  }
+
+  const lines = visibleLines(worldState).slice(0, 24);
+  const imageSize = await readCaptureImageSize(imagePath);
+  let timeoutHandle: NodeJS.Timeout | null = null;
+  try {
+    const result = await Promise.race([
+      modelClient.analyzeImageJson<Record<string, unknown>>({
+        schemaName: "agentos_outlook_reply_control",
+        schema: {
+          type: "object",
+          properties: {
+            present: { type: "boolean" },
+            evidence: { type: "string" },
+            label: { type: "string" },
+            approxBox: {
+              type: ["object", "null"],
+              properties: {
+                x: { type: "number" },
+                y: { type: "number" },
+                width: { type: "number" },
+                height: { type: "number" }
+              },
+              required: ["x", "y", "width", "height"],
+              additionalProperties: false
+            }
+          },
+          required: ["present", "evidence", "label", "approxBox"],
+          additionalProperties: false
+        },
+        systemPrompt:
+          "You are a strict Outlook desktop grounding model for AgentOS. The screenshot shows an open email thread without a visible reply composer. Identify the single visible control that would open the reply composer. Prefer Reply over Reply All or Forward. Return JSON only.",
+        userPrompt: [
+          "Analyze this Outlook desktop screenshot.",
+          "Ground the single visible control that would open a reply composer for the currently open email thread.",
+          "Prefer Reply over Reply All and Forward unless Reply is clearly absent.",
+          "Do not return the message list, sidebar, search box, toolbar chrome, or the message body itself.",
+          "Return a normalized approxBox from 0 to 1 relative to the screenshot.",
+          lines.length ? `Visible OCR lines:\n${lines.join("\n")}` : ""
+        ].filter(Boolean).join("\n\n"),
+        imagePath,
+        temperature: 0
+      }),
+      new Promise<never>((_, reject) => {
+        timeoutHandle = setTimeout(() => {
+          reject(new Error(`Outlook reply control grounding timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+      })
+    ]);
+
+    const box = normalizeVisionBox(
+      ((result.approxBox ?? null) as Record<string, unknown> | null),
+      imageSize
+    );
+    if (!result.present || !box) {
+      return null;
+    }
+    const bounds = await resolveDesktopVisionCandidateBounds(worldState, "Microsoft Outlook", box);
+    if (!bounds) {
+      return null;
+    }
+    return {
+      id: "outlook-vision-reply-control",
+      surface: "desktop",
+      kind: "element",
+      text: String(result.label ?? result.evidence ?? "Reply").trim() || "Reply",
+      role: "button",
+      confidence: 0.99,
+      sourceHints: {
+        source: "vision",
+        evidence: String(result.evidence ?? "").trim()
+      },
+      isInteractive: true,
+      bounds
+    } satisfies InteractionCandidate;
   } finally {
     if (timeoutHandle) {
       clearTimeout(timeoutHandle);
@@ -2095,6 +4197,35 @@ function findWeChatVisionUnreadCandidate(
   }
 
   return null;
+}
+
+function imageLikelyMatchesWindowBounds(
+  imageSize: VisionImageSize | null,
+  bounds: InteractionCandidate["bounds"] | null
+): boolean {
+  if (!imageSize || !bounds) {
+    return false;
+  }
+
+  const width = Number(bounds.width ?? 0);
+  const height = Number(bounds.height ?? 0);
+  if (!(width > 0 && height > 0)) {
+    return false;
+  }
+
+  const scaleX = Number(imageSize.width) / width;
+  const scaleY = Number(imageSize.height) / height;
+  if (!Number.isFinite(scaleX) || !Number.isFinite(scaleY) || scaleX <= 0 || scaleY <= 0) {
+    return false;
+  }
+
+  const largerScale = Math.max(scaleX, scaleY);
+  const smallerScale = Math.min(scaleX, scaleY);
+  if (!(largerScale > 0 && smallerScale > 0)) {
+    return false;
+  }
+
+  return (largerScale - smallerScale) / largerScale <= 0.12;
 }
 
 function isWeChatBadgeLikeText(value: unknown): boolean {
@@ -2346,14 +4477,22 @@ function buildWorldStateFingerprint(worldState: WorldState | null): string {
   return fingerprint(`${String(worldState?.visibleText ?? "").trim()}|${candidateSignature}`);
 }
 
-function isWeChatRecoveryScene(vision: WeChatVisualAnalysis | null): boolean {
+function isDesktopRecoveryScene(vision: DesktopVisualAnalysis | WeChatVisualAnalysis | null): boolean {
   if (!vision) {
     return false;
   }
-  return vision.scene === "foreign_view" || vision.recommendedRecoveryAction === "recover_to_list";
+  if (vision.scene === "foreign_view") {
+    return true;
+  }
+
+  if (vision.recommendedRecoveryAction !== "recover_to_list") {
+    return false;
+  }
+
+  return !pickDesktopVisualUnreadThread(vision) || Boolean(vision.composer?.present);
 }
 
-function resolveWeChatVisionBoxPoint({
+function resolveDesktopVisionBoxPoint({
   bounds,
   box,
   anchorX = 0.5,
@@ -2377,6 +4516,19 @@ function resolveWeChatVisionBoxPoint({
   return { x, y };
 }
 
+function isWeChatRecoveryScene(vision: WeChatVisualAnalysis | null): boolean {
+  return isDesktopRecoveryScene(vision);
+}
+
+function resolveWeChatVisionBoxPoint(args: {
+  bounds: InteractionCandidate["bounds"] | null;
+  box: WeChatVisualComposerBox | null | undefined;
+  anchorX?: number;
+  anchorY?: number;
+}): { x: number; y: number } | null {
+  return resolveDesktopVisionBoxPoint(args);
+}
+
 function deriveWeChatConversationListPoint(worldState: WorldState | null): { x: number; y: number } | null {
   const windowBounds = findDesktopWindowBounds(worldState, "WeChat");
   if (windowBounds) {
@@ -2387,6 +4539,266 @@ function deriveWeChatConversationListPoint(worldState: WorldState | null): { x: 
   }
 
   return null;
+}
+
+function deriveDesktopListPoint(
+  worldState: WorldState | null,
+  appName: string,
+  anchor: { x: number; y: number }
+): { x: number; y: number } | null {
+  const windowBounds = findDesktopWindowBounds(worldState, appName);
+  if (!windowBounds) {
+    return null;
+  }
+
+  return {
+    x: Math.round(Number(windowBounds.x ?? 0) + Number(windowBounds.width ?? 0) * anchor.x),
+    y: Math.round(Number(windowBounds.y ?? 0) + Number(windowBounds.height ?? 0) * anchor.y)
+  };
+}
+
+function findBlockingDesktopModalWindowBounds(
+  worldState: WorldState | null,
+  appName: string
+): InteractionCandidate["bounds"] | null {
+  return (findBlockingDesktopModalWindow(worldState, appName)?.bounds ?? null) as InteractionCandidate["bounds"] | null;
+}
+
+function findBlockingDesktopModalWindow(
+  worldState: WorldState | null,
+  appName: string
+): Record<string, unknown> | null {
+  const appContext = worldState?.appContext;
+  const windows = Array.isArray(appContext?.windows) ? appContext.windows : [];
+  const normalizedApp = String(appName ?? "").trim().toLowerCase();
+  const appWindows = windows.filter((window) => String(window?.ownerName ?? "").trim().toLowerCase() === normalizedApp);
+  if (appWindows.length < 2) {
+    return null;
+  }
+
+  const captureWindowNumber = Number(appContext?.captureWindowNumber ?? NaN);
+  const mainWindow =
+    appWindows.find((window) => Number(window?.windowNumber ?? NaN) === captureWindowNumber)
+    ?? appWindows.reduce<typeof appWindows[number] | null>((current, candidate) => {
+      if (!candidate) {
+        return current;
+      }
+      const area = Number(candidate?.bounds?.width ?? 0) * Number(candidate?.bounds?.height ?? 0);
+      const currentArea = current ? Number(current?.bounds?.width ?? 0) * Number(current?.bounds?.height ?? 0) : -1;
+      return area > currentArea ? candidate : current;
+    }, null);
+
+  if (!mainWindow) {
+    return null;
+  }
+
+  const mainBounds = mainWindow.bounds;
+  const mainArea = Number(mainBounds?.width ?? 0) * Number(mainBounds?.height ?? 0);
+  if (!Number.isFinite(mainArea) || mainArea <= 0) {
+    return null;
+  }
+
+  const modalWindow = appWindows.find((window) => {
+    if (!window || window === mainWindow) {
+      return false;
+    }
+    const bounds = window.bounds;
+    const area = Number(bounds?.width ?? 0) * Number(bounds?.height ?? 0);
+    if (!Number.isFinite(area) || area <= 0 || area >= mainArea * 0.8 || area <= mainArea * 0.02) {
+      return false;
+    }
+    const centerX = Number(bounds?.centerX ?? 0);
+    const centerY = Number(bounds?.centerY ?? 0);
+    const withinMain =
+      centerX >= Number(mainBounds?.x ?? 0) &&
+      centerX <= Number(mainBounds?.x ?? 0) + Number(mainBounds?.width ?? 0) &&
+      centerY >= Number(mainBounds?.y ?? 0) &&
+      centerY <= Number(mainBounds?.y ?? 0) + Number(mainBounds?.height ?? 0);
+    return withinMain;
+  });
+  return (modalWindow ?? null) as Record<string, unknown> | null;
+}
+
+function hasBlockingDesktopModalWindow(worldState: WorldState | null, appName: string): boolean {
+  return Boolean(findBlockingDesktopModalWindow(worldState, appName));
+}
+
+async function captureDesktopWindowForVision({
+  rule,
+  workspace,
+  surfaceRegistry,
+  appName,
+  label,
+  windowNumber
+}: LivePackActivationArgs & {
+  appName: string;
+  label: string;
+  windowNumber: number | null;
+}): Promise<string | null> {
+  if (!(Number.isFinite(windowNumber) && Number(windowNumber) > 0)) {
+    return null;
+  }
+
+  const adapter = surfaceRegistry.get("desktop");
+  if (!adapter || typeof (adapter as { capture?: unknown }).capture !== "function") {
+    return null;
+  }
+
+  const artifact = await ((adapter as unknown) as {
+    capture: (args: {
+      task: TaskRecord;
+      workspace: WorkspaceRecord;
+      traceId: string | null;
+      label: string;
+      windowNumber: number;
+      targetAppName: string;
+    }) => Promise<{ path?: string; metadata?: Record<string, unknown> } | null>;
+  }).capture({
+    task: createWatchTask(rule),
+    workspace: profileAsWorkspace(rule, workspace),
+    traceId: null,
+    label,
+    windowNumber: Number(windowNumber),
+    targetAppName: rule.appTarget ?? appName
+  }).catch(() => null);
+
+  const actualWindowNumber = Number((artifact?.metadata ?? {}).windowNumber ?? NaN);
+  if (!Number.isFinite(actualWindowNumber) || actualWindowNumber !== Number(windowNumber)) {
+    return null;
+  }
+
+  const imagePath = String(artifact?.path ?? "").trim();
+  return imagePath || null;
+}
+
+async function scanDesktopVisionUnreadConversation({
+  rule,
+  workspace,
+  surfaceRegistry,
+  initialWorldState,
+  initialVision,
+  appName,
+  anchor,
+  scrollDy,
+  analyzeState,
+  maxPasses = 4
+}: LivePackDetectionArgs & {
+  initialWorldState: WorldState | null;
+  initialVision: DesktopVisualAnalysis | null;
+  appName: string;
+  anchor: { x: number; y: number };
+  scrollDy: number;
+  analyzeState: (worldState: WorldState | null) => Promise<DesktopVisualAnalysis | null>;
+  maxPasses?: number;
+}): Promise<{
+  worldState: WorldState | null;
+  vision: DesktopVisualAnalysis | null;
+  thread: DesktopVisualThreadSummary | null;
+  scrollPasses: number;
+}> {
+  const initialThread = pickDesktopVisualUnreadThread(initialVision);
+  if (initialThread) {
+    return {
+      worldState: initialWorldState,
+      vision: initialVision,
+      thread: initialThread,
+      scrollPasses: 0
+    };
+  }
+
+  const adapter = surfaceRegistry.get("desktop");
+  if (
+    !adapter
+    || typeof (adapter as { act?: unknown }).act !== "function"
+    || typeof (adapter as { observe?: unknown }).observe !== "function"
+  ) {
+    return {
+      worldState: initialWorldState,
+      vision: initialVision,
+      thread: null,
+      scrollPasses: 0
+    };
+  }
+
+  const watchTask = createWatchTask(rule);
+  const watchWorkspace = profileAsWorkspace(rule, workspace);
+  const act = (adapter as { act: (args: unknown) => Promise<unknown> }).act.bind(adapter);
+  const observe = (adapter as { observe: (args: unknown) => Promise<WorldState> }).observe.bind(adapter);
+  const seenStates = new Set<string>();
+  let currentState = initialWorldState;
+  let currentVision = initialVision;
+
+  for (let pass = 1; pass <= maxPasses; pass += 1) {
+    const signature = buildWorldStateFingerprint(currentState);
+    if (seenStates.has(signature)) {
+      break;
+    }
+    seenStates.add(signature);
+
+    const listPoint = deriveDesktopListPoint(currentState, appName, anchor);
+    if (!listPoint) {
+      break;
+    }
+
+    await act({
+      task: watchTask,
+      workspace: watchWorkspace,
+      traceId: null,
+      outputs: {},
+      step: {
+        id: `watch-${rule.id}-${appName.toLowerCase()}-list-focus-${pass}`,
+        label: `Focus ${appName} list`,
+        surface: "desktop",
+        action: "clickAt",
+        params: listPoint,
+        checkpoint: false
+      }
+    } as never).catch(() => null);
+
+    await act({
+      task: watchTask,
+      workspace: watchWorkspace,
+      traceId: null,
+      outputs: {},
+      step: {
+        id: `watch-${rule.id}-${appName.toLowerCase()}-list-scroll-${pass}`,
+        label: `Scroll ${appName} list`,
+        surface: "desktop",
+        action: "scroll",
+        params: { dx: 0, dy: scrollDy },
+        checkpoint: false
+      }
+    } as never).catch(() => null);
+
+    currentState = await observe({
+      task: watchTask,
+      workspace: watchWorkspace,
+      traceId: null,
+      label: `watch-${rule.id}-${appName.toLowerCase()}-scroll-${pass}`,
+      targetAppName: rule.appTarget ?? appName
+    } as never).catch(() => currentState);
+    if (!isExpectedDesktopForeground(currentState, rule.appTarget ?? appName)) {
+      currentVision = null;
+      break;
+    }
+    currentVision = await analyzeState(currentState).catch(() => null);
+    const thread = pickDesktopVisualUnreadThread(currentVision);
+    if (thread) {
+      return {
+        worldState: currentState,
+        vision: currentVision,
+        thread,
+        scrollPasses: pass
+      };
+    }
+  }
+
+  return {
+    worldState: currentState,
+    vision: currentVision,
+    thread: null,
+    scrollPasses: seenStates.size
+  };
 }
 
 async function scanWeChatVisionUnreadConversation({
@@ -2515,6 +4927,233 @@ async function scanWeChatVisionUnreadConversation({
   };
 }
 
+async function resolveDesktopVisualRecoveryPoint(
+  worldState: WorldState | null,
+  appName: string,
+  vision: DesktopVisualAnalysis | WeChatVisualAnalysis | null
+): Promise<{ x: number; y: number } | null> {
+  if (!vision?.recoveryControl?.present || !vision.recoveryControl.approxBox) {
+    return null;
+  }
+
+  const bounds = await resolveDesktopVisionFrame(worldState, appName);
+  return resolveDesktopVisionBoxPoint({
+    bounds,
+    box: vision.recoveryControl.approxBox
+  });
+}
+
+async function recoverDesktopVisualSceneToList<T extends DesktopVisualAnalysis | WeChatVisualAnalysis>({
+  rule,
+  workspace,
+  surfaceRegistry,
+  controlPlane,
+  worldState,
+  vision,
+  appName,
+  focusName,
+  recoverLabel,
+  dismissLabel,
+  analyzeState,
+  resolveRecoveryPoint
+}: LivePackDetectionArgs & {
+  worldState: WorldState | null;
+  vision: T | null;
+  appName: string;
+  focusName: string;
+  recoverLabel: string;
+  dismissLabel: string;
+  analyzeState: (worldState: WorldState | null) => Promise<T | null>;
+  resolveRecoveryPoint?: (worldState: WorldState | null, vision: T | null) => Promise<{ x: number; y: number } | null>;
+}): Promise<{
+  worldState: WorldState | null;
+  vision: T | null;
+  recoveryAttempts: number;
+}> {
+  if (!isDesktopRecoveryScene(vision)) {
+    return {
+      worldState,
+      vision,
+      recoveryAttempts: 0
+    };
+  }
+
+  const adapter = surfaceRegistry.get("desktop");
+  if (
+    !adapter
+    || typeof (adapter as { act?: unknown }).act !== "function"
+    || typeof (adapter as { observe?: unknown }).observe !== "function"
+  ) {
+    return {
+      worldState,
+      vision,
+      recoveryAttempts: 0
+    };
+  }
+
+  const watchTask = createWatchTask(rule);
+  const watchWorkspace = profileAsWorkspace(rule, workspace);
+  const act = (adapter as { act: (args: unknown) => Promise<unknown> }).act.bind(adapter);
+  const observe = (adapter as { observe: (args: unknown) => Promise<WorldState> }).observe.bind(adapter);
+  let currentState = worldState;
+  let currentVision = vision;
+  const waitForRecoveryUiSettle = async (attempt: number, suffix: string, ms: number) => {
+    await act({
+      task: watchTask,
+      workspace: watchWorkspace,
+      traceId: null,
+      outputs: {},
+      step: {
+        id: `watch-${appName.toLowerCase().replace(/\s+/gu, "-")}-recover-wait-${rule.id}-${attempt}-${suffix}`,
+        label: `Wait for ${appName} recovery`,
+        surface: "desktop",
+        action: "wait",
+        params: { ms },
+        checkpoint: false
+      }
+    } as never).catch(() => null);
+  };
+  const observeRecoveryState = async (attempt: number, suffix: string) => {
+    currentState = await observe({
+      task: watchTask,
+      workspace: watchWorkspace,
+      traceId: null,
+      label: `watch-${appName.toLowerCase().replace(/\s+/gu, "-")}-recover-${suffix}-${attempt}`
+    } as never).catch(() => currentState);
+    currentVision = await analyzeState(currentState).catch(() => null);
+  };
+
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    if (!isDesktopRecoveryScene(currentVision)) {
+      return {
+        worldState: currentState,
+        vision: currentVision,
+        recoveryAttempts: attempt - 1
+      };
+    }
+
+    await act({
+      task: watchTask,
+      workspace: watchWorkspace,
+      traceId: null,
+      outputs: {},
+      step: {
+        id: `watch-${appName.toLowerCase().replace(/\s+/gu, "-")}-recover-focus-${rule.id}-${attempt}`,
+        label: focusName,
+        surface: "desktop",
+        action: "focusApp",
+        params: { name: rule.appTarget ?? appName },
+        checkpoint: false
+      }
+    } as never).catch(() => null);
+
+    const modalWindow = findBlockingDesktopModalWindow(currentState, appName);
+    const shouldDismissModalFirst = Boolean(modalWindow);
+    const modalCapturePath = shouldDismissModalFirst
+      ? await captureDesktopWindowForVision({
+          rule,
+          workspace,
+          surfaceRegistry,
+          controlPlane,
+          appName,
+          label: `watch-${appName.toLowerCase().replace(/\s+/gu, "-")}-modal-${attempt}`,
+          windowNumber: Number(modalWindow?.windowNumber ?? NaN)
+        }).catch(() => null)
+      : null;
+    const dismissPoint = shouldDismissModalFirst
+      ? await groundDesktopVisualDismissPoint({
+          modelClient: controlPlane.modelClient,
+          worldState: currentState,
+          appName,
+          capturePath: modalCapturePath,
+          captureBounds: (modalWindow?.bounds ?? null) as InteractionCandidate["bounds"] | null,
+          captureIsModal: Boolean(modalCapturePath && modalWindow?.bounds)
+        }).catch(() => null)
+      : null;
+    const recoveryPoint =
+      shouldDismissModalFirst
+        ? null
+        : (await resolveRecoveryPoint?.(currentState, currentVision).catch(() => null))
+          ?? (await resolveDesktopVisualRecoveryPoint(currentState, appName, currentVision));
+    const previousSignature = buildWorldStateFingerprint(currentState);
+    if (dismissPoint) {
+      await act({
+        task: watchTask,
+        workspace: watchWorkspace,
+        traceId: null,
+        outputs: {},
+        step: {
+          id: `watch-${appName.toLowerCase().replace(/\s+/gu, "-")}-recover-dismiss-${rule.id}-${attempt}`,
+          label: dismissLabel,
+          surface: "desktop",
+          action: "clickAt",
+          params: dismissPoint,
+          checkpoint: false
+        }
+      } as never).catch(() => null);
+    } else if (recoveryPoint) {
+      await act({
+        task: watchTask,
+        workspace: watchWorkspace,
+        traceId: null,
+        outputs: {},
+        step: {
+          id: `watch-${appName.toLowerCase().replace(/\s+/gu, "-")}-recover-click-${rule.id}-${attempt}`,
+          label: recoverLabel,
+          surface: "desktop",
+          action: "clickAt",
+          params: recoveryPoint,
+          checkpoint: false
+        }
+      } as never).catch(() => null);
+    } else {
+      await act({
+        task: watchTask,
+        workspace: watchWorkspace,
+        traceId: null,
+        outputs: {},
+        step: {
+          id: `watch-${appName.toLowerCase().replace(/\s+/gu, "-")}-recover-escape-${rule.id}-${attempt}`,
+          label: dismissLabel,
+          surface: "desktop",
+          action: "pressKey",
+          params: { key: "Escape" },
+          checkpoint: false
+        }
+      } as never).catch(() => null);
+    }
+
+    await waitForRecoveryUiSettle(attempt, "primary", dismissPoint ? 250 : 450);
+    await observeRecoveryState(attempt, "primary");
+
+    const unchangedAfterRecovery = buildWorldStateFingerprint(currentState) === previousSignature;
+    if (!dismissPoint && recoveryPoint && unchangedAfterRecovery && isDesktopRecoveryScene(currentVision)) {
+      await act({
+        task: watchTask,
+        workspace: watchWorkspace,
+        traceId: null,
+        outputs: {},
+        step: {
+          id: `watch-${appName.toLowerCase().replace(/\s+/gu, "-")}-recover-retry-${rule.id}-${attempt}`,
+          label: recoverLabel,
+          surface: "desktop",
+          action: "clickAt",
+          params: recoveryPoint,
+          checkpoint: false
+        }
+      } as never).catch(() => null);
+      await waitForRecoveryUiSettle(attempt, "retry", 600);
+      await observeRecoveryState(attempt, "retry");
+    }
+  }
+
+  return {
+    worldState: currentState,
+    vision: currentVision,
+    recoveryAttempts: 2
+  };
+}
+
 async function recoverWeChatSceneToChatList({
   rule,
   workspace,
@@ -2530,105 +5169,23 @@ async function recoverWeChatSceneToChatList({
   vision: WeChatVisualAnalysis | null;
   recoveryAttempts: number;
 }> {
-  if (!isWeChatRecoveryScene(vision)) {
-    return {
-      worldState,
-      vision,
-      recoveryAttempts: 0
-    };
-  }
-
-  const adapter = surfaceRegistry.get("desktop");
-  if (!adapter || typeof (adapter as { act?: unknown }).act !== "function") {
-    return {
-      worldState,
-      vision,
-      recoveryAttempts: 0
-    };
-  }
-
-  const watchTask = createWatchTask(rule);
-  const watchWorkspace = profileAsWorkspace(rule, workspace);
-  const act = (adapter as { act: (args: unknown) => Promise<unknown> }).act.bind(adapter);
-  let currentState = worldState;
-  let currentVision = vision;
-
-  for (let attempt = 1; attempt <= 2; attempt += 1) {
-    if (!isWeChatRecoveryScene(currentVision)) {
-      return {
-        worldState: currentState,
-        vision: currentVision,
-        recoveryAttempts: attempt - 1
-      };
-    }
-
-    await act({
-      task: watchTask,
-      workspace: watchWorkspace,
-      traceId: null,
-      outputs: {},
-      step: {
-        id: `watch-wechat-recover-focus-${rule.id}-${attempt}`,
-        label: "Focus WeChat",
-        surface: "desktop",
-        action: "focusApp",
-        params: { name: rule.appTarget ?? "WeChat" },
-        checkpoint: false
-      }
-    } as never).catch(() => null);
-
-    const recoveryPoint = await resolveWeChatRecoveryPoint(currentState, currentVision);
-    if (recoveryPoint) {
-      await act({
-        task: watchTask,
-        workspace: watchWorkspace,
-        traceId: null,
-        outputs: {},
-        step: {
-          id: `watch-wechat-recover-click-${rule.id}-${attempt}`,
-          label: "Recover WeChat to chat list",
-          surface: "desktop",
-          action: "clickAt",
-          params: recoveryPoint,
-          checkpoint: false
-        }
-      } as never).catch(() => null);
-    } else {
-      await act({
-        task: watchTask,
-        workspace: watchWorkspace,
-        traceId: null,
-        outputs: {},
-        step: {
-          id: `watch-wechat-recover-escape-${rule.id}-${attempt}`,
-          label: "Dismiss WeChat foreign view",
-          surface: "desktop",
-          action: "pressKey",
-          params: { key: "Escape" },
-          checkpoint: false
-        }
-      } as never).catch(() => null);
-    }
-
-    currentState = await observeWatchSurface({
-      rule,
-      workspace,
-      surfaceRegistry,
-      controlPlane,
-      surface: "desktop",
-      desktopRequireAccessibility: false
-    }).catch(() => currentState);
-    currentVision = await analyzeWeChatDesktopVisualState({
-      modelClient: controlPlane.modelClient,
-      worldState: currentState
-    }).catch(() => null);
-  }
-
-  return {
-    worldState: currentState,
-    vision: currentVision,
-    recoveryAttempts: 2
-  };
+  return recoverDesktopVisualSceneToList({
+    rule,
+    workspace,
+    surfaceRegistry,
+    controlPlane,
+    worldState,
+    vision,
+    appName: "WeChat",
+    focusName: "Focus WeChat",
+    recoverLabel: "Recover WeChat to chat list",
+    dismissLabel: "Dismiss WeChat foreign view",
+    analyzeState: (candidateState) =>
+      analyzeWeChatDesktopVisualState({
+        modelClient: controlPlane.modelClient,
+        worldState: candidateState
+      })
+  });
 }
 
 function extractWeChatThreadContext(worldState: WorldState | null, summary: string): string[] {
@@ -2767,11 +5324,21 @@ function findDesktopWindowBounds(worldState: WorldState | null, appName: string)
   const windows = Array.isArray((worldState?.appContext as { windows?: unknown[] } | null)?.windows)
     ? (((worldState?.appContext as { windows?: unknown[] } | null)?.windows ?? []) as Array<Record<string, unknown>>)
     : [];
-  const matched = windows.find((windowInfo) => {
+  const appContext = (worldState?.appContext ?? null) as Record<string, unknown> | null;
+  const captureWindowNumber = Number(appContext?.captureWindowNumber ?? NaN);
+  const matchesApp = (windowInfo: Record<string, unknown>) => {
     const ownerName = String(windowInfo?.ownerName ?? "");
     const windowName = String(windowInfo?.windowName ?? "");
     return appName && (ownerName.includes(appName) || windowName.includes(appName));
-  });
+  };
+  const captureMatched =
+    Number.isFinite(captureWindowNumber) && captureWindowNumber > 0
+      ? windows.find((windowInfo) =>
+          matchesApp(windowInfo)
+          && Number(windowInfo?.windowNumber ?? NaN) === captureWindowNumber
+        )
+      : null;
+  const matched = captureMatched ?? windows.find(matchesApp);
   return (matched?.bounds ?? null) as InteractionCandidate["bounds"] | null;
 }
 
@@ -2810,13 +5377,6 @@ async function resolveDesktopVisionFrame(
   appName: string
 ): Promise<InteractionCandidate["bounds"] | null> {
   const windowBounds = findDesktopWindowBounds(worldState, appName);
-  const appContext = (worldState?.appContext ?? null) as Record<string, unknown> | null;
-  const windows = Array.isArray(appContext?.windows) ? (appContext.windows as Array<Record<string, unknown>>) : [];
-  const matchedWindow = windows.find((windowInfo) => {
-    const ownerName = String(windowInfo?.ownerName ?? "");
-    const windowName = String(windowInfo?.windowName ?? "");
-    return appName && (ownerName.includes(appName) || windowName.includes(appName));
-  }) ?? null;
   // Vision boxes are normalized against the screenshot, but click/prefill actions
   // must land in desktop screen coordinates. When we know the target window bounds,
   // prefer those on-screen bounds even if the capture itself is window-local.
@@ -2880,10 +5440,40 @@ async function deriveWeChatVisualComposerFallback(
 function normalizeMailSummary(value: string): string {
   return String(value ?? "")
     .replace(/^[●•]\s*/u, "")
+    .replace(/^[A-Za-z]\s+(?=\p{Script=Han})/u, "")
     .replace(/^(unread email|unread mail|unread|new mail|new email|未读邮件|未读|新邮件)\s*[:：-]?\s*/iu, "")
+    .replace(/^(?:(?:re|fw|fwd)\s*[:：]\s*)+/iu, "")
     .replace(/^\(\d+\)\s*/u, "")
     .replace(/\s+\(\d+\)$/u, "")
     .trim();
+}
+
+function mailSummariesMatch(left: string | null | undefined, right: string | null | undefined): boolean {
+  const normalizedLeft = normalizeMailSummary(String(left ?? ""));
+  const normalizedRight = normalizeMailSummary(String(right ?? ""));
+  if (!normalizedLeft || !normalizedRight) {
+    return false;
+  }
+  if (normalizedLeft === normalizedRight) {
+    return true;
+  }
+
+  const truncatedLeft = normalizedLeft.replace(/(?:\.\.\.|…)\s*$/u, "").trim();
+  const truncatedRight = normalizedRight.replace(/(?:\.\.\.|…)\s*$/u, "").trim();
+  if (truncatedLeft && truncatedLeft === truncatedRight) {
+    return true;
+  }
+
+  const foldedLeft = truncatedLeft.toLocaleLowerCase();
+  const foldedRight = truncatedRight.toLocaleLowerCase();
+  if (foldedLeft.length >= 8 && foldedRight.startsWith(foldedLeft)) {
+    return true;
+  }
+  if (foldedRight.length >= 8 && foldedLeft.startsWith(foldedRight)) {
+    return true;
+  }
+
+  return false;
 }
 
 function normalizeBossSummary(value: string): string {
@@ -2944,28 +5534,6 @@ function inferBrowserPageUrl(worldState: WorldState | null): string | null {
   return /^https?:\/\//u.test(url) ? url : null;
 }
 
-function browserPackLabel(packName: string): string {
-  if (packName === "slack-browser") {
-    return "Slack";
-  }
-  if (packName === "generic-mail-browser") {
-    return "mail";
-  }
-  if (packName === "boss-browser") {
-    return "BOSS";
-  }
-  if (packName === "google-drive-browser") {
-    return "Google Drive";
-  }
-  if (packName === "google-docs-browser") {
-    return "Google Docs";
-  }
-  if (packName === "feishu-docs-browser") {
-    return "Feishu Docs";
-  }
-  return packName.replace(/-browser$/u, "");
-}
-
 export function detectBrowserManualIntervention({
   packName,
   worldState,
@@ -2979,14 +5547,10 @@ export function detectBrowserManualIntervention({
 }): WatchDetection | null {
   const lines = visibleLines(worldState).slice(0, 40);
   const pageText = lines.join("\n");
-  if (!pageText.trim()) {
-    return null;
-  }
-
   const url = inferBrowserPageUrl(worldState);
   const packLabel = browserPackLabel(packName);
   const baseInputs = {
-    startUrl: String(rule.taskInputs?.startUrl ?? rule.taskInputs?.url ?? url ?? "").trim()
+    startUrl: String(rule.taskInputs?.startUrl ?? rule.taskInputs?.url ?? url ?? defaultBrowserStartUrlForPack(packName) ?? "").trim()
   };
 
   let kind: WatchDetectionMetadata["manualInterventionKind"] = null;
@@ -2994,22 +5558,34 @@ export function detectBrowserManualIntervention({
   let action = "";
   let summary = "";
 
-  if (VERIFICATION_REQUIRED_PATTERN.test(pageText)) {
+  const manualInterventionFromUrl = inferBrowserManualInterventionFromUrl({ packName, url });
+  if (manualInterventionFromUrl) {
+    kind = manualInterventionFromUrl.kind;
+    summary = manualInterventionFromUrl.summary;
+    detail = manualInterventionFromUrl.detail;
+    action = manualInterventionFromUrl.action;
+  }
+
+  if (!kind && !pageText.trim()) {
+    return null;
+  }
+
+  if (!kind && VERIFICATION_REQUIRED_PATTERN.test(pageText)) {
     kind = "verification";
     summary = `${packLabel} needs a human verification step`;
     detail = `${packLabel} is showing a verification or CAPTCHA page. AgentOS should pause this watch until you clear it manually.`;
     action = `Open ${packLabel} in the AgentOS browser workspace, complete the verification once, then let the watch continue.`;
-  } else if (SESSION_EXPIRED_PATTERN.test(pageText)) {
+  } else if (!kind && SESSION_EXPIRED_PATTERN.test(pageText)) {
     kind = "session_expired";
     summary = `${packLabel} session expired`;
     detail = `${packLabel} looks signed out or the browser session expired. AgentOS cannot continue this watch until the session is restored.`;
     action = `Open ${packLabel} in the AgentOS browser workspace and sign in again, then retry the watch.`;
-  } else if (LOGIN_REQUIRED_PATTERN.test(pageText)) {
+  } else if (!kind && LOGIN_REQUIRED_PATTERN.test(pageText)) {
     kind = "login";
     summary = `${packLabel} needs sign-in`;
     detail = `${packLabel} is asking for sign-in before AgentOS can continue watching it.`;
     action = `Open ${packLabel} in the AgentOS browser workspace and sign in once, then retry the watch.`;
-  } else if (ACCESS_DENIED_PATTERN.test(pageText)) {
+  } else if (!kind && ACCESS_DENIED_PATTERN.test(pageText)) {
     kind = "access_denied";
     summary = `${packLabel} access is blocked`;
     detail = `${packLabel} is showing an access or permission error. AgentOS cannot continue until the account or page access is fixed.`;
@@ -3294,18 +5870,90 @@ function extractMailThreadContext(worldState: WorldState | null, summary: string
   ).slice(0, 5);
 }
 
+function isOutlookComposeTextboxCandidate(candidate: InteractionCandidate | null | undefined): boolean {
+  if (!candidate) {
+    return false;
+  }
+  const hintText = candidateHintText(candidate);
+  const text = String(candidate.text ?? "").trim();
+  const composeSignal =
+    /(message body|compose|write|editor|draft|type here|reply|回复内容|撰写|输入|邮件正文)/iu.test(hintText)
+    || /(message body|compose|write|editor|draft|type here|reply|回复内容|撰写|输入|邮件正文)/iu.test(text);
+  if (candidate.role === "textbox") {
+    return composeSignal;
+  }
+  if (candidate.role === "button") {
+    return false;
+  }
+  return composeSignal;
+}
+
+function outlookComposeChromeVisible(worldState: WorldState | null): boolean {
+  const lines = visibleLines(worldState).slice(0, 80);
+  const hasSend = lines.some((line) => /^send$/iu.test(String(line ?? "").trim()));
+  const hasFrom = lines.some((line) => /^from:?$/iu.test(String(line ?? "").trim()));
+  const hasTo = lines.some((line) => /^to:?$/iu.test(String(line ?? "").trim()));
+  const hasSubject = lines.some((line) => /^subject:?$/iu.test(String(line ?? "").trim()));
+  return hasSend && hasFrom && hasTo && hasSubject;
+}
+
+function fallbackOutlookComposeCandidate(worldState: WorldState | null): InteractionCandidate | null {
+  if (!outlookComposeChromeVisible(worldState)) {
+    return null;
+  }
+  const windowBounds = findDesktopWindowBounds(worldState, "Microsoft Outlook");
+  if (!windowBounds) {
+    return null;
+  }
+
+  const x = Number(windowBounds.x ?? NaN);
+  const y = Number(windowBounds.y ?? NaN);
+  const width = Number(windowBounds.width ?? NaN);
+  const height = Number(windowBounds.height ?? NaN);
+  if (![x, y, width, height].every((value) => Number.isFinite(value)) || width <= 0 || height <= 0) {
+    return null;
+  }
+
+  const rawComposeBounds: InteractionCandidate["bounds"] = {
+    x: x + width * 0.34,
+    y: y + height * 0.14,
+    width: width * 0.48,
+    height: height * 0.72,
+    centerX: x + width * 0.58,
+    centerY: y + height * 0.5
+  };
+  const bodyBounds = deriveOutlookComposerBodyBounds(rawComposeBounds) ?? rawComposeBounds;
+  return {
+    id: "outlook-compose-window-fallback",
+    surface: "desktop",
+    kind: "text",
+    text: "Outlook reply body",
+    role: "textbox",
+    bounds: bodyBounds,
+    confidence: 0.42,
+    sourceHints: {
+      source: "window_fallback",
+      ariaLabel: "Outlook reply body"
+    },
+    isInteractive: true
+  } satisfies InteractionCandidate;
+}
+
 function findOutlookComposeCandidate(worldState: WorldState | null): InteractionCandidate | null {
+  const candidates = conversationCandidates(worldState, {
+    desktopRequiresAccessibility: true
+  });
+  return candidates.find((candidate) => isOutlookComposeTextboxCandidate(candidate)) ?? fallbackOutlookComposeCandidate(worldState);
+}
+
+function findOutlookReplyButtonCandidate(worldState: WorldState | null): InteractionCandidate | null {
   const candidates = conversationCandidates(worldState, {
     desktopRequiresAccessibility: true
   });
   return (
     candidates.find((candidate) => {
       const hintText = candidateHintText(candidate);
-      return (
-        candidate.role === "textbox" ||
-        /(reply|message|compose|write|editor|回复|撰写|输入)/iu.test(hintText) ||
-        /(reply|message|compose|write|editor|回复|撰写|输入)/iu.test(candidate.text)
-      );
+      return candidate.role === "button" && (/(reply|回复)/iu.test(hintText) || /(reply|回复)/iu.test(candidate.text));
     }) ?? null
   );
 }
@@ -3490,44 +6138,199 @@ function buildMailReplySteps(surface: LivePackSurface): RuntimeStep[] {
   ];
 }
 
-function buildOutlookReplySteps(): RuntimeStep[] {
+function buildOutlookDesktopComposePrefillSteps(): RuntimeStep[] {
   return [
     {
-      label: "Open unread Outlook thread",
+      label: "Focus Outlook",
       surface: "desktop",
-      action: "clickTarget",
-      params: { targetQuery: "{{openTarget}}" },
+      action: "focusApp",
+      params: { name: "Microsoft Outlook" },
       expect: frontmostAppExpectation("Outlook"),
       checkpoint: false
     },
     {
-      label: "Open Outlook reply composer",
+      label: "Focus Outlook composer",
       surface: "desktop",
-      action: "pressKey",
-      params: { key: "r", modifiers: ["meta"] },
+      action: "focusTarget",
+      params: {
+        target: "{{composeTarget}}",
+        allowBoundsFallback: true
+      },
       expect: frontmostAppExpectation("Outlook"),
-      checkpoint: false
-    },
-    {
-      label: "Wait for Outlook composer",
-      surface: "desktop",
-      action: "waitForTarget",
-      params: { targetQuery: "{{typeTarget}}", timeoutMs: 5000 },
       checkpoint: false
     },
     {
       label: "Type Outlook reply",
       surface: "desktop",
       action: "typeIntoTarget",
-      params: { targetQuery: "{{typeTarget}}", text: "{{typeText}}", clear: false },
-      expect: prefillVerificationExpectation("Outlook"),
+      params: {
+        target: "{{composeTarget}}",
+        text: "{{typeText}}",
+        clear: true,
+        inputMethod: "paste",
+        allowBoundsFallback: true
+      },
+      checkpoint: false
+    },
+    {
+      label: "Verify Outlook prefill",
+      surface: "desktop",
+      action: "wait",
+      params: { ms: 700, timeoutMs: 5000, pollMs: 500 },
+      expect: {
+        frontmostApp: "Outlook",
+        regionTextAnyVisible: [
+          {
+            text: "{{typeTextPreview}}",
+            region: "{{composeVerifyRegion}}",
+            scale: 2.4
+          },
+          {
+            text: "{{typeTextMiddlePreview}}",
+            region: "{{composeVerifyRegion}}",
+            scale: 2.4
+          },
+          {
+            text: "{{typeTextTailPreview}}",
+            region: "{{composeVerifyRegion}}",
+            scale: 2.4
+          },
+          {
+            text: "{{typeTextSuffixPreview}}",
+            region: "{{composeVerifyRegion}}",
+            scale: 2.4
+          }
+        ]
+      },
       checkpoint: false
     },
     {
       label: "Send Outlook reply",
       surface: "desktop",
       action: "clickTarget",
-      params: { targetQuery: "{{sendTarget}}" },
+      params: {
+        target: "{{sendTargetCandidate}}",
+        targetQuery: "{{sendTargetQuery}}",
+        allowBoundsFallback: false
+      },
+      checkpoint: false
+    }
+  ];
+}
+
+function buildSlackDesktopVisualReplySteps(): RuntimeStep[] {
+  return [
+    {
+      label: "Focus Slack",
+      surface: "desktop",
+      action: "focusApp",
+      params: { name: "Slack" },
+      expect: frontmostAppExpectation("Slack"),
+      checkpoint: false
+    },
+    {
+      label: "Dismiss stray Slack overlay",
+      surface: "desktop",
+      action: "pressKey",
+      params: { key: "Escape" },
+      checkpoint: false
+    },
+    {
+      label: "Open unread Slack thread",
+      surface: "desktop",
+      action: "clickAt",
+      params: { x: "{{openX}}", y: "{{openY}}" },
+      checkpoint: false
+    },
+    {
+      label: "Wait for Slack thread to open",
+      surface: "desktop",
+      action: "wait",
+      params: { ms: 500, timeoutMs: 8000, pollMs: 500 },
+      expect: desktopVisionThreadExpectation("Slack", "slack_thread"),
+      checkpoint: false
+    },
+    {
+      label: "Focus Slack composer area",
+      surface: "desktop",
+      action: "clickAt",
+      params: { x: "{{composeX}}", y: "{{composeY}}" },
+      expect: frontmostAppExpectation("Slack"),
+      checkpoint: false
+    },
+    {
+      label: "Type Slack reply",
+      surface: "desktop",
+      action: "typeText",
+      params: { text: "{{typeText}}" },
+      checkpoint: false
+    },
+    {
+      label: "Verify Slack prefill",
+      surface: "desktop",
+      action: "wait",
+      params: { ms: 250, timeoutMs: 4000, pollMs: 400 },
+      expect: desktopVisionPrefillExpectation("Slack", "slack_prefill"),
+      checkpoint: false
+    }
+  ];
+}
+
+function buildOutlookDesktopVisualReplySteps(): RuntimeStep[] {
+  return [
+    {
+      label: "Focus Outlook",
+      surface: "desktop",
+      action: "focusApp",
+      params: { name: "Microsoft Outlook" },
+      expect: frontmostAppExpectation("Outlook"),
+      checkpoint: false
+    },
+    {
+      label: "Open unread Outlook thread",
+      surface: "desktop",
+      action: "clickAt",
+      params: {
+        x: "{{openX}}",
+        y: "{{openY}}"
+      },
+      checkpoint: false
+    },
+    {
+      label: "Wait for Outlook thread to open",
+      surface: "desktop",
+      action: "wait",
+      params: { ms: 500, timeoutMs: 8000, pollMs: 500 },
+      expect: desktopVisionThreadExpectation("Outlook", "outlook_thread"),
+      checkpoint: false
+    },
+    {
+      label: "Open Outlook reply composer",
+      surface: "desktop",
+      action: "clickTarget",
+      params: { targetQuery: "{{replyTargetQuery}}", allowBoundsFallback: false },
+      checkpoint: false
+    },
+    {
+      label: "Wait for Outlook composer",
+      surface: "desktop",
+      action: "wait",
+      params: { ms: 500, timeoutMs: 4000, pollMs: 500 },
+      checkpoint: false
+    },
+    {
+      label: "Type Outlook reply",
+      surface: "desktop",
+      action: "typeText",
+      params: { text: "{{typeText}}" },
+      checkpoint: false
+    },
+    {
+      label: "Verify Outlook prefill",
+      surface: "desktop",
+      action: "wait",
+      params: { ms: 500, timeoutMs: 5000, pollMs: 500 },
+      expect: desktopVisionPrefillExpectation("Outlook", "outlook_prefill"),
       checkpoint: false
     }
   ];
@@ -3702,19 +6505,55 @@ export function analyzeConversationPack(
   return null;
 }
 
-async function resolveWeChatRecoveryPoint(
+async function resolveDesktopObservedPoint(
   worldState: WorldState | null,
-  vision: WeChatVisualAnalysis | null
+  appName: string,
+  point: { x: number; y: number } | null
 ): Promise<{ x: number; y: number } | null> {
-  if (!vision?.recoveryControl?.present || !vision.recoveryControl.approxBox) {
+  if (!point) {
     return null;
   }
 
-  const bounds = await resolveDesktopVisionFrame(worldState, "WeChat");
-  return resolveWeChatVisionBoxPoint({
-    bounds,
-    box: vision.recoveryControl.approxBox
-  });
+  const frame = await resolveDesktopVisionFrame(worldState, appName);
+  if (!frame) {
+    return point;
+  }
+
+  const appContext = (worldState?.appContext ?? null) as Record<string, unknown> | null;
+  const captureWindowNumber = Number(appContext?.captureWindowNumber ?? NaN);
+  const captureSize = await readCaptureImageSize(String(worldState?.capture?.path ?? ""));
+  const looksLocalToFrame =
+    Number.isFinite(Number(point.x)) &&
+    Number.isFinite(Number(point.y)) &&
+    Number(point.x) >= 0 &&
+    Number(point.y) >= 0 &&
+    Number(point.x) <= Number(frame.width ?? 0) &&
+    Number(point.y) <= Number(frame.height ?? 0);
+  const localToCapture =
+    captureSize &&
+    Number.isFinite(Number(point.x)) &&
+    Number.isFinite(Number(point.y)) &&
+    Number(point.x) >= 0 &&
+    Number(point.y) >= 0 &&
+    Number(point.x) <= captureSize.width &&
+    Number(point.y) <= captureSize.height;
+
+  if ((localToCapture || looksLocalToFrame) && (Number.isFinite(captureWindowNumber) || looksLocalToFrame)) {
+    const scaleX =
+      localToCapture && captureSize && Number(captureSize.width) > 0 && Number(frame.width ?? 0) > 0
+        ? Number(frame.width ?? 0) / Number(captureSize.width)
+        : 1;
+    const scaleY =
+      localToCapture && captureSize && Number(captureSize.height) > 0 && Number(frame.height ?? 0) > 0
+        ? Number(frame.height ?? 0) / Number(captureSize.height)
+        : 1;
+    return {
+      x: Number(frame.x ?? 0) + Number(point.x) * scaleX,
+      y: Number(frame.y ?? 0) + Number(point.y) * scaleY
+    };
+  }
+
+  return point;
 }
 
 export function analyzeDesktopConversationPack(
@@ -3740,123 +6579,266 @@ export async function analyzeDesktopConversationPackWithVision({
   timeoutMs?: number;
 }): Promise<DesktopConversationPackAnalysis | null> {
   const base = analyzeDesktopConversationPack(packName, worldState);
-  if (packName !== "wechat-desktop") {
-    return base;
-  }
+  if (packName === "wechat-desktop") {
+    const visionResult = await analyzeWeChatDesktopVisualState({
+      modelClient: modelClient ?? null,
+      worldState,
+      timeoutMs
+    }).then(
+      (value) => ({ value, error: null }),
+      (error) => ({ value: null, error })
+    );
+    const vision = visionResult.value;
+    if (!vision) {
+      return withAnalysisSemantics({
+        packName: "wechat-desktop",
+        foreground: base?.foreground ?? isWeChatDesktopForeground(worldState),
+        unreadCandidate: null,
+        composeCandidate: null,
+        sendCandidate: null,
+        topUnreadCandidates: []
+      }, {
+        runnerType: "desktop_vlm",
+        skipReasons: visionErrorSkipReasons(base, visionResult.error)
+      });
+    }
 
-  const vision = await analyzeWeChatDesktopVisualState({
-    modelClient: modelClient ?? null,
-    worldState,
-    timeoutMs
-  }).catch(() => null);
-  if (!vision) {
-    return withAnalysisSemantics({
-      packName: "wechat-desktop",
-      foreground: base?.foreground ?? isWeChatDesktopForeground(worldState),
-      unreadCandidate: null,
-      composeCandidate: null,
-      sendCandidate: null,
-      topUnreadCandidates: []
-    }, {
-      runnerType: "desktop_vlm"
-    });
-  }
-
-  const wechatVisionFrame = await resolveDesktopVisionFrame(worldState, "WeChat");
-  const unreadMatch = findWeChatVisionUnreadCandidate(wechatVisionFrame, vision);
-  const composeCandidate = vision.composer.present
-    ? {
-        id: "wechat-vision-composer",
-        text: vision.composer.evidence || "WeChat composer",
-        role: "textbox",
-        interactive: true,
-        source: "vision",
-        score: 100,
-        bounds:
-          wechatVisionFrame && vision.composer.approxBox
-            ? (() => {
-                const bounds = wechatVisionFrame;
-                const box = vision.composer.approxBox;
-                if (!bounds) {
-                  return undefined;
-                }
-                const x = Number(bounds.x ?? 0) + Number(bounds.width ?? 0) * box.x;
-                const y = Number(bounds.y ?? 0) + Number(bounds.height ?? 0) * box.y;
-                const width = Number(bounds.width ?? 0) * box.width;
-                const height = Number(bounds.height ?? 0) * box.height;
-                return {
-                  x,
-                  y,
-                  width,
-                  height,
-                  centerX: x + width / 2,
-                  centerY: y + height / 2
-                };
-              })()
-            : undefined,
-        hints: [vision.composer.evidence].filter(Boolean)
-      } satisfies DesktopProbeCandidateSummary
-    : null;
-  const visionThreadCandidates = vision.visibleUnreadThreads.map((thread) => ({
-    id: "wechat-vision-unread",
-    text: thread.name,
-    role: "text",
-    interactive: true,
-    source: "vision",
-    score: 100,
-    bounds:
-      wechatVisionFrame && thread.approxBox
-        ? {
-            x: Number(wechatVisionFrame.x ?? 0) + Number(wechatVisionFrame.width ?? 0) * thread.approxBox.x,
-            y: Number(wechatVisionFrame.y ?? 0) + Number(wechatVisionFrame.height ?? 0) * thread.approxBox.y,
-            width: Number(wechatVisionFrame.width ?? 0) * thread.approxBox.width,
-            height: Number(wechatVisionFrame.height ?? 0) * thread.approxBox.height,
-            centerX:
-              Number(wechatVisionFrame.x ?? 0) +
-              Number(wechatVisionFrame.width ?? 0) * (thread.approxBox.x + thread.approxBox.width / 2),
-            centerY:
-              Number(wechatVisionFrame.y ?? 0) +
-              Number(wechatVisionFrame.height ?? 0) * (thread.approxBox.y + thread.approxBox.height / 2)
-          }
-        : undefined,
-    hints: [
-      thread.evidence,
-      thread.latestSnippet,
-      thread.replyReason,
-      `kind:${thread.threadKind}`,
-      `conversation:${thread.conversationKind}`,
-      `priority:${thread.priority}`,
-      thread.replyable ? "replyable" : "non-replyable",
-      thread.shouldReply ? "should-reply" : "skip-reply"
-    ].filter(Boolean)
-  })) satisfies DesktopProbeCandidateSummary[];
-
-  return withAnalysisSemantics({
-    packName: "wechat-desktop",
-    foreground: base?.foreground ?? isWeChatDesktopForeground(worldState),
-    unreadCandidate: unreadMatch
+    const wechatVisionFrame = await resolveDesktopVisionFrame(worldState, "WeChat");
+    const unreadMatch = findWeChatVisionUnreadCandidate(wechatVisionFrame, vision);
+    const composeCandidate = vision.composer.present
       ? {
-          id: "wechat-vision-unread",
-          text: unreadMatch.openTarget ?? "",
-          role: "text",
+          id: "wechat-vision-composer",
+          text: vision.composer.evidence || "WeChat composer",
+          role: "textbox",
           interactive: true,
           source: "vision",
           score: 100,
           bounds:
-            visionThreadCandidates.find((candidate) => candidate.text === unreadMatch.openTarget)?.bounds,
-          hints: visionThreadCandidates.find((candidate) => candidate.text === unreadMatch.openTarget)?.hints ?? []
-        }
-      : null,
-    composeCandidate,
-    sendCandidate: base?.sendCandidate ?? null,
-    topUnreadCandidates: visionThreadCandidates
-  }, {
-    runnerType: "desktop_vlm",
-    scene: vision.scene,
-    selectedTarget: unreadMatch?.openTarget ?? vision.openThread ?? null,
-    skipReasons: deriveWeChatSkipReasons({ vision, unreadMatch }),
-    recoveryAction: vision.recommendedRecoveryAction
-  });
+            wechatVisionFrame && vision.composer.approxBox
+              ? (() => {
+                  const bounds = wechatVisionFrame;
+                  const box = vision.composer.approxBox;
+                  if (!bounds) {
+                    return undefined;
+                  }
+                  const x = Number(bounds.x ?? 0) + Number(bounds.width ?? 0) * box.x;
+                  const y = Number(bounds.y ?? 0) + Number(bounds.height ?? 0) * box.y;
+                  const width = Number(bounds.width ?? 0) * box.width;
+                  const height = Number(bounds.height ?? 0) * box.height;
+                  return {
+                    x,
+                    y,
+                    width,
+                    height,
+                    centerX: x + width / 2,
+                    centerY: y + height / 2
+                  };
+                })()
+              : undefined,
+          hints: [vision.composer.evidence].filter(Boolean)
+        } satisfies DesktopProbeCandidateSummary
+      : null;
+    const visionThreadCandidates = vision.visibleUnreadThreads.map((thread) => ({
+      id: "wechat-vision-unread",
+      text: thread.name,
+      role: "text",
+      interactive: true,
+      source: "vision",
+      score: 100,
+      bounds:
+        wechatVisionFrame && thread.approxBox
+          ? {
+              x: Number(wechatVisionFrame.x ?? 0) + Number(wechatVisionFrame.width ?? 0) * thread.approxBox.x,
+              y: Number(wechatVisionFrame.y ?? 0) + Number(wechatVisionFrame.height ?? 0) * thread.approxBox.y,
+              width: Number(wechatVisionFrame.width ?? 0) * thread.approxBox.width,
+              height: Number(wechatVisionFrame.height ?? 0) * thread.approxBox.height,
+              centerX:
+                Number(wechatVisionFrame.x ?? 0) +
+                Number(wechatVisionFrame.width ?? 0) * (thread.approxBox.x + thread.approxBox.width / 2),
+              centerY:
+                Number(wechatVisionFrame.y ?? 0) +
+                Number(wechatVisionFrame.height ?? 0) * (thread.approxBox.y + thread.approxBox.height / 2)
+            }
+          : undefined,
+      hints: [
+        thread.evidence,
+        thread.latestSnippet,
+        thread.replyReason,
+        `kind:${thread.threadKind}`,
+        `conversation:${thread.conversationKind}`,
+        `priority:${thread.priority}`,
+        thread.replyable ? "replyable" : "non-replyable",
+        thread.shouldReply ? "should-reply" : "skip-reply"
+      ].filter(Boolean)
+    })) satisfies DesktopProbeCandidateSummary[];
+
+    return withAnalysisSemantics({
+      packName: "wechat-desktop",
+      foreground: base?.foreground ?? isWeChatDesktopForeground(worldState),
+      unreadCandidate: unreadMatch
+        ? {
+            id: "wechat-vision-unread",
+            text: unreadMatch.openTarget ?? "",
+            role: "text",
+            interactive: true,
+            source: "vision",
+            score: 100,
+            bounds:
+              visionThreadCandidates.find((candidate) => candidate.text === unreadMatch.openTarget)?.bounds,
+            hints: visionThreadCandidates.find((candidate) => candidate.text === unreadMatch.openTarget)?.hints ?? []
+          }
+        : null,
+      composeCandidate,
+      sendCandidate: base?.sendCandidate ?? null,
+      topUnreadCandidates: visionThreadCandidates
+    }, {
+      runnerType: "desktop_vlm",
+      scene: vision.scene,
+      selectedTarget: unreadMatch?.openTarget ?? vision.openThread ?? null,
+      skipReasons: deriveWeChatSkipReasons({ vision, unreadMatch }),
+      recoveryAction: vision.recommendedRecoveryAction
+    });
+  }
+
+  if (packName === "slack-desktop") {
+    const visionResult = await analyzeSlackDesktopVisualState({
+      modelClient: modelClient ?? null,
+      worldState,
+      timeoutMs
+    }).then(
+      (value) => ({ value, error: null }),
+      (error) => ({ value: null, error })
+    );
+    const vision = visionResult.value;
+    if (!vision) {
+      return withAnalysisSemantics({
+        packName,
+        foreground: base?.foreground ?? isSlackDesktopForeground(worldState),
+        unreadCandidate: base?.unreadCandidate ?? null,
+        composeCandidate: base?.composeCandidate ?? null,
+        sendCandidate: base?.sendCandidate ?? null,
+        topUnreadCandidates: base?.topUnreadCandidates ?? []
+      }, {
+        runnerType: "desktop_vlm",
+        skipReasons: visionErrorSkipReasons(base, visionResult.error)
+      });
+    }
+
+    const selectedThread = pickDesktopVisualUnreadThread(vision);
+    const topUnreadCandidates = await summarizeDesktopVisualThreadCandidates(worldState, "Slack", "slack", vision.visibleUnreadThreads);
+    const composeBounds = await resolveDesktopVisionCandidateBounds(worldState, "Slack", vision.composer.approxBox);
+    return withAnalysisSemantics({
+      packName,
+      foreground: base?.foreground ?? isSlackDesktopForeground(worldState),
+      unreadCandidate: selectedThread
+        ? {
+            id: "slack-vision-unread",
+            text: selectedThread.name,
+            role: "text",
+            interactive: true,
+            source: "vision",
+            score: 100,
+            bounds: topUnreadCandidates.find((candidate) => candidate.text === selectedThread.name)?.bounds,
+            hints: topUnreadCandidates.find((candidate) => candidate.text === selectedThread.name)?.hints ?? []
+          }
+        : null,
+      composeCandidate: vision.composer.present
+        ? {
+            id: "slack-vision-composer",
+            text: vision.composer.evidence || "Slack composer",
+            role: "textbox",
+            interactive: true,
+            source: "vision",
+            score: 100,
+            bounds: composeBounds,
+            hints: [vision.composer.evidence].filter(Boolean)
+          }
+        : null,
+      sendCandidate: base?.sendCandidate ?? null,
+      topUnreadCandidates
+    }, {
+      runnerType: "desktop_vlm",
+      scene: vision.scene,
+      selectedTarget: selectedThread?.name ?? vision.openThread ?? null,
+      skipReasons: deriveDesktopVisualSkipReasons({ vision, unreadThread: selectedThread }),
+      recoveryAction: vision.recommendedRecoveryAction
+    });
+  }
+
+  if (packName === "outlook-desktop") {
+    const visionResult = await analyzeOutlookDesktopVisualState({
+      modelClient: modelClient ?? null,
+      worldState,
+      timeoutMs
+    }).then(
+      (value) => ({ value, error: null }),
+      (error) => ({ value: null, error })
+    );
+    const vision = visionResult.value;
+    if (!vision) {
+      return withAnalysisSemantics({
+        packName,
+        foreground: base?.foreground ?? isOutlookDesktopForeground(worldState),
+        unreadCandidate: base?.unreadCandidate ?? null,
+        composeCandidate: base?.composeCandidate ?? null,
+        sendCandidate: base?.sendCandidate ?? null,
+        topUnreadCandidates: base?.topUnreadCandidates ?? []
+      }, {
+        runnerType: "desktop_vlm",
+        skipReasons: visionErrorSkipReasons(base, visionResult.error)
+      });
+    }
+
+    const selectedThread = pickDesktopVisualUnreadThread(vision);
+    const selectedTarget =
+      vision.scene === "thread" && String(vision.openThread ?? "").trim()
+        ? String(vision.openThread ?? "").trim()
+        : selectedThread?.name ?? vision.openThread ?? null;
+    const topUnreadCandidates = await summarizeDesktopVisualThreadCandidates(worldState, "Microsoft Outlook", "outlook", vision.visibleUnreadThreads);
+    const composeBounds = await resolveDesktopVisionCandidateBounds(worldState, "Microsoft Outlook", vision.composer.approxBox);
+    return withAnalysisSemantics({
+      packName,
+      foreground: base?.foreground ?? isOutlookDesktopForeground(worldState),
+      unreadCandidate: selectedThread
+        ? {
+            id: "outlook-vision-unread",
+            text: selectedThread.name,
+            role: "text",
+            interactive: true,
+            source: "vision",
+            score: 100,
+            bounds: topUnreadCandidates.find((candidate) => candidate.text === selectedThread.name)?.bounds,
+            hints: topUnreadCandidates.find((candidate) => candidate.text === selectedThread.name)?.hints ?? []
+          }
+        : null,
+      composeCandidate: vision.composer.present
+        ? {
+            id: "outlook-vision-composer",
+            text: vision.composer.evidence || "Outlook composer",
+            role: "textbox",
+            interactive: true,
+            source: "vision",
+            score: 100,
+            bounds: composeBounds,
+            hints: [vision.composer.evidence].filter(Boolean)
+          }
+        : null,
+      sendCandidate: base?.sendCandidate ?? null,
+      topUnreadCandidates
+    }, {
+      runnerType: "desktop_vlm",
+      scene: vision.scene,
+      selectedTarget,
+      skipReasons: deriveDesktopVisualSkipReasons({ vision, unreadThread: selectedThread }),
+      recoveryAction: vision.recommendedRecoveryAction
+    });
+  }
+
+  if (packName !== "wechat-desktop") {
+    return base;
+  }
+
+  return base;
 }
 
 function createDocumentPack({
@@ -3912,7 +6894,9 @@ function createDocumentPack({
 
       const watchTask = createWatchTask(rule);
       const watchWorkspace = profileAsWorkspace(rule, workspace);
-      const startUrl = String(rule.taskInputs?.startUrl ?? rule.taskInputs?.url ?? rule.appTarget ?? "").trim();
+      const startUrl = String(
+        rule.taskInputs?.startUrl ?? rule.taskInputs?.url ?? rule.appTarget ?? defaultBrowserStartUrlForPack(name) ?? ""
+      ).trim();
       if (/^https?:\/\//u.test(startUrl)) {
         await adapter.act({
           task: watchTask,
@@ -4195,7 +7179,9 @@ function createSlackPack({
         return;
       }
 
-      const startUrl = String(rule.taskInputs?.startUrl ?? rule.taskInputs?.url ?? rule.appTarget ?? "").trim();
+      const startUrl = String(
+        rule.taskInputs?.startUrl ?? rule.taskInputs?.url ?? rule.appTarget ?? defaultBrowserStartUrlForPack(name) ?? ""
+      ).trim();
       if (/^https?:\/\//u.test(startUrl)) {
         await adapter.act({
           task: watchTask,
@@ -4221,10 +7207,11 @@ function createSlackPack({
       return observeWatchSurface({
         ...args,
         surface,
-        desktopRequireAccessibility: surface === "desktop"
+        desktopRequireAccessibility: false
       });
     },
-    async detectNewItems({ rule, worldState, dedupeState = {} }) {
+    async detectNewItems(args) {
+      const { rule, worldState, dedupeState = {}, workspace, surfaceRegistry, controlPlane } = args;
       if (surface === "browser") {
         const manualIntervention = detectBrowserManualIntervention({
           packName: name,
@@ -4237,7 +7224,152 @@ function createSlackPack({
         }
       }
 
-      if (surface === "desktop" && !isSlackDesktopForeground(worldState)) {
+      if (surface === "desktop") {
+        let vision = await analyzeSlackDesktopVisualState({
+          modelClient: controlPlane.modelClient,
+          worldState,
+          timeoutMs: SLACK_DESKTOP_DETECT_ANALYZE_TIMEOUT_MS
+        }).catch(() => null);
+        let effectiveWorldState = worldState;
+        let recoveryAttempts = 0;
+        if (isDesktopRecoveryScene(vision)) {
+          const recovered = await recoverDesktopVisualSceneToList({
+            rule,
+            workspace,
+            surfaceRegistry,
+            controlPlane,
+            worldState,
+            vision,
+            appName: "Slack",
+            focusName: "Focus Slack",
+            recoverLabel: "Recover Slack to conversation list",
+            dismissLabel: "Dismiss Slack foreign view",
+            analyzeState: (candidateState) =>
+              analyzeSlackDesktopVisualState({
+                modelClient: controlPlane.modelClient,
+                worldState: candidateState,
+                timeoutMs: SLACK_DESKTOP_DETECT_ANALYZE_TIMEOUT_MS
+              })
+          });
+          effectiveWorldState = recovered.worldState ?? worldState;
+          vision = recovered.vision;
+          recoveryAttempts = recovered.recoveryAttempts;
+        }
+        if (vision && isDesktopRecoveryScene(vision)) {
+          return null;
+        }
+        let thread = pickDesktopVisualUnreadThread(vision);
+        let scrollPasses = 0;
+        if (!thread) {
+          const scanned = await scanDesktopVisionUnreadConversation({
+            rule,
+            worldState,
+            workspace,
+            surfaceRegistry,
+            controlPlane,
+            initialWorldState: effectiveWorldState,
+            initialVision: vision,
+            appName: "Slack",
+            anchor: { x: 0.18, y: 0.28 },
+            scrollDy: -380,
+            maxPasses: DESKTOP_VLM_SCROLL_SCAN_MAX_PASSES,
+            analyzeState: (candidateState) =>
+              analyzeSlackDesktopVisualState({
+                modelClient: controlPlane.modelClient,
+                worldState: candidateState,
+                timeoutMs: SLACK_DESKTOP_DETECT_ANALYZE_TIMEOUT_MS
+              })
+          });
+          effectiveWorldState = scanned.worldState ?? effectiveWorldState;
+          vision = scanned.vision;
+          thread = scanned.thread;
+          scrollPasses = scanned.scrollPasses;
+        }
+        if (vision && thread) {
+          const openTarget = normalizeSlackSummary(thread.name);
+          if (!openTarget) {
+            return null;
+          }
+
+          const threadBounds = await resolveDesktopVisionCandidateBounds(effectiveWorldState, "Slack", thread.approxBox);
+          const openPoint = await resolveDesktopVisionClickPoint(effectiveWorldState, "Slack", thread.approxBox);
+          const composePoint = await resolveDesktopVisionClickPoint(
+            effectiveWorldState,
+            "Slack",
+            vision.composer.approxBox,
+            { x: 0.66, y: 0.92 }
+          );
+          if (!threadBounds || !openPoint || !composePoint) {
+            return null;
+          }
+
+          const context = uniqueStrings([
+            String(thread.latestSnippet ?? "").trim(),
+            String(thread.replyReason ?? "").trim(),
+            ...contextForSignal(effectiveWorldState, { text: openTarget })
+          ]).slice(0, 4);
+          const itemFingerprint = fingerprint(`${name}:${surface}:${rule.workspaceName ?? "default"}:${openTarget}:${context.join("|")}`);
+          if (dedupeState.lastFingerprint === itemFingerprint) {
+            return null;
+          }
+
+          return {
+            fingerprint: itemFingerprint,
+            summary: openTarget,
+            text: openTarget,
+            context,
+            inputs: {
+              watchItemText: openTarget,
+              watchSummary: openTarget,
+              watchContext: context.join("\n"),
+              openTarget,
+              threadTitle: openTarget,
+              openX: openPoint.x,
+              openY: openPoint.y,
+              composeX: composePoint.x,
+              composeY: composePoint.y
+            },
+            metadata: {
+              visualAnalysis: vision,
+              visualThread: thread,
+              recoveryAttempts,
+              openPoint,
+              scrollPasses,
+              openCandidate: {
+                id: "slack-vision-unread",
+                text: openTarget,
+                role: "text",
+                isInteractive: true,
+                bounds: threadBounds
+              },
+              ...buildConversationMetadata({
+                packName: name,
+                surface,
+                summary: openTarget,
+                context,
+                openTarget,
+                candidate: {
+                  id: "slack-vision-unread",
+                  text: openTarget,
+                  role: "text",
+                  isInteractive: true,
+                  bounds: threadBounds
+                } as InteractionCandidate
+              })
+            },
+            taskSpec: {
+              preferredSurface: "desktop",
+              steps: buildSlackDesktopVisualReplySteps()
+            }
+          };
+        }
+
+        if (vision) {
+          return null;
+        }
+      }
+
+      if (!isSlackDesktopForeground(worldState) && surface === "desktop") {
         return null;
       }
 
@@ -4258,15 +7390,6 @@ function createSlackPack({
       if (dedupeState.lastFingerprint === itemFingerprint) {
         return null;
       }
-
-      const metadata = buildConversationMetadata({
-        packName: "wechat-desktop",
-        surface: "desktop",
-        summary,
-        context,
-        openTarget: String(candidate.text ?? summary).trim() || summary,
-        candidate
-      });
 
       return {
         fingerprint: itemFingerprint,
@@ -4290,6 +7413,34 @@ function createSlackPack({
       };
     },
     async extractContext(args) {
+      if (surface === "desktop" && args.detection.metadata?.visualAnalysis) {
+        const summary = String(args.detection.summary ?? "").trim();
+        const context = Array.isArray(args.detection.context) ? args.detection.context : [];
+        const openTarget = String(args.detection.inputs?.openTarget ?? summary).trim() || summary;
+        return {
+          summary,
+          context,
+          inputs: {
+            ...(args.detection.inputs ?? {}),
+            watchContext: context.join("\n"),
+            openTarget,
+            threadTitle: openTarget
+          },
+          metadata: {
+            ...(args.detection.metadata ?? {}),
+            ...buildConversationMetadata({
+              packName: name,
+              surface,
+              summary,
+              context,
+              openTarget,
+              candidate: (args.detection.metadata?.openCandidate ?? null) as InteractionCandidate | Record<string, unknown> | null
+            })
+          },
+          taskSpec: args.detection.taskSpec ?? undefined
+        };
+      }
+
       const threadState = await openSlackThreadForContext({ ...args, surface });
       if (surface === "desktop" && !findSlackComposeCandidate(threadState, surface)) {
         return null;
@@ -4381,7 +7532,8 @@ function createWeChatPack(): LivePack {
         desktopRequireAccessibility: false
       });
     },
-    async detectNewItems({ rule, worldState, dedupeState = {}, workspace, surfaceRegistry, controlPlane }) {
+    async detectNewItems(args) {
+      const { rule, worldState, dedupeState = {}, workspace, surfaceRegistry, controlPlane } = args;
       let initialVision = await analyzeWeChatDesktopVisualState({
         modelClient: controlPlane.modelClient,
         worldState
@@ -4594,40 +7746,297 @@ async function openMailThreadForContext({
   rule,
   workspace,
   surfaceRegistry,
+  controlPlane,
   surface,
   detection,
-  desktopReplyShortcut = null
+  worldState,
+  desktopReplyShortcut = null,
+  allowReplyShortcutFallback = Boolean(desktopReplyShortcut)
 }: LivePackExtractContextArgs & {
   surface: LivePackSurface;
   desktopReplyShortcut?: { key: string; modifiers?: string[] } | null;
+  allowReplyShortcutFallback?: boolean;
 }): Promise<WorldState | null> {
   const adapter = surfaceRegistry.get(surface);
   if (!adapter) {
     return null;
   }
+  // Outlook often drops AX candidates while a thread is switching, but we still need a fresh screenshot.
+  const desktopVisualObserveRequiresAccessibility = false;
 
   const openTarget = String(detection.inputs?.openTarget ?? detection.summary ?? "").trim();
   if (!openTarget) {
     return null;
   }
+  const openThreadCue =
+    String(
+      (detection.metadata?.visualThread as { subjectCue?: unknown; latestSnippet?: unknown } | null)?.subjectCue
+      ?? (detection.metadata?.visualThread as { subjectCue?: unknown; latestSnippet?: unknown } | null)?.latestSnippet
+      ?? detection.context?.[0]
+      ?? ""
+    ).trim() || null;
 
   const openCandidate = (detection.metadata?.openCandidate ?? null) as Record<string, unknown> | null;
-  await adapter.act({
-    task: createWatchTask(rule),
-    step: {
-      id: `mail-open-${rule.id}`,
-      label: "Open mail thread",
-      surface,
-      action: "clickTarget",
-      params: {
-        targetQuery: openTarget,
-        ...(openCandidate ? { target: openCandidate } : {})
-      }
-    },
-    workspace: profileAsWorkspace(rule, workspace),
-    traceId: null,
-    outputs: {}
+  const openX = Number(detection.inputs?.openX);
+  const openY = Number(detection.inputs?.openY);
+  const buildOpenStep = (
+    id: string,
+    label: string,
+    allowBoundsFallback = true,
+    preferTargetQuery = false
+  ): RuntimeStep | null =>
+    (surface === "desktop" && !preferTargetQuery && Number.isFinite(openX) && Number.isFinite(openY))
+      ? {
+          id,
+          label,
+          surface,
+          action: "clickAt",
+          params: {
+            x: openX,
+            y: openY
+          }
+        }
+      : (openCandidate && (preferTargetQuery || surface === "desktop"))
+      ? {
+          id,
+          label,
+          surface,
+          action: "clickTarget",
+          params: {
+            targetQuery: openTarget,
+            target: openCandidate,
+            allowBoundsFallback
+          }
+        }
+      : Number.isFinite(openX) && Number.isFinite(openY)
+        ? {
+            id,
+            label,
+            surface,
+            action: "clickAt",
+            params: {
+              x: openX,
+              y: openY
+            }
+          }
+        : openCandidate
+        ? {
+            id,
+            label,
+            surface,
+            action: "clickTarget",
+            params: {
+              targetQuery: openTarget,
+              target: openCandidate,
+              allowBoundsFallback
+            }
+          }
+        : null;
+  const detectionVisual = (detection.metadata?.visualAnalysis ?? null) as { scene?: unknown; openThread?: unknown } | null;
+  const previousOpenThread = String(detectionVisual?.openThread ?? "").trim();
+  const confirmedThreadVision: DesktopVisualAnalysis | null =
+    surface === "desktop" && String(detectionVisual?.scene ?? "").trim() === "thread"
+      ? {
+          openThread: previousOpenThread || null,
+          selectedRow: String((detectionVisual as { selectedRow?: unknown } | null)?.selectedRow ?? "").trim() || null,
+          visibleUnreadThreads: [],
+          composer: { present: false, evidence: "", approxBox: null, entryPoint: null, hasDraftText: null, draftPreview: null },
+          scene: "thread",
+          sceneEvidence: previousOpenThread,
+          recommendedRecoveryAction: "none",
+          recoveryControl: { present: false, evidence: "", approxBox: null },
+          targetThreadOpen: previousOpenThread === openTarget ? true : null,
+          prefillVisible: null
+        }
+      : null;
+  const threadAlreadyOpen =
+    didOutlookThreadSelectionAdvance({
+      vision: confirmedThreadVision,
+      targetThread: openTarget,
+      targetCue: openThreadCue,
+      previousOpenThread
+    });
+  let lastReliableOutlookThreadVision: DesktopVisualAnalysis | null = threadAlreadyOpen ? confirmedThreadVision : null;
+  const updateLastReliableOutlookThreadVision = (vision: DesktopVisualAnalysis | null): DesktopVisualAnalysis | null => {
+    if (vision) {
+      lastReliableOutlookThreadVision = vision;
+    }
+    return vision;
+  };
+  const effectiveOutlookThreadVision = (vision: DesktopVisualAnalysis | null): DesktopVisualAnalysis | null =>
+    vision ?? lastReliableOutlookThreadVision;
+  let openAttempts = 0;
+  const hasThreadSelectionAdvanced = (vision: DesktopVisualAnalysis | null, state: WorldState | null = threadState) => {
+    const effectiveVision = effectiveOutlookThreadVision(vision);
+    return (
+      didOutlookThreadSelectionAdvance({
+        vision: effectiveVision,
+        targetThread: openTarget,
+        targetCue: openThreadCue,
+        previousOpenThread
+      })
+      || didOutlookThreadSelectionAdvanceFromState({
+        worldState: state,
+        targetThread: openTarget,
+        targetCue: openThreadCue,
+        previousOpenThread
+      })
+      || (
+        openAttempts > 0
+        && effectiveVision?.scene === "thread"
+        && !isOutlookTargetUnreadStillVisible(effectiveVision, openTarget, openThreadCue)
+      )
+    );
+  };
+  const hasCurrentThreadConfirmation = (vision: DesktopVisualAnalysis | null, state: WorldState | null = threadState) =>
+    hasThreadSelectionAdvanced(vision, state);
+  const hasAvailableOutlookComposer = (vision: DesktopVisualAnalysis | null, state: WorldState | null) =>
+    vision ? vision.scene === "thread" && Boolean(vision.composer.present) : Boolean(findOutlookComposeCandidate(state));
+  const outlookTextOpenQueries =
+    surface === "desktop" && rule.livePack === "outlook-desktop"
+      ? uniqueStrings([openTarget, String(openThreadCue ?? "").trim()].filter(Boolean))
+      : [];
+  const buildOutlookTextOpenStep = (
+    id: string,
+    label: string,
+    attemptIndex = 0,
+    preferredTarget: Record<string, unknown> | null = openCandidate,
+    allowBoundsFallback = true
+  ): RuntimeStep | null => {
+    const preferredText = String(preferredTarget?.text ?? "").trim();
+    const fallbackText =
+      openTarget
+      || outlookTextOpenQueries[0]
+      || outlookTextOpenQueries[Math.min(attemptIndex, Math.max(0, outlookTextOpenQueries.length - 1))]
+      || "";
+    const text = preferredText || fallbackText;
+    return text
+      ? {
+          id,
+          label,
+          surface,
+          action: "clickTarget",
+          params: {
+            targetQuery: text,
+            target: preferredTarget ?? {
+              id: `${id}-target`,
+              text,
+              role: "text",
+              isInteractive: true
+            },
+            allowBoundsFallback
+          }
+        }
+      : null;
+  };
+  traceOutlookThreadState("thread-already-open-check", {
+    vision: confirmedThreadVision,
+    targetThread: openTarget,
+    targetCue: openThreadCue,
+    previousOpenThread,
+    openAttempts
   });
+  if (!threadAlreadyOpen) {
+    const openStep = buildOpenStep(`mail-open-${rule.id}`, "Open mail thread");
+    if (!openStep) {
+      return null;
+    }
+    const textOpenStep =
+      openStep.action === "clickAt"
+        ? null
+        : buildOutlookTextOpenStep(`mail-open-text-${rule.id}`, "Open mail thread by visible text");
+    let executedOpenStep: RuntimeStep = openStep;
+    openAttempts += 1;
+    if (textOpenStep) {
+      try {
+        await adapter.act({
+          task: createWatchTask(rule),
+          step: textOpenStep,
+          workspace: profileAsWorkspace(rule, workspace),
+          traceId: null,
+          outputs: {}
+        });
+        executedOpenStep = textOpenStep;
+      } catch {
+        await adapter.act({
+          task: createWatchTask(rule),
+          step: openStep,
+          workspace: profileAsWorkspace(rule, workspace),
+          traceId: null,
+          outputs: {}
+        });
+        executedOpenStep = openStep;
+      }
+    } else {
+      await adapter.act({
+        task: createWatchTask(rule),
+        step: openStep,
+        workspace: profileAsWorkspace(rule, workspace),
+        traceId: null,
+        outputs: {}
+      });
+      executedOpenStep = openStep;
+    }
+    if (surface === "desktop" && rule.livePack === "outlook-desktop") {
+      await adapter.act({
+        task: createWatchTask(rule),
+        step: {
+          id: `mail-open-refocus-wait-${rule.id}`,
+          label: "Wait for Outlook thread selection focus",
+          surface,
+          action: "wait",
+          params: { ms: 150 }
+        },
+        workspace: profileAsWorkspace(rule, workspace),
+        traceId: null,
+        outputs: {}
+      });
+      await adapter.act({
+        task: createWatchTask(rule),
+        step: {
+          id: `mail-open-confirm-${rule.id}`,
+          label: "Confirm Outlook thread selection",
+          surface,
+          action: executedOpenStep.action,
+          params: { ...(executedOpenStep.params ?? {}) }
+        },
+        workspace: profileAsWorkspace(rule, workspace),
+        traceId: null,
+        outputs: {}
+      });
+    }
+    if (surface === "desktop" && previousOpenThread && rule.livePack !== "outlook-desktop") {
+      await adapter.act({
+        task: createWatchTask(rule),
+        step: {
+          id: `mail-open-confirm-${rule.id}`,
+          label: "Confirm mail thread selection",
+          surface,
+          action: openStep.action,
+          params: { ...(openStep.params ?? {}) }
+        },
+        workspace: profileAsWorkspace(rule, workspace),
+        traceId: null,
+        outputs: {}
+      });
+    }
+
+    if (surface === "desktop") {
+      await adapter.act({
+        task: createWatchTask(rule),
+        step: {
+          id: `mail-open-wait-${rule.id}`,
+          label: "Wait for mail thread to settle",
+          surface,
+          action: "wait",
+          params: { ms: 900 }
+        },
+        workspace: profileAsWorkspace(rule, workspace),
+        traceId: null,
+        outputs: {}
+      });
+    }
+  }
 
   if (surface === "browser") {
     await adapter.act({
@@ -4651,13 +8060,491 @@ async function openMailThreadForContext({
     surfaceRegistry,
     controlPlane: {} as LivePackControlPlane,
     surface,
-    desktopRequireAccessibility: surface === "desktop"
+    desktopRequireAccessibility: surface === "desktop" ? desktopVisualObserveRequiresAccessibility : false
   });
+  let outlookThreadVision =
+    surface === "desktop"
+      ? updateLastReliableOutlookThreadVision(await analyzeOutlookDesktopVisualState({
+          modelClient: controlPlane?.modelClient,
+          worldState: threadState,
+          timeoutMs: OUTLOOK_DESKTOP_DETECT_ANALYZE_TIMEOUT_MS
+        }).catch((error) => {
+          traceOutlookAnalysisError("post-open-observe", error);
+          return null;
+        }))
+      : null;
+  traceOutlookThreadState("post-open-observe", {
+    vision: outlookThreadVision,
+    targetThread: openTarget,
+    targetCue: openThreadCue,
+    previousOpenThread,
+    openAttempts
+  });
+
+  if (surface === "desktop" && !hasAvailableOutlookComposer(outlookThreadVision, threadState) && !outlookThreadVision) {
+    for (let attempt = 1; attempt <= 2 && !hasAvailableOutlookComposer(outlookThreadVision, threadState) && !outlookThreadVision; attempt += 1) {
+      await adapter.act({
+        task: createWatchTask(rule),
+        step: {
+          id: `mail-open-settle-${rule.id}-${attempt}`,
+          label: "Wait for mail thread analysis to settle",
+          surface,
+          action: "wait",
+          params: { ms: attempt === 1 ? 1200 : 1800 }
+        },
+        workspace: profileAsWorkspace(rule, workspace),
+        traceId: null,
+        outputs: {}
+      });
+
+      threadState = await observeWatchSurface({
+        rule,
+        workspace,
+        surfaceRegistry,
+        controlPlane: {} as LivePackControlPlane,
+        surface,
+        desktopRequireAccessibility: desktopVisualObserveRequiresAccessibility
+      });
+      outlookThreadVision = updateLastReliableOutlookThreadVision(await analyzeOutlookDesktopVisualState({
+        modelClient: controlPlane?.modelClient,
+        worldState: threadState,
+        timeoutMs: OUTLOOK_DESKTOP_DETECT_ANALYZE_TIMEOUT_MS
+      }).catch((error) => {
+        traceOutlookAnalysisError(`post-open-settle-${attempt}`, error);
+        return null;
+      }));
+      traceOutlookThreadState(`post-open-settle-${attempt}`, {
+        vision: outlookThreadVision,
+        targetThread: openTarget,
+        targetCue: openThreadCue,
+        previousOpenThread,
+        openAttempts
+      });
+    }
+  }
+
+  if (surface === "desktop") {
+    for (
+      let attempt = 1;
+      attempt <= 3
+      && !hasAvailableOutlookComposer(outlookThreadVision, threadState)
+      && !hasThreadSelectionAdvanced(outlookThreadVision, threadState);
+      attempt += 1
+    ) {
+      const currentTargetThread = findMatchingOutlookVisibleThread(outlookThreadVision, openTarget, openThreadCue);
+      const currentThreadBounds = await resolveDesktopVisionCandidateBounds(
+        threadState,
+        "Microsoft Outlook",
+        currentTargetThread?.approxBox ?? null
+      );
+      let retryOpenStep = buildOpenStep(
+        `mail-open-retry-${rule.id}-${attempt}`,
+        "Retry opening mail thread",
+        true,
+        false
+      );
+      if (retryOpenStep && rule.livePack === "outlook-desktop") {
+        const currentGrounding = await groundOutlookTargetThreadClickPoint({
+          modelClient: controlPlane?.modelClient,
+          worldState: threadState,
+          targetThread: openTarget,
+          targetSnippet: openThreadCue
+        }).catch(() => null);
+        const currentFrame = await resolveDesktopVisionFrame(threadState, "Microsoft Outlook");
+        const currentFallbackPoint = boundsCenter(currentThreadBounds);
+        const currentOpenPoint =
+          resolveOutlookGroundedOpenPoint(currentFrame, currentGrounding, currentFallbackPoint) ?? currentFallbackPoint;
+        if (currentOpenPoint) {
+          retryOpenStep = {
+            id: `mail-open-retry-regrounded-${rule.id}-${attempt}`,
+            label: "Retry opening mail thread",
+            surface,
+            action: "clickAt",
+            params: {
+              x: currentOpenPoint.x,
+              y: currentOpenPoint.y
+            }
+          };
+        }
+      }
+      if (!retryOpenStep) {
+        break;
+      }
+      const retryTarget =
+        currentTargetThread
+          ? {
+              id: `mail-open-retry-target-${rule.id}-${attempt}`,
+              text: String(currentTargetThread.name ?? openTarget).trim() || openTarget,
+              role: "text",
+              isInteractive: true,
+              bounds: currentThreadBounds ?? undefined
+            }
+          : openCandidate;
+      const retryTextStep = buildOutlookTextOpenStep(
+        `mail-open-retry-text-${rule.id}-${attempt}`,
+        "Retry opening mail thread by visible text",
+        attempt,
+        retryTarget,
+        false
+      );
+      let executedRetryStep: RuntimeStep = retryOpenStep;
+      const preferRetryOpenStep = retryOpenStep.action === "clickAt";
+      openAttempts += 1;
+      if (preferRetryOpenStep) {
+        await adapter.act({
+          task: createWatchTask(rule),
+          step: retryOpenStep,
+          workspace: profileAsWorkspace(rule, workspace),
+          traceId: null,
+          outputs: {}
+        });
+        executedRetryStep = retryOpenStep;
+      } else if (retryTextStep) {
+        try {
+          await adapter.act({
+            task: createWatchTask(rule),
+            step: retryTextStep,
+            workspace: profileAsWorkspace(rule, workspace),
+            traceId: null,
+            outputs: {}
+          });
+          executedRetryStep = retryTextStep;
+        } catch {
+          await adapter.act({
+            task: createWatchTask(rule),
+            step: retryOpenStep,
+            workspace: profileAsWorkspace(rule, workspace),
+            traceId: null,
+            outputs: {}
+          });
+          executedRetryStep = retryOpenStep;
+        }
+      } else {
+        await adapter.act({
+          task: createWatchTask(rule),
+          step: retryOpenStep,
+          workspace: profileAsWorkspace(rule, workspace),
+          traceId: null,
+          outputs: {}
+        });
+        executedRetryStep = retryOpenStep;
+      }
+
+      if (surface === "desktop" && rule.livePack === "outlook-desktop" && executedRetryStep.action === "clickAt") {
+        await adapter.act({
+          task: createWatchTask(rule),
+          step: {
+            id: `mail-open-retry-focus-wait-${rule.id}-${attempt}`,
+            label: "Wait for Outlook retry focus",
+            surface,
+            action: "wait",
+            params: { ms: 150 }
+          },
+          workspace: profileAsWorkspace(rule, workspace),
+          traceId: null,
+          outputs: {}
+        });
+        await adapter.act({
+          task: createWatchTask(rule),
+          step: {
+            id: `mail-open-retry-confirm-${rule.id}-${attempt}`,
+            label: "Confirm Outlook retried thread selection",
+            surface,
+            action: "clickAt",
+            params: { ...(executedRetryStep.params ?? {}) }
+          },
+          workspace: profileAsWorkspace(rule, workspace),
+          traceId: null,
+          outputs: {}
+        });
+      }
+
+      await adapter.act({
+        task: createWatchTask(rule),
+        step: {
+          id: `mail-open-retry-wait-${rule.id}-${attempt}`,
+          label: "Wait for retried mail thread open",
+          surface,
+          action: "wait",
+          params: {
+            ms:
+              attempt === 1 ? 900
+              : attempt === 2 ? 1300
+              : 1700
+          }
+        },
+        workspace: profileAsWorkspace(rule, workspace),
+        traceId: null,
+        outputs: {}
+      });
+
+      threadState = await observeWatchSurface({
+        rule,
+        workspace,
+        surfaceRegistry,
+        controlPlane: {} as LivePackControlPlane,
+        surface,
+        desktopRequireAccessibility: surface === "desktop" ? desktopVisualObserveRequiresAccessibility : false
+      });
+      outlookThreadVision = updateLastReliableOutlookThreadVision(await analyzeOutlookDesktopVisualState({
+        modelClient: controlPlane?.modelClient,
+        worldState: threadState,
+        timeoutMs: OUTLOOK_DESKTOP_DETECT_ANALYZE_TIMEOUT_MS
+      }).catch((error) => {
+        traceOutlookAnalysisError(`post-open-retry-${attempt}`, error);
+        return null;
+      }));
+      traceOutlookThreadState(`post-open-retry-${attempt}`, {
+        vision: outlookThreadVision,
+        targetThread: openTarget,
+        targetCue: openThreadCue,
+        previousOpenThread,
+        openAttempts
+      });
+    }
+  }
 
   if (
     surface === "desktop" &&
+    !hasAvailableOutlookComposer(outlookThreadVision, threadState) &&
+    !hasThreadSelectionAdvanced(outlookThreadVision, threadState) &&
+    outlookThreadVision?.scene === "thread"
+  ) {
+    const recovered = await recoverDesktopVisualSceneToList({
+      rule,
+      workspace,
+      surfaceRegistry,
+      controlPlane,
+      worldState: threadState,
+      vision: {
+        ...outlookThreadVision,
+        recommendedRecoveryAction: "recover_to_list"
+      },
+      appName: "Microsoft Outlook",
+      focusName: "Focus Outlook",
+      recoverLabel: "Recover Outlook to inbox list",
+      dismissLabel: "Dismiss Outlook foreign view",
+      analyzeState: (candidateState) =>
+        analyzeOutlookDesktopVisualState({
+          modelClient: controlPlane?.modelClient,
+          worldState: candidateState,
+          timeoutMs: OUTLOOK_DESKTOP_DETECT_ANALYZE_TIMEOUT_MS
+        }),
+      resolveRecoveryPoint: (candidateState) =>
+        groundOutlookDesktopRecoveryPoint({
+          modelClient: controlPlane?.modelClient,
+          worldState: candidateState
+        })
+    }).catch(() => null);
+
+    threadState = recovered?.worldState ?? threadState;
+    outlookThreadVision = recovered?.vision ?? outlookThreadVision;
+    updateLastReliableOutlookThreadVision(recovered?.vision ?? null);
+    traceOutlookThreadState("post-recovery", {
+      vision: outlookThreadVision,
+      targetThread: openTarget,
+      targetCue: openThreadCue,
+      previousOpenThread,
+      openAttempts
+    });
+
+    const reopenStep = buildOpenStep(
+      `mail-open-recovered-${rule.id}`,
+      "Open mail thread after recovery",
+      true,
+      true
+    );
+    if (
+      reopenStep &&
+      !hasAvailableOutlookComposer(outlookThreadVision, threadState) &&
+      !hasThreadSelectionAdvanced(outlookThreadVision, threadState)
+    ) {
+      openAttempts += 1;
+      await adapter.act({
+        task: createWatchTask(rule),
+        step: reopenStep,
+        workspace: profileAsWorkspace(rule, workspace),
+        traceId: null,
+        outputs: {}
+      });
+
+      await adapter.act({
+        task: createWatchTask(rule),
+        step: {
+          id: `mail-open-recovered-wait-${rule.id}`,
+          label: "Wait for recovered mail thread to settle",
+          surface,
+          action: "wait",
+          params: { ms: 1200 }
+        },
+        workspace: profileAsWorkspace(rule, workspace),
+        traceId: null,
+        outputs: {}
+      });
+
+      threadState = await observeWatchSurface({
+        rule,
+        workspace,
+        surfaceRegistry,
+        controlPlane: {} as LivePackControlPlane,
+        surface,
+        desktopRequireAccessibility: surface === "desktop" ? desktopVisualObserveRequiresAccessibility : false
+      });
+      outlookThreadVision = updateLastReliableOutlookThreadVision(await analyzeOutlookDesktopVisualState({
+        modelClient: controlPlane?.modelClient,
+        worldState: threadState,
+        timeoutMs: OUTLOOK_DESKTOP_DETECT_ANALYZE_TIMEOUT_MS
+      }).catch((error) => {
+        traceOutlookAnalysisError("post-recovery-reopen", error);
+        return null;
+      }));
+      traceOutlookThreadState("post-recovery-reopen", {
+        vision: outlookThreadVision,
+        targetThread: openTarget,
+        targetCue: openThreadCue,
+        previousOpenThread,
+        openAttempts
+      });
+    }
+  }
+
+  if (surface === "desktop" && !hasThreadSelectionAdvanced(outlookThreadVision, threadState)) {
+    return threadState;
+  }
+
+  if (surface === "desktop" && !hasAvailableOutlookComposer(outlookThreadVision, threadState)) {
+    for (let attempt = 1; attempt <= 2 && !hasAvailableOutlookComposer(outlookThreadVision, threadState); attempt += 1) {
+      const replyButton = findOutlookReplyButtonCandidate(threadState);
+      if (!replyButton?.bounds) {
+        break;
+      }
+      await adapter.act({
+        task: createWatchTask(rule),
+        step: {
+          id: `mail-reply-button-${rule.id}-${attempt}`,
+          label: "Open mail reply composer",
+          surface,
+          action: "clickTarget",
+          params: {
+            targetQuery: String(replyButton.text ?? "").trim() || "Reply",
+            target: replyButton,
+            allowBoundsFallback: true
+          }
+        },
+        workspace: profileAsWorkspace(rule, workspace),
+        traceId: null,
+        outputs: {}
+      });
+
+      await adapter.act({
+        task: createWatchTask(rule),
+        step: {
+          id: `mail-reply-wait-${rule.id}-${attempt}`,
+          label: "Wait for mail reply composer",
+          surface,
+          action: "wait",
+          params: { ms: attempt === 1 ? 500 : 750 }
+        },
+        workspace: profileAsWorkspace(rule, workspace),
+        traceId: null,
+        outputs: {}
+      });
+
+      threadState = await observeWatchSurface({
+        rule,
+        workspace,
+        surfaceRegistry,
+        controlPlane: {} as LivePackControlPlane,
+        surface,
+        desktopRequireAccessibility: surface === "desktop" ? desktopVisualObserveRequiresAccessibility : false
+      });
+      outlookThreadVision = updateLastReliableOutlookThreadVision(await analyzeOutlookDesktopVisualState({
+        modelClient: controlPlane?.modelClient,
+        worldState: threadState,
+        timeoutMs: OUTLOOK_DESKTOP_DETECT_ANALYZE_TIMEOUT_MS
+      }).catch((error) => {
+        traceOutlookAnalysisError(`post-reply-open-${attempt}`, error);
+        return null;
+      }));
+      traceOutlookThreadState(`post-reply-open-${attempt}`, {
+        vision: outlookThreadVision,
+        targetThread: openTarget,
+        targetCue: openThreadCue,
+        previousOpenThread,
+        openAttempts
+      });
+    }
+  }
+
+  if (surface === "desktop" && !hasAvailableOutlookComposer(outlookThreadVision, threadState)) {
+    for (let attempt = 1; attempt <= 2 && !hasAvailableOutlookComposer(outlookThreadVision, threadState); attempt += 1) {
+      const replyControl = await groundOutlookReplyControl({
+        modelClient: controlPlane?.modelClient,
+        worldState: threadState,
+        timeoutMs: OUTLOOK_DESKTOP_DETECT_ANALYZE_TIMEOUT_MS
+      }).catch(() => null);
+      if (!replyControl?.bounds) {
+        break;
+      }
+
+      await adapter.act({
+        task: createWatchTask(rule),
+        step: {
+          id: `mail-reply-vision-${rule.id}-${attempt}`,
+          label: "Open mail reply composer",
+          surface,
+          action: "clickTarget",
+          params: {
+            targetQuery: String(replyControl.text ?? "").trim() || "Reply",
+            target: replyControl,
+            allowBoundsFallback: true
+          }
+        },
+        workspace: profileAsWorkspace(rule, workspace),
+        traceId: null,
+        outputs: {}
+      });
+
+      await adapter.act({
+        task: createWatchTask(rule),
+        step: {
+          id: `mail-reply-vision-wait-${rule.id}-${attempt}`,
+          label: "Wait for mail reply composer",
+          surface,
+          action: "wait",
+          params: { ms: attempt === 1 ? 600 : 900 }
+        },
+        workspace: profileAsWorkspace(rule, workspace),
+        traceId: null,
+        outputs: {}
+      });
+
+      threadState = await observeWatchSurface({
+        rule,
+        workspace,
+        surfaceRegistry,
+        controlPlane: {} as LivePackControlPlane,
+        surface,
+        desktopRequireAccessibility: surface === "desktop" ? desktopVisualObserveRequiresAccessibility : false
+      });
+      outlookThreadVision = await analyzeOutlookDesktopVisualState({
+        modelClient: controlPlane?.modelClient,
+        worldState: threadState,
+        timeoutMs: OUTLOOK_DESKTOP_DETECT_ANALYZE_TIMEOUT_MS
+      }).catch((error) => {
+        traceOutlookAnalysisError(`post-reply-vision-${attempt}`, error);
+        return null;
+      });
+    }
+  }
+
+  if (
+    surface === "desktop" &&
+    allowReplyShortcutFallback &&
     desktopReplyShortcut &&
-    !findOutlookComposeCandidate(threadState)
+    Boolean(controlPlane?.modelClient?.supportsImageJson?.()) &&
+    !hasAvailableOutlookComposer(outlookThreadVision, threadState) &&
+    hasCurrentThreadConfirmation(outlookThreadVision, threadState)
   ) {
     await adapter.act({
       task: createWatchTask(rule),
@@ -4676,13 +8563,27 @@ async function openMailThreadForContext({
       outputs: {}
     });
 
+    await adapter.act({
+      task: createWatchTask(rule),
+      step: {
+        id: `mail-reply-shortcut-wait-${rule.id}`,
+        label: "Wait for mail reply composer",
+        surface,
+        action: "wait",
+        params: { ms: 400 }
+      },
+      workspace: profileAsWorkspace(rule, workspace),
+      traceId: null,
+      outputs: {}
+    });
+
     threadState = await observeWatchSurface({
       rule,
       workspace,
       surfaceRegistry,
       controlPlane: {} as LivePackControlPlane,
       surface,
-      desktopRequireAccessibility: surface === "desktop"
+      desktopRequireAccessibility: surface === "desktop" ? desktopVisualObserveRequiresAccessibility : false
     });
   }
 
@@ -4815,7 +8716,9 @@ function createMailPack({
         return;
       }
 
-      const startUrl = String(rule.taskInputs?.startUrl ?? rule.taskInputs?.url ?? rule.appTarget ?? "").trim();
+      const startUrl = String(
+        rule.taskInputs?.startUrl ?? rule.taskInputs?.url ?? rule.appTarget ?? defaultBrowserStartUrlForPack(name) ?? ""
+      ).trim();
       if (/^https?:\/\//u.test(startUrl)) {
         await adapter.act({
           task: watchTask,
@@ -4980,10 +8883,283 @@ function createOutlookDesktopPack(): LivePack {
       return observeWatchSurface({
         ...args,
         surface: "desktop",
-        desktopRequireAccessibility: true
+        desktopRequireAccessibility: false
       });
     },
-    async detectNewItems({ rule, worldState, dedupeState = {} }) {
+    async detectNewItems({ rule, worldState, dedupeState = {}, workspace, surfaceRegistry, controlPlane }) {
+      let vision = await analyzeOutlookDesktopVisualState({
+        modelClient: controlPlane.modelClient,
+        worldState,
+        timeoutMs: OUTLOOK_DESKTOP_DETECT_ANALYZE_TIMEOUT_MS
+      }).catch(() => null);
+      let effectiveWorldState = worldState;
+      let recoveryAttempts = 0;
+      const shouldRecoverThreadToList =
+        Boolean(vision)
+        && vision?.scene === "thread"
+        && !pickDesktopVisualUnreadThread(vision);
+      if (isDesktopRecoveryScene(vision) || shouldRecoverThreadToList) {
+        const recovered = await recoverDesktopVisualSceneToList({
+          rule,
+          workspace,
+          surfaceRegistry,
+          controlPlane,
+          worldState,
+          vision:
+            shouldRecoverThreadToList && vision
+              ? {
+                  ...vision,
+                  recommendedRecoveryAction: "recover_to_list"
+                }
+              : vision,
+          appName: "Microsoft Outlook",
+          focusName: "Focus Outlook",
+          recoverLabel: "Recover Outlook to inbox list",
+          dismissLabel: "Dismiss Outlook foreign view",
+          analyzeState: (candidateState) =>
+            analyzeOutlookDesktopVisualState({
+              modelClient: controlPlane.modelClient,
+              worldState: candidateState,
+              timeoutMs: OUTLOOK_DESKTOP_DETECT_ANALYZE_TIMEOUT_MS
+            }),
+          resolveRecoveryPoint: (candidateState) =>
+            groundOutlookDesktopRecoveryPoint({
+              modelClient: controlPlane.modelClient,
+              worldState: candidateState
+            })
+        });
+        effectiveWorldState = recovered.worldState ?? worldState;
+        vision = recovered.vision;
+        recoveryAttempts = recovered.recoveryAttempts;
+      }
+      if (vision && isDesktopRecoveryScene(vision)) {
+        return null;
+      }
+      if (!vision && !findOutlookUnreadCandidate(effectiveWorldState) && !findOutlookComposeCandidate(effectiveWorldState)) {
+        const recovered = await recoverOutlookInboxWithoutVision({
+          rule,
+          workspace,
+          surfaceRegistry,
+          controlPlane,
+          worldState: effectiveWorldState,
+          analyzeState: (candidateState) =>
+            analyzeOutlookDesktopVisualState({
+              modelClient: controlPlane.modelClient,
+              worldState: candidateState,
+              timeoutMs: OUTLOOK_DESKTOP_DETECT_ANALYZE_TIMEOUT_MS
+            })
+        });
+        if (recovered.recoveryAttempts > 0) {
+          effectiveWorldState = recovered.worldState ?? effectiveWorldState;
+          vision = recovered.vision;
+          recoveryAttempts += recovered.recoveryAttempts;
+        }
+      }
+      let thread = pickDesktopVisualUnreadThread(vision);
+      let scrollPasses = 0;
+        if (!thread) {
+          const scanned = await scanDesktopVisionUnreadConversation({
+            rule,
+            worldState,
+            workspace,
+            surfaceRegistry,
+            controlPlane,
+            initialWorldState: effectiveWorldState,
+            initialVision: vision,
+            appName: "Microsoft Outlook",
+            anchor: { x: 0.3, y: 0.32 },
+            scrollDy: -420,
+            maxPasses: DESKTOP_VLM_SCROLL_SCAN_MAX_PASSES,
+            analyzeState: (candidateState) =>
+              analyzeOutlookDesktopVisualState({
+                modelClient: controlPlane.modelClient,
+                worldState: candidateState,
+                timeoutMs: OUTLOOK_DESKTOP_DETECT_ANALYZE_TIMEOUT_MS
+              })
+          });
+          effectiveWorldState = scanned.worldState ?? effectiveWorldState;
+          vision = scanned.vision;
+          thread = scanned.thread;
+          scrollPasses = scanned.scrollPasses;
+        }
+      const selectedThreadSummary = normalizeMailSummary(String(thread?.name ?? "").trim());
+      const openThreadSummary = normalizeMailSummary(String(vision?.openThread ?? "").trim());
+      const shouldRecoverSelectedThreadToList =
+        Boolean(vision)
+        && vision?.scene === "thread"
+        && Boolean(selectedThreadSummary)
+        && Boolean(openThreadSummary)
+        && selectedThreadSummary !== openThreadSummary
+        && !thread?.approxBox;
+      if (shouldRecoverSelectedThreadToList) {
+        const recovered = await recoverDesktopVisualSceneToList({
+          rule,
+          workspace,
+          surfaceRegistry,
+          controlPlane,
+          worldState: effectiveWorldState,
+          vision:
+            vision
+              ? {
+                  ...vision,
+                  recommendedRecoveryAction: "recover_to_list"
+                }
+              : vision,
+          appName: "Microsoft Outlook",
+          focusName: "Focus Outlook",
+          recoverLabel: "Recover Outlook to inbox list",
+          dismissLabel: "Dismiss Outlook foreign view",
+          analyzeState: (candidateState) =>
+            analyzeOutlookDesktopVisualState({
+              modelClient: controlPlane.modelClient,
+              worldState: candidateState,
+              timeoutMs: OUTLOOK_DESKTOP_DETECT_ANALYZE_TIMEOUT_MS
+            }),
+          resolveRecoveryPoint: (candidateState) =>
+            groundOutlookDesktopRecoveryPoint({
+              modelClient: controlPlane.modelClient,
+              worldState: candidateState
+            })
+        });
+        effectiveWorldState = recovered.worldState ?? effectiveWorldState;
+        vision = recovered.vision;
+        recoveryAttempts += recovered.recoveryAttempts;
+        thread = pickDesktopVisualUnreadThread(vision);
+        if (!thread) {
+          const rescanned = await scanDesktopVisionUnreadConversation({
+            rule,
+            worldState,
+            workspace,
+            surfaceRegistry,
+            controlPlane,
+            initialWorldState: effectiveWorldState,
+            initialVision: vision,
+            appName: "Microsoft Outlook",
+            anchor: { x: 0.3, y: 0.32 },
+            scrollDy: -420,
+            maxPasses: DESKTOP_VLM_SCROLL_SCAN_MAX_PASSES,
+            analyzeState: (candidateState) =>
+              analyzeOutlookDesktopVisualState({
+                modelClient: controlPlane.modelClient,
+                worldState: candidateState,
+                timeoutMs: OUTLOOK_DESKTOP_DETECT_ANALYZE_TIMEOUT_MS
+              })
+          });
+          effectiveWorldState = rescanned.worldState ?? effectiveWorldState;
+          vision = rescanned.vision;
+          thread = rescanned.thread;
+          scrollPasses += rescanned.scrollPasses;
+        }
+      }
+      if (vision && thread) {
+        const openTarget = normalizeMailSummary(thread.name);
+        if (!openTarget || isOutlookUiChrome(openTarget)) {
+          return null;
+        }
+
+        const outlookVisionFrame = await resolveDesktopVisionFrame(effectiveWorldState, "Microsoft Outlook");
+        const groundedTarget = await groundOutlookTargetThreadClickPoint({
+          modelClient: controlPlane.modelClient,
+          worldState: effectiveWorldState,
+          targetThread: openTarget,
+          targetSnippet: String(thread.subjectCue ?? thread.latestSnippet ?? "").trim() || null
+        }).catch(() => null);
+        const originalThreadBounds = await resolveDesktopVisionCandidateBounds(
+          effectiveWorldState,
+          "Microsoft Outlook",
+          thread.approxBox
+        );
+        const groundedThreadBounds = await resolveDesktopVisionCandidateBounds(
+          effectiveWorldState,
+          "Microsoft Outlook",
+          groundedTarget?.targetVisible && groundedTarget.rowBox ? groundedTarget.rowBox : null
+        );
+        const threadBounds =
+          groundedThreadBounds ?? originalThreadBounds;
+        if (!threadBounds) {
+          return null;
+        }
+        const fallbackOpenPoint = boundsCenter(threadBounds);
+        const openPoint =
+          resolveOutlookGroundedOpenPoint(outlookVisionFrame, groundedTarget, fallbackOpenPoint) ?? fallbackOpenPoint;
+        if (!openPoint) {
+          return null;
+        }
+        const openCandidateBounds = threadBounds;
+
+        const context = uniqueStrings([
+          String(thread.subjectCue ?? "").trim(),
+          String(thread.latestSnippet ?? "").trim(),
+          String(thread.replyReason ?? "").trim(),
+          ...contextForSignal(effectiveWorldState, { text: openTarget })
+        ]).slice(0, 4);
+        const itemFingerprint = fingerprint(`outlook-desktop:${rule.workspaceName ?? "default"}:${openTarget}:${context.join("|")}`);
+        if (dedupeState.lastFingerprint === itemFingerprint) {
+          return null;
+        }
+
+        return {
+          fingerprint: itemFingerprint,
+          summary: openTarget,
+          text: openTarget,
+          context,
+          inputs: {
+            watchItemText: openTarget,
+            watchSummary: openTarget,
+            watchContext: context.join("\n"),
+            openTarget,
+            threadTitle: openTarget,
+            openCandidate: {
+              id: "outlook-vision-unread",
+              text: openTarget,
+              role: "text",
+              isInteractive: true,
+              bounds: openCandidateBounds
+            },
+            openX: openPoint.x,
+            openY: openPoint.y,
+            replyTargetQuery: "Reply"
+          },
+          metadata: {
+            visualAnalysis: vision,
+            visualThread: thread,
+            recoveryAttempts,
+            openPoint,
+            scrollPasses,
+            ...(groundedTarget ? { threadGrounding: groundedTarget } : {}),
+            openCandidate: {
+              id: "outlook-vision-unread",
+              text: openTarget,
+              role: "text",
+              isInteractive: true,
+              bounds: openCandidateBounds
+            },
+            ...buildConversationMetadata({
+              packName: "outlook-desktop",
+              surface: "desktop",
+              summary: openTarget,
+              context,
+              openTarget,
+              candidate: {
+                id: "outlook-vision-unread",
+                text: openTarget,
+                role: "text",
+                isInteractive: true,
+                bounds: openCandidateBounds
+              } as InteractionCandidate
+            })
+          },
+          taskSpec: {
+            preferredSurface: "desktop",
+            steps: buildOutlookDesktopVisualReplySteps()
+          }
+        };
+      }
+
+      if (vision) {
+        return null;
+      }
+
       if (!isOutlookDesktopForeground(worldState)) {
         return null;
       }
@@ -5025,26 +9201,254 @@ function createOutlookDesktopPack(): LivePack {
         })
       };
     },
-    async extractContext({ rule, workspace, surfaceRegistry, detection }) {
-      const threadState = await openMailThreadForContext({
+    async extractContext({ rule, workspace, surfaceRegistry, detection, controlPlane, worldState }) {
+      const summary = String(detection.summary ?? "").trim();
+      const detectedOpenTarget = String(detection.inputs?.openTarget ?? summary).trim() || summary;
+      const detectedThreadCue = String(
+        (detection.metadata?.visualThread as { subjectCue?: unknown; latestSnippet?: unknown } | null)?.subjectCue
+        ?? (detection.metadata?.visualThread as { subjectCue?: unknown; latestSnippet?: unknown } | null)?.latestSnippet
+        ?? detection.context?.[0]
+        ?? ""
+      ).trim() || null;
+      const previousOpenThread = String(
+        (detection.metadata?.visualAnalysis as { openThread?: unknown } | null)?.openThread ?? ""
+      ).trim() || null;
+      let threadState = await openMailThreadForContext({
         rule,
         workspace,
         surfaceRegistry,
-        controlPlane: {} as LivePackControlPlane,
-        worldState: null,
+        controlPlane,
+        worldState,
         detection,
         surface: "desktop",
+        allowReplyShortcutFallback: true,
         desktopReplyShortcut: {
           key: "r",
-          modifiers: ["meta"]
+          modifiers: ["cmd"]
         }
       });
-      if (!findOutlookComposeCandidate(threadState)) {
+      let composeCandidate = findOutlookComposeCandidate(threadState);
+      let sendCandidate = findOutlookSendCandidate(threadState);
+      let visualThreadState = reconcileOutlookVisualDraftState(
+        threadState,
+        await analyzeOutlookDesktopVisualState({
+          modelClient: controlPlane.modelClient,
+          worldState: threadState,
+          timeoutMs: OUTLOOK_DESKTOP_DETECT_ANALYZE_TIMEOUT_MS
+        }).catch(() => null)
+      );
+      const visualThreadConfirmed = () =>
+        isOutlookThreadOpenForTarget(
+          visualThreadState,
+          detectedOpenTarget,
+          detectedThreadCue
+        ) || didOutlookThreadSelectionAdvanceFromState({
+          worldState: threadState,
+          targetThread: detectedOpenTarget,
+          targetCue: detectedThreadCue,
+          previousOpenThread
+        });
+      if (visualThreadState && (visualThreadState.scene !== "thread" || !visualThreadState.composer.present)) {
+        composeCandidate = null;
+      }
+      if (visualThreadState && !visualThreadConfirmed()) {
+        composeCandidate = null;
+      }
+      if (visualThreadState?.composer.present && visualThreadState.composer.hasDraftText === true) {
         return null;
       }
-      const summary = String(detection.summary ?? "").trim();
+      const adapter = surfaceRegistry.get("desktop");
+      if (
+        adapter &&
+        threadState &&
+        !composeCandidate &&
+        !visualThreadState?.composer.present &&
+        visualThreadState?.scene === "thread"
+      ) {
+        for (let attempt = 1; attempt <= 5 && !composeCandidate && !visualThreadState?.composer.present; attempt += 1) {
+          await adapter.act({
+            task: createWatchTask(rule),
+            step: {
+              id: `outlook-compose-settle-${rule.id}-${attempt}`,
+              label: "Wait for Outlook composer to appear",
+              surface: "desktop",
+              action: "wait",
+              params: {
+                ms:
+                  attempt === 1 ? 700
+                  : attempt === 2 ? 900
+                  : attempt === 3 ? 1200
+                  : attempt === 4 ? 1500
+                  : 1800
+              }
+            },
+            workspace: profileAsWorkspace(rule, workspace),
+            traceId: null,
+            outputs: {}
+          });
+          threadState = await observeWatchSurface({
+            rule,
+            workspace,
+            surfaceRegistry,
+            controlPlane: {} as LivePackControlPlane,
+            surface: "desktop",
+            desktopRequireAccessibility: false
+          });
+          composeCandidate = findOutlookComposeCandidate(threadState);
+          sendCandidate = findOutlookSendCandidate(threadState);
+          visualThreadState = reconcileOutlookVisualDraftState(
+            threadState,
+            await analyzeOutlookDesktopVisualState({
+              modelClient: controlPlane.modelClient,
+              worldState: threadState,
+              timeoutMs: OUTLOOK_DESKTOP_DETECT_ANALYZE_TIMEOUT_MS
+            }).catch(() => null)
+          );
+          if (visualThreadState && (visualThreadState.scene !== "thread" || !visualThreadState.composer.present)) {
+            composeCandidate = null;
+          }
+          if (visualThreadState && !visualThreadConfirmed()) {
+            composeCandidate = null;
+          }
+          if (visualThreadState?.composer.present && visualThreadState.composer.hasDraftText === true) {
+            return null;
+          }
+        }
+      }
+      const threadVerifyTarget = String(
+        visualThreadState?.openThread ?? detection.inputs?.openTarget ?? summary
+      ).trim() || summary;
+      if (visualThreadState?.scene === "thread" && visualThreadState.composer.present && visualThreadConfirmed()) {
+        const composeBodyPoint = deriveOutlookComposerBodyPoint({
+          approxBox: visualThreadState.composer.approxBox,
+          entryPoint: visualThreadState.composer.entryPoint
+        });
+        const rawComposeBounds = await resolveDesktopVisionCandidateBounds(
+          threadState,
+          "Microsoft Outlook",
+          visualThreadState.composer.approxBox
+        );
+        const composeBodyBounds = deriveOutlookComposerBodyBounds(rawComposeBounds);
+        const composeBounds =
+          composeBodyBounds
+          ?? rawComposeBounds
+          ?? buildDesktopPointBounds(
+            threadState,
+            "Microsoft Outlook",
+            composeBodyPoint,
+            24
+          );
+        const composeVerifyRegion =
+          buildDesktopNormalizedRegionFromBounds(
+            threadState,
+            "Microsoft Outlook",
+            composeBodyBounds ?? composeBounds
+          )
+          ?? deriveOutlookComposerVerifyRegionFromVisual(visualThreadState.composer);
+        if (composeBounds) {
+          const context = extractOutlookThreadContext(threadState, summary);
+          const openTarget = detectedOpenTarget;
+          const openCandidate = (detection.metadata?.openCandidate ?? null) as InteractionCandidate | Record<string, unknown> | null;
+          const sendCandidate = findOutlookSendCandidate(threadState);
+          return {
+            summary,
+            context,
+            inputs: {
+              ...(detection.inputs ?? {}),
+              watchContext: context.join("\n"),
+              openTarget,
+              threadTitle: openTarget,
+              threadVerifyTarget,
+              openCandidate,
+              composeTarget: {
+                id: "outlook-vision-composer",
+                text: visualThreadState.composer.evidence || "Outlook reply body",
+                role: "textbox",
+                isInteractive: true,
+                bounds: composeBounds
+              },
+              composeVerifyRegion,
+              typeTarget: visualThreadState.composer.evidence || "Outlook reply body",
+              sendTarget: pickOutlookSendQuery(threadState),
+              sendTargetCandidate: sendCandidate,
+              sendTargetQuery: pickOutlookSendQuery(threadState)
+            },
+            metadata: {
+              ...(detection.metadata ?? {}),
+              visualThreadState,
+              ...buildConversationMetadata({
+                packName: "outlook-desktop",
+                surface: "desktop",
+                summary,
+                context,
+                openTarget,
+                candidate: openCandidate
+              })
+            },
+            taskSpec: {
+              preferredSurface: "desktop",
+              steps: buildOutlookDesktopComposePrefillSteps()
+            }
+          };
+        }
+      }
+
+      if (composeCandidate) {
+        const composeTarget =
+          deriveOutlookComposerBodyBounds(composeCandidate.bounds)
+            ? {
+                ...composeCandidate,
+                bounds: deriveOutlookComposerBodyBounds(composeCandidate.bounds) ?? composeCandidate.bounds
+              }
+            : composeCandidate;
+        const composeVerifyRegion = buildDesktopNormalizedRegionFromBounds(
+          threadState,
+          "Microsoft Outlook",
+          composeTarget.bounds
+        );
+        const context = extractOutlookThreadContext(threadState, summary);
+        const openTarget = detectedOpenTarget;
+        const openCandidate = (detection.metadata?.openCandidate ?? null) as InteractionCandidate | Record<string, unknown> | null;
+        return {
+          summary,
+          context,
+          inputs: {
+            ...(detection.inputs ?? {}),
+            watchContext: context.join("\n"),
+            openTarget,
+            threadTitle: openTarget,
+            threadVerifyTarget,
+            openCandidate,
+            composeTarget,
+            composeVerifyRegion,
+            typeTarget: pickOutlookComposeQuery(threadState),
+            sendTarget: pickOutlookSendQuery(threadState),
+            sendTargetCandidate: sendCandidate,
+            sendTargetQuery: pickOutlookSendQuery(threadState)
+          },
+          metadata: {
+            ...(detection.metadata ?? {}),
+            ...buildConversationMetadata({
+              packName: "outlook-desktop",
+              surface: "desktop",
+              summary,
+              context,
+              openTarget,
+              candidate: openCandidate
+            })
+          },
+          taskSpec: {
+            preferredSurface: "desktop",
+            steps: buildOutlookDesktopComposePrefillSteps()
+          }
+        };
+      }
+
+      if (!composeCandidate) {
+        return null;
+      }
       const context = extractOutlookThreadContext(threadState, summary);
-      const openTarget = String(detection.inputs?.openTarget ?? summary).trim() || summary;
+      const openTarget = detectedOpenTarget;
       return {
         summary,
         context,
@@ -5066,10 +9470,7 @@ function createOutlookDesktopPack(): LivePack {
             candidate: (detection.metadata?.openCandidate ?? null) as InteractionCandidate | Record<string, unknown> | null
           })
         },
-        taskSpec: {
-          preferredSurface: "desktop",
-          steps: buildOutlookReplySteps()
-        }
+        taskSpec: undefined
       };
     },
     async draftReply({ rule, detection, controlPlane }) {
@@ -5106,7 +9507,9 @@ function createBossPack(): LivePack {
         return;
       }
 
-      const startUrl = String(rule.taskInputs?.startUrl ?? rule.taskInputs?.url ?? rule.appTarget ?? "").trim();
+      const startUrl = String(
+        rule.taskInputs?.startUrl ?? rule.taskInputs?.url ?? rule.appTarget ?? defaultBrowserStartUrlForPack("boss-browser") ?? ""
+      ).trim();
       if (/^https?:\/\//u.test(startUrl)) {
         await adapter.act({
           task: createWatchTask(rule),

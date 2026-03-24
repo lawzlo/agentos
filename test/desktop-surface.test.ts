@@ -20,6 +20,9 @@ function createAdapter() {
       calls.push({ action: "focus", name });
       return { focused: name };
     },
+    async getFrontmostApp() {
+      return { appName: "Slack" };
+    },
     async launchApp(name: string) {
       calls.push({ action: "launch", name });
       return { launched: name };
@@ -138,7 +141,7 @@ test("desktop surface focus accepts appName aliases", async () => {
     }
   });
 
-  assert.deepEqual(result, { focused: "Slack" });
+  assert.deepEqual(result, { focused: true, frontmostApp: "Slack", timedOut: false });
   assert.deepEqual(calls, [{ action: "focus", name: "Slack" }]);
 });
 
@@ -174,12 +177,386 @@ test("desktop surface actions accept appName aliases for focus and launch", asyn
     traceId: "trace_test"
   });
 
-  assert.deepEqual(focusResult, { focused: "Slack" });
+  assert.deepEqual(focusResult, { focused: true, frontmostApp: "Slack", timedOut: false });
   assert.deepEqual(launchResult, { launched: "WeChat" });
   assert.deepEqual(calls, [
     { action: "focus", name: "Slack" },
     { action: "launch", name: "WeChat" }
   ]);
+});
+
+test("desktop surface actions time out focus and launch helpers instead of hanging", async () => {
+  const { adapter } = createAdapter();
+  adapter.timeouts.focusMs = 10;
+  adapter.bridge.focusApp = async () => new Promise(() => {});
+  adapter.bridge.launchApp = async () => new Promise(() => {});
+  adapter.bridge.getFrontmostApp = async () => ({ appName: "" });
+
+  const focusResult = await adapter.act({
+    task: { id: "task_test" },
+    step: {
+      action: "focusApp",
+      params: {
+        appName: "Slack"
+      }
+    },
+    workspace: {
+      rootPath: "/tmp",
+      artifactsPath: "/tmp"
+    },
+    traceId: "trace_test"
+  });
+  const launchResult = await adapter.act({
+    task: { id: "task_test" },
+    step: {
+      action: "launchApp",
+      params: {
+        appName: "Slack"
+      }
+    },
+    workspace: {
+      rootPath: "/tmp",
+      artifactsPath: "/tmp"
+    },
+    traceId: "trace_test"
+  });
+
+  assert.deepEqual(focusResult, { focused: false, timedOut: true });
+  assert.deepEqual(launchResult, { launched: false, timedOut: true });
+});
+
+test("desktop clickTarget prefers targetQuery OCR grounding over stale bounds", async () => {
+  const { adapter } = createObserveAdapter();
+  const clicks: Array<{ x: number; y: number }> = [];
+
+  adapter.bridge.findText = async (_filePath: string, query: string) => ({
+    found: query === "Reply",
+    count: query === "Reply" ? 1 : 0,
+    match: query === "Reply"
+      ? {
+          text: "Reply",
+          confidence: 0.98,
+          box: { x: 300, y: 220, width: 80, height: 20, centerX: 340, centerY: 230 }
+        }
+      : undefined
+  });
+  adapter.bridge.clickAt = async (x: number, y: number) => {
+    clicks.push({ x, y });
+    return { ok: true, x, y };
+  };
+
+  const result = await adapter.act({
+    task: { id: "task_test" },
+    step: {
+      id: "step_click_target",
+      action: "clickTarget",
+      params: {
+        targetQuery: "Reply",
+        target: {
+          id: "stale-target",
+          bounds: { x: 10, y: 10, width: 20, height: 20, centerX: 20, centerY: 20 }
+        }
+      }
+    },
+    workspace: {
+      rootPath: "/tmp",
+      artifactsPath: "/tmp"
+    },
+    traceId: "trace_test"
+  });
+
+  assert.deepEqual(result, { ok: true, x: 340, y: 230 });
+  assert.deepEqual(clicks, [{ x: 340, y: 230 }]);
+});
+
+test("desktop clickTarget falls back to interaction candidates when OCR misses the query", async () => {
+  const { adapter } = createObserveAdapter();
+  const clicks: Array<{ x: number; y: number }> = [];
+
+  adapter.bridge.getFrontmostApp = async () => ({ appName: "Microsoft Outlook" });
+  adapter.bridge.getAccessibilitySnapshot = async () => ({
+    appName: "Microsoft Outlook",
+    windows: [
+      {
+        title: "Inbox - Microsoft Outlook",
+        bounds: { x: 0, y: 0, width: 1200, height: 800, centerX: 600, centerY: 400 }
+      }
+    ],
+    elements: [
+      {
+        id: "ax-mail-row",
+        role: "AXRow",
+        title: "上海光华 项目更新",
+        description: "Unread message row",
+        actions: ["AXPress"],
+        bounds: { x: 240, y: 180, width: 280, height: 40, centerX: 380, centerY: 200 }
+      }
+    ]
+  });
+  adapter.bridge.findText = async () => ({ found: false, count: 0 });
+  adapter.bridge.clickAt = async (x: number, y: number) => {
+    clicks.push({ x, y });
+    return { ok: true, x, y };
+  };
+
+  const result = await adapter.act({
+    task: { id: "task_test" },
+    step: {
+      id: "step_click_target_ax",
+      action: "clickTarget",
+      params: {
+        targetQuery: "上海光华"
+      }
+    },
+    workspace: {
+      rootPath: "/tmp",
+      artifactsPath: "/tmp"
+    },
+    traceId: "trace_test"
+  });
+
+  assert.deepEqual(result, { ok: true, x: 380, y: 200 });
+  assert.deepEqual(clicks, [{ x: 380, y: 200 }]);
+});
+
+test("desktop typeIntoTarget focuses targetQuery OCR match before typing", async () => {
+  const { adapter } = createObserveAdapter();
+  const clicks: Array<{ x: number; y: number }> = [];
+  const typed: string[] = [];
+  const keyPresses: Array<{ key: string; modifiers: string[] }> = [];
+
+  adapter.bridge.findText = async (_filePath: string, query: string) => ({
+    found: query === "Reply",
+    count: query === "Reply" ? 1 : 0,
+    match: query === "Reply"
+      ? {
+          text: "Reply",
+          confidence: 0.98,
+          box: { x: 410, y: 260, width: 90, height: 22, centerX: 455, centerY: 271 }
+        }
+      : undefined
+  });
+  adapter.bridge.clickAt = async (x: number, y: number) => {
+    clicks.push({ x, y });
+    return { ok: true, x, y };
+  };
+  adapter.bridge.typeText = async (text: string) => {
+    typed.push(text);
+    return { text, typed: text.length };
+  };
+  adapter.bridge.pressKey = async (key: string, modifiers: string[] = []) => {
+    keyPresses.push({ key, modifiers });
+    return { key, modifiers };
+  };
+
+  const result = await adapter.act({
+    task: { id: "task_test" },
+    step: {
+      id: "step_type_target",
+      action: "typeIntoTarget",
+      params: {
+        targetQuery: "Reply",
+        text: "hello"
+      }
+    },
+    workspace: {
+      rootPath: "/tmp",
+      artifactsPath: "/tmp"
+    },
+    traceId: "trace_test"
+  });
+
+  assert.deepEqual(result, { text: "hello", typed: 5 });
+  assert.deepEqual(clicks, [{ x: 455, y: 271 }]);
+  assert.deepEqual(keyPresses, [
+    { key: "a", modifiers: ["cmd"] },
+    { key: "delete", modifiers: [] }
+  ]);
+  assert.deepEqual(typed, ["hello"]);
+});
+
+test("desktop typeIntoTarget can paste into a grounded target", async () => {
+  const { adapter } = createObserveAdapter();
+  const clicks: Array<{ x: number; y: number }> = [];
+  const pasted: string[] = [];
+  const keyPresses: Array<{ key: string; modifiers: string[] }> = [];
+
+  adapter.bridge.findText = async (_filePath: string, query: string) => ({
+    found: query === "Reply",
+    count: query === "Reply" ? 1 : 0,
+    match: query === "Reply"
+      ? {
+          text: "Reply",
+          confidence: 0.98,
+          box: { x: 410, y: 260, width: 90, height: 22, centerX: 455, centerY: 271 }
+        }
+      : undefined
+  });
+  adapter.bridge.clickAt = async (x: number, y: number) => {
+    clicks.push({ x, y });
+    return { ok: true, x, y };
+  };
+  adapter.bridge.pasteText = async (text: string) => {
+    pasted.push(text);
+    return { text, method: "paste" };
+  };
+  adapter.bridge.pressKey = async (key: string, modifiers: string[] = []) => {
+    keyPresses.push({ key, modifiers });
+    return { key, modifiers };
+  };
+
+  const result = await adapter.act({
+    task: { id: "task_test" },
+    step: {
+      id: "step_paste_target",
+      action: "typeIntoTarget",
+      params: {
+        targetQuery: "Reply",
+        text: "hello",
+        inputMethod: "paste"
+      }
+    },
+    workspace: {
+      rootPath: "/tmp",
+      artifactsPath: "/tmp"
+    },
+    traceId: "trace_test"
+  });
+
+  assert.deepEqual(result, { text: "hello", method: "paste" });
+  assert.deepEqual(clicks, [{ x: 455, y: 271 }]);
+  assert.deepEqual(keyPresses, [{ key: "a", modifiers: ["cmd"] }]);
+  assert.deepEqual(pasted, ["hello"]);
+});
+
+test("desktop typeIntoTarget skips clear keystrokes when clear is false", async () => {
+  const { adapter } = createObserveAdapter();
+  const clicks: Array<{ x: number; y: number }> = [];
+  const pasted: string[] = [];
+  const keyPresses: Array<{ key: string; modifiers: string[] }> = [];
+
+  adapter.bridge.findText = async (_filePath: string, query: string) => ({
+    found: query === "Reply",
+    count: query === "Reply" ? 1 : 0,
+    match: query === "Reply"
+      ? {
+          text: "Reply",
+          confidence: 0.98,
+          box: { x: 410, y: 260, width: 90, height: 22, centerX: 455, centerY: 271 }
+        }
+      : undefined
+  });
+  adapter.bridge.clickAt = async (x: number, y: number) => {
+    clicks.push({ x, y });
+    return { ok: true, x, y };
+  };
+  adapter.bridge.pasteText = async (text: string) => {
+    pasted.push(text);
+    return { text, method: "paste" };
+  };
+  adapter.bridge.pressKey = async (key: string, modifiers: string[] = []) => {
+    keyPresses.push({ key, modifiers });
+    return { key, modifiers };
+  };
+
+  const result = await adapter.act({
+    task: { id: "task_test" },
+    step: {
+      id: "step_paste_target_no_clear",
+      action: "typeIntoTarget",
+      params: {
+        targetQuery: "Reply",
+        text: "hello",
+        inputMethod: "paste",
+        clear: false
+      }
+    },
+    workspace: {
+      rootPath: "/tmp",
+      artifactsPath: "/tmp"
+    },
+    traceId: "trace_test"
+  });
+
+  assert.deepEqual(result, { text: "hello", method: "paste" });
+  assert.deepEqual(clicks, [{ x: 455, y: 271 }]);
+  assert.deepEqual(keyPresses, []);
+  assert.deepEqual(pasted, ["hello"]);
+});
+
+test("desktop waitForTarget resolves interaction candidates without OCR text matches", async () => {
+  const { adapter } = createObserveAdapter();
+
+  adapter.bridge.getFrontmostApp = async () => ({ appName: "Microsoft Outlook" });
+  adapter.bridge.getAccessibilitySnapshot = async () => ({
+    appName: "Microsoft Outlook",
+    windows: [
+      {
+        title: "Inbox - Microsoft Outlook",
+        bounds: { x: 0, y: 0, width: 1200, height: 800, centerX: 600, centerY: 400 }
+      }
+    ],
+    elements: [
+      {
+        id: "ax-reply-box",
+        role: "AXTextArea",
+        title: "Reply",
+        description: "Reply message editor",
+        actions: ["AXPress"],
+        bounds: { x: 520, y: 240, width: 400, height: 200, centerX: 720, centerY: 340 }
+      }
+    ]
+  });
+  adapter.bridge.findText = async () => ({ found: false, count: 0 });
+
+  const result = await adapter.act({
+    task: { id: "task_test" },
+    step: {
+      id: "step_wait_target_ax",
+      action: "waitForTarget",
+      params: {
+        targetQuery: "Reply",
+        timeoutMs: 50,
+        pollMs: 10
+      }
+    },
+    workspace: {
+      rootPath: "/tmp",
+      artifactsPath: "/tmp"
+    },
+    traceId: "trace_test"
+  });
+
+  assert.equal(result?.found, true);
+  assert.equal(result?.method, "interaction");
+});
+
+test("desktop surface focus treats a timed focus helper as success when the target app becomes frontmost", async () => {
+  const { adapter } = createAdapter();
+  adapter.timeouts.focusMs = 10;
+  adapter.bridge.focusApp = async () => new Promise(() => {});
+  adapter.bridge.getFrontmostApp = async () => ({ appName: "Microsoft Outlook" });
+
+  const result = await adapter.act({
+    task: { id: "task_test" },
+    step: {
+      action: "focusApp",
+      params: {
+        appName: "Microsoft Outlook"
+      }
+    },
+    workspace: {
+      rootPath: "/tmp",
+      artifactsPath: "/tmp"
+    },
+    traceId: "trace_test"
+  });
+
+  assert.deepEqual(result, {
+    focused: true,
+    timedOut: false,
+    frontmostApp: "Microsoft Outlook"
+  });
 });
 
 test("desktop observe filters OCR blocks to the frontmost app window", async () => {
@@ -438,6 +815,42 @@ test("desktop verify fails when region text is not visible in the requested area
   assert.deepEqual(result.details.regionTextPreview, ["Official Accounts"]);
 });
 
+test("desktop verify does not accept tiny OCR fragments as a full region-text match", async () => {
+  const { adapter } = createObserveAdapter();
+  adapter.bridge.getFrontmostApp = async () => ({ appName: "Microsoft Outlook" });
+  adapter.bridge.ocrImage = async () => ({
+    observations: [
+      {
+        text: "4",
+        confidence: 0.92,
+        box: { x: 640, y: 330, width: 12, height: 20, centerX: 646, centerY: 340 }
+      }
+    ]
+  });
+
+  const result = await adapter.verify({
+    task: { id: "task_test" },
+    workspace: {
+      id: "workspace_test",
+      artifactsPath: "/tmp",
+      rootPath: "/tmp"
+    },
+    traceId: "trace_test",
+    expectation: {
+      frontmostApp: "Outlook",
+      regionTextVisible: {
+        text: "AGENTOS PASTE 4",
+        region: { x: 0.4, y: 0.2, width: 0.4, height: 0.2 },
+        scale: 2.4
+      }
+    }
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.details.regionTextVisible, false);
+  assert.deepEqual(result.details.regionTextPreview, ["4"]);
+});
+
 test("desktop verify supports matching region text across multiple candidate regions", async () => {
   const { adapter } = createObserveAdapter();
   adapter.bridge.getFrontmostApp = async () => ({ appName: "WeChat" });
@@ -498,6 +911,41 @@ test("desktop verify supports matching region text across multiple candidate reg
   assert.equal(result.details.regionTextAnyVisible, true);
   assert.equal(result.details.regionTextAnyChecks[0]?.matched, false);
   assert.equal(result.details.regionTextAnyChecks[1]?.matched, true);
+});
+
+test("desktop verify falls back to matching windows when frontmost app lookup times out", async () => {
+  const { adapter } = createObserveAdapter({
+    frontmostMs: 10,
+    windowsMs: 50
+  });
+  adapter.bridge.getFrontmostApp = async () => new Promise(() => {});
+  adapter.bridge.listWindows = async () => ({
+    windows: [
+      {
+        ownerName: "Microsoft Outlook",
+        windowName: "Inbox - Microsoft Outlook",
+        bounds: { x: 0, y: 0, width: 800, height: 600, centerX: 400, centerY: 300 }
+      }
+    ]
+  });
+
+  const result = await adapter.verify({
+    task: { id: "task_test" },
+    workspace: {
+      id: "workspace_test",
+      artifactsPath: "/tmp",
+      rootPath: "/tmp"
+    },
+    traceId: "trace_test",
+    expectation: {
+      frontmostApp: "Outlook"
+    }
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.details.frontmostApp, "");
+  assert.equal(result.details.frontmostAppFallback, true);
+  assert.equal(result.details.frontmostAppWindowMatchCount, 1);
 });
 
 test("desktop capture falls back to a full-screen capture when window capture fails", async () => {
@@ -624,6 +1072,87 @@ test("desktop verify can use visual checks for WeChat thread and prefill validat
   assert.equal(result.details.visualCheck?.targetThreadOpen, true);
   assert.equal(result.details.visualCheck?.prefillVisible, true);
   assert.deepEqual(captureCalls, [11]);
+});
+
+test("desktop visual checks require explicit positive verification results", async () => {
+  const adapter = new DesktopSurfaceAdapter({
+    artifactStore: {
+      registerExistingFile(payload: Record<string, unknown>) {
+        return {
+          id: "artifact_test",
+          taskId: String(payload.taskId ?? "task_test"),
+          traceId: payload.traceId ?? null,
+          kind: "screenshot",
+          label: String(payload.label ?? "desktop-capture"),
+          path: String(payload.filePath),
+          metadata: payload.metadata ?? {},
+          createdAt: new Date().toISOString()
+        };
+      }
+    },
+    dataDir: "/tmp/agentos-test",
+    visualModelClient: {
+      supportsImageJson() {
+        return true;
+      },
+      async analyzeImageJson() {
+        return {
+          openThread: "Alice",
+          targetThreadOpen: null,
+          prefillVisible: null
+        };
+      }
+    } as never
+  }) as DesktopSurfaceAdapter & { bridge: Record<string, unknown> };
+
+  adapter.bridge = {
+    async captureScreen() {
+      return { ok: true, windowNumber: 11 };
+    },
+    async getFrontmostApp() {
+      return { appName: "Microsoft Outlook" };
+    },
+    async listWindows() {
+      return {
+        windows: [
+          {
+            ownerName: "Microsoft Outlook",
+            windowName: "Inbox",
+            windowNumber: 11,
+            bounds: { x: 0, y: 0, width: 900, height: 700, centerX: 450, centerY: 350 }
+          }
+        ]
+      };
+    },
+    async getPermissionsStatus() {
+      return { accessibility: true, screenRecording: true };
+    },
+    async ocrImage() {
+      return { observations: [] };
+    }
+  };
+
+  const result = await adapter.verify({
+    task: { id: "task_test" },
+    workspace: {
+      id: "workspace_test",
+      artifactsPath: "/tmp",
+      rootPath: "/tmp"
+    },
+    traceId: "trace_test",
+    expectation: {
+      frontmostApp: "Outlook",
+      visualCheck: {
+        type: "outlook_prefill",
+        targetThread: "Alice",
+        replyPreview: "Thanks, I will review it."
+      }
+    }
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.details.visualCheck?.targetThreadOpen, null);
+  assert.equal(result.details.visualCheck?.prefillVisible, null);
 });
 
 test("desktop waitForAppReady waits for a stable frontmost app with accessibility candidates", async () => {

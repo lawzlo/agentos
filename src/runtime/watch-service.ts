@@ -2,6 +2,7 @@ import { normalizeWatchRule } from "./watch-rule-parser.js";
 import { deriveWatchProfileFromExecution } from "./watch-profile.js";
 import { buildWatchHealth, decorateWatchRule } from "./watch-presenters.js";
 import { clearConversationState } from "./conversation-thread-state.js";
+import type { LicenseService } from "../license.js";
 import type { AgentOsConfig } from "../config.js";
 import type { EventBus } from "./event-bus.js";
 import type { LivePackRegistry } from "./live-pack-registry.js";
@@ -26,6 +27,7 @@ interface WatchServiceOptions {
   livePackRegistry: LivePackRegistry;
   connectors: Array<{ status(): ConnectorStatus }>;
   config: AgentOsConfig;
+  licenseService: LicenseService;
 }
 
 interface SaveWatchRuleOptions {
@@ -50,6 +52,7 @@ export class WatchService {
   livePackRegistry: LivePackRegistry;
   connectors: Array<{ status(): ConnectorStatus }>;
   config: AgentOsConfig;
+  licenseService: LicenseService;
 
   constructor({
     store,
@@ -58,7 +61,8 @@ export class WatchService {
     eventBus,
     livePackRegistry,
     connectors,
-    config
+    config,
+    licenseService
   }: WatchServiceOptions) {
     this.store = store;
     this.modelClient = modelClient;
@@ -67,6 +71,21 @@ export class WatchService {
     this.livePackRegistry = livePackRegistry;
     this.connectors = connectors;
     this.config = config;
+    this.licenseService = licenseService;
+  }
+
+  #assertWatchRuleAllowed(watchRule: Pick<WatchRule, "livePack"> | Pick<WatchRuleInput, "livePack">) {
+    this.licenseService.refresh();
+    this.licenseService.assertPackAllowed(watchRule.livePack);
+  }
+
+  #assertWatchCapacity(additionalCount = 1) {
+    this.licenseService.refresh();
+    const watchCount = this.store.listWatchRules().length;
+    const maxWatches = this.licenseService.maxWatches();
+    if (watchCount + additionalCount > maxWatches) {
+      throw new Error(`Your current license allows up to ${maxWatches} watch${maxWatches === 1 ? "" : "es"}.`);
+    }
   }
 
   decorate(rule: WatchRule | null): WatchRule | null {
@@ -162,6 +181,10 @@ export class WatchService {
         modelConfigured: this.modelClient.isConfigured()
       }
     );
+    this.#assertWatchRuleAllowed(normalized);
+    if (!existingWatchRule) {
+      this.#assertWatchCapacity(1);
+    }
     const watchRule = this.store.putWatchRule(normalized as unknown as Record<string, unknown>);
     this.watchScheduler.sync(watchRule);
     const decorated = this.decorate(watchRule);
@@ -181,6 +204,8 @@ export class WatchService {
     const normalized = normalizeWatchRule(spec, {
       modelConfigured: this.modelClient.isConfigured()
     });
+    this.#assertWatchRuleAllowed(normalized);
+    this.#assertWatchCapacity(1);
     const watchRule = this.store.putWatchRule(normalized as unknown as Record<string, unknown>);
     this.watchScheduler.sync(watchRule);
     const decorated = this.decorate(watchRule);
@@ -205,6 +230,7 @@ export class WatchService {
         modelConfigured: this.modelClient.isConfigured()
       }
     );
+    this.#assertWatchRuleAllowed(normalized);
     const watchRule = this.store.putWatchRule(normalized as unknown as Record<string, unknown>);
     this.watchScheduler.sync(watchRule);
     const decorated = this.decorate(watchRule);
@@ -294,6 +320,12 @@ export class WatchService {
     if (pendingDrafts.length) {
       warnings.push(`${pendingDrafts.length} pending draft(s) need approval or rejection.`);
     }
+    const license = this.licenseService.refresh();
+    if (license.status === "expired" || license.status === "invalid") {
+      warnings.push(license.reason ?? "The Pro license is not active.");
+    } else if (license.status === "grace") {
+      warnings.push(license.reason ?? "The Pro license is in offline grace.");
+    }
 
     return {
       ok: warnings.length === 0,
@@ -303,7 +335,8 @@ export class WatchService {
       livePackCount: this.livePackRegistry.list().length,
       degradedWatchCount: degraded.length,
       pendingDraftCount: pendingDrafts.length,
-      connectorCount: this.connectors.length
+      connectorCount: this.connectors.length,
+      license
     };
   }
 }

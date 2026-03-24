@@ -15,6 +15,8 @@ import {
   type AgentModelTier,
   type PersistedModelConfig
 } from "../../src/config.js";
+import { detectInstallSourceSync } from "../../src/install-source.js";
+import { isPremiumModelProvider, resolveLicenseState } from "../../src/license.js";
 import {
   fetchProviderModelCatalog,
   type ProviderModelCatalogResult,
@@ -28,7 +30,7 @@ import {
   type CliOptions
 } from "../cli-utils.js";
 
-const PROVIDERS: AgentModelProvider[] = ["openai", "anthropic", "gemini", "openai_compatible"];
+const PROVIDERS: AgentModelProvider[] = ["openai", "anthropic", "gemini", "openai_compatible", "claude_code_cli"];
 const TIERS: AgentModelTier[] = ["fast", "balanced", "strong"];
 
 function normalizeProvider(value: unknown): AgentModelProvider | null {
@@ -41,6 +43,14 @@ function normalizeProvider(value: unknown): AgentModelProvider | null {
   }
   if (normalized === "openai-compatible" || normalized === "openai_compatible" || normalized === "compatible") {
     return "openai_compatible";
+  }
+  if (
+    normalized === "claude_code_cli" ||
+    normalized === "claude-code-cli" ||
+    normalized === "claude_code" ||
+    normalized === "claudecode"
+  ) {
+    return "claude_code_cli";
   }
   return PROVIDERS.includes(normalized as AgentModelProvider) ? (normalized as AgentModelProvider) : null;
 }
@@ -84,10 +94,17 @@ function currentResolvedModel() {
   return resolveConfig({ dataDir: config.dataDir }).model;
 }
 
+function isConfiguredModel(model: ReturnType<typeof currentResolvedModel>) {
+  if (model.provider === "claude_code_cli") {
+    return Boolean(model.name);
+  }
+  return Boolean(model.apiKey && model.name && model.baseUrl);
+}
+
 function modelStatusPayload() {
   const persisted = readPersistedModelConfig(config.dataDir);
   const resolved = currentResolvedModel();
-  const configured = Boolean(resolved.apiKey && resolved.name && resolved.baseUrl);
+  const configured = isConfiguredModel(resolved);
   return {
     configured,
     dataDir: config.dataDir,
@@ -279,7 +296,7 @@ async function promptInput({
 function requireInteractiveSetup() {
   if (!process.stdin.isTTY) {
     throw new Error(
-      "Non-interactive model setup needs flags like `--provider`, `--api-key`, `--tier`, `--model`, or `--base-url`."
+      "Non-interactive model setup needs flags like `--provider`, `--tier`, `--model`, `--api-key`, or `--base-url`."
     );
   }
 }
@@ -358,38 +375,49 @@ async function resolveModelSetupInput(options: CliOptions) {
   ).trim();
 
   let apiKey = String(options.apiKey ?? "").trim();
-  if (!apiKey) {
-    if (existingKey) {
-      apiKey = existingKey;
-    } else {
-      requireInteractiveSetup();
-      apiKey = await promptSecretInput({
-        title: `Paste your ${modelProviderLabel(provider)} API key`,
-        allowEmpty: false
-      });
+  if (provider !== "claude_code_cli") {
+    if (!apiKey) {
+      if (existingKey) {
+        apiKey = existingKey;
+      } else {
+        requireInteractiveSetup();
+        apiKey = await promptSecretInput({
+          title: `Paste your ${modelProviderLabel(provider)} API key`,
+          allowEmpty: false
+        });
+      }
     }
   }
 
   let baseUrl = String(options.baseUrl ?? "").trim();
-  if (!baseUrl) {
-    if (provider === "openai_compatible") {
-      if (defaultBaseUrl) {
-        baseUrl = defaultBaseUrl;
+  if (provider !== "claude_code_cli") {
+    if (!baseUrl) {
+      if (provider === "openai_compatible") {
+        if (defaultBaseUrl) {
+          baseUrl = defaultBaseUrl;
+        } else {
+          requireInteractiveSetup();
+          baseUrl = await promptInput({
+            title: "Enter the OpenAI-compatible base URL",
+            allowEmpty: false
+          });
+        }
       } else {
-        requireInteractiveSetup();
-        baseUrl = await promptInput({
-          title: "Enter the OpenAI-compatible base URL",
-          allowEmpty: false
-        });
+        baseUrl = defaultBaseUrl;
       }
-    } else {
-      baseUrl = defaultBaseUrl;
     }
   }
 
   let model = String(options.model ?? "").trim();
   const catalog =
-    apiKey && baseUrl
+    provider === "claude_code_cli"
+      ? {
+          source: "unavailable" as const,
+          models: [],
+          choices: [],
+          warning: "Claude Code CLI uses your local Claude session, so live model discovery is not available."
+        }
+      : apiKey && baseUrl
       ? await fetchProviderModelCatalog({
           provider,
           baseUrl,
@@ -496,8 +524,8 @@ async function resolveModelSetupInput(options: CliOptions) {
   return {
     provider,
     tier,
-    apiKey,
-    baseUrl,
+    apiKey: provider === "claude_code_cli" ? "" : apiKey,
+    baseUrl: provider === "claude_code_cli" ? "" : baseUrl,
     model,
     timeoutMs: resolved.timeoutMs,
     catalogSource: catalog.source,
@@ -508,10 +536,14 @@ async function resolveModelSetupInput(options: CliOptions) {
 
 export async function commandModelSetup(options: CliOptions) {
   const payload = await resolveModelSetupInput(options);
+  const license = resolveLicenseState(config, detectInstallSourceSync());
+  if (isPremiumModelProvider(payload.provider) && !license.capabilities.claudeCodeCliEnabled) {
+    throw new Error(`${modelProviderLabel(payload.provider)} requires AgentOS Pro.`);
+  }
   const savedPath = await writePersistedConfig({
     provider: payload.provider,
     tier: payload.tier,
-    apiKey: payload.apiKey,
+    apiKey: payload.apiKey || undefined,
     baseUrl: payload.baseUrl || undefined,
     name: payload.model,
     timeoutMs: payload.timeoutMs
@@ -535,6 +567,7 @@ export async function commandModelSetup(options: CliOptions) {
     tier: payload.tier,
     baseUrl: payload.baseUrl || null,
     apiKey: maskSecret(payload.apiKey),
+    license,
     catalogSource: payload.catalogSource,
     catalogWarning: payload.catalogWarning,
     catalogChoices: payload.catalogChoices.map((choice) => ({

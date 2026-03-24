@@ -16,6 +16,18 @@ export function buildWatchHealth(rule: WatchRule | null): WatchHealth | null {
   const activeDraftId = String(rule.dedupeState?.activeDraftId ?? "").trim() || null;
   const failureCount = Number(rule.dedupeState?.failureCount ?? 0);
   const threadState = currentConversationThreadState(rule.dedupeState ?? {});
+  const usageSummaryState =
+    rule.dedupeState?.usageSummary && typeof rule.dedupeState.usageSummary === "object"
+      ? (rule.dedupeState.usageSummary as Record<string, unknown>)
+      : null;
+  const artifactUsageState =
+    rule.dedupeState?.artifactUsage && typeof rule.dedupeState.artifactUsage === "object"
+      ? (rule.dedupeState.artifactUsage as Record<string, unknown>)
+      : null;
+  const storageGuardState =
+    rule.dedupeState?.storageGuard && typeof rule.dedupeState.storageGuard === "object"
+      ? (rule.dedupeState.storageGuard as Record<string, unknown>)
+      : null;
   const state = !rule.enabled || rule.status === "disabled"
     ? "disabled"
     : rule.status === "degraded"
@@ -62,6 +74,54 @@ export function buildWatchHealth(rule: WatchRule | null): WatchHealth | null {
       : [],
     lastRecoveryAction:
       (String(rule.dedupeState?.lastNoTriggerRecoveryAction ?? "").trim() || null) as WatchHealth["lastRecoveryAction"],
+    surfaceHealth:
+      (String(rule.dedupeState?.surfaceHealth ?? "").trim() || null) as WatchHealth["surfaceHealth"],
+    surfaceHealthCooldownUntil: Number(rule.dedupeState?.surfaceHealthCooldownUntil ?? 0) > 0
+      ? new Date(Number(rule.dedupeState?.surfaceHealthCooldownUntil ?? 0)).toISOString()
+      : null,
+    budgetStatus:
+      (String(rule.dedupeState?.budgetStatus ?? "").trim() || null) as WatchHealth["budgetStatus"],
+    usageSummary: usageSummaryState
+      ? {
+            requestCount: Number(usageSummaryState.requestCount ?? 0),
+            inputTokens: Number(usageSummaryState.inputTokens ?? 0),
+            outputTokens: Number(usageSummaryState.outputTokens ?? 0),
+            totalTokens: Number(usageSummaryState.totalTokens ?? 0),
+            estimatedCostUsd:
+              Number.isFinite(Number(usageSummaryState.estimatedCostUsd))
+                ? Number(usageSummaryState.estimatedCostUsd)
+                : null
+          }
+      : null,
+    artifactUsage: artifactUsageState
+      ? {
+            workspaceArtifactBytes: Number(artifactUsageState.workspaceArtifactBytes ?? 0),
+            workspaceArtifactLimitBytes: Number(artifactUsageState.workspaceArtifactLimitBytes ?? 0),
+            globalArtifactBytes:
+              Number.isFinite(Number(artifactUsageState.globalArtifactBytes))
+                ? Number(artifactUsageState.globalArtifactBytes)
+                : null,
+            globalArtifactLimitBytes:
+              Number.isFinite(Number(artifactUsageState.globalArtifactLimitBytes))
+                ? Number(artifactUsageState.globalArtifactLimitBytes)
+                : null,
+            prunedFiles: Number(artifactUsageState.prunedFiles ?? 0)
+          }
+      : null,
+    storageGuard: storageGuardState
+      ? {
+            active: Boolean(storageGuardState.active),
+            freeBytes:
+              Number.isFinite(Number(storageGuardState.freeBytes))
+                ? Number(storageGuardState.freeBytes)
+                : null,
+            usedPercent:
+              Number.isFinite(Number(storageGuardState.usedPercent))
+                ? Number(storageGuardState.usedPercent)
+                : null,
+            maximumUsedPercent: Number(storageGuardState.maximumUsedPercent ?? 0)
+          }
+      : null,
     summary:
       rule.lastError ??
       (String(rule.dedupeState?.lastSummary ?? "").trim() || null) ??

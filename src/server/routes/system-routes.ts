@@ -66,6 +66,7 @@ export async function handleSystemRoutes({
     startedAt,
     dataDir: config.dataDir,
     installSource,
+    license: controlPlane.getLicenseState(),
     lifecycle,
     startupRecovery: lifecycle?.startupRecovery ?? null
   };

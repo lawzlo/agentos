@@ -141,3 +141,99 @@ test("collectSurfaceState maps browser sign-in pages into explicit blockers", as
   assert.deepEqual(report.skipReasons, ["blocked_signin"]);
   assert.equal(report.manualIntervention?.kind, "login");
 });
+
+test("collectSurfaceState uses pack defaults to open browser workspaces and classify URL-only sign-in pages", async () => {
+  const request: SurfaceStateRequest = {
+    surface: "browser",
+    appName: null,
+    packName: "slack-browser",
+    workspaceName: "state-slack-browser-default-url",
+    sampleLimit: 5,
+    timeoutMs: 1500,
+    requireAccessibility: false,
+    waitReady: false,
+    url: null,
+    browserProfilePath: null
+  };
+
+  let openedUrl: string | null = null;
+  const report = await collectSurfaceState(request, {
+    browserAdapter: {
+      async act({ step }) {
+        openedUrl = String(step.params?.url ?? "");
+        return { ok: true };
+      },
+      async observe() {
+        return {
+          version: 1,
+          surface: "browser",
+          workspaceId: "workspace-state-browser",
+          appContext: {
+            title: "Slack",
+            url: "https://app.slack.com/workspace-signin?redir=%2Fclient"
+          },
+          capture: null,
+          ocrBlocks: [],
+          interactionCandidates: [],
+          visibleText: "",
+          recentActions: [],
+          summary: "Slack",
+          timestamp: new Date().toISOString()
+        };
+      },
+      async shutdown() {}
+    }
+  });
+
+  assert.equal(openedUrl, "https://app.slack.com/client");
+  assert.equal(report.readinessState, "blocked_signin");
+  assert.equal(report.scene, "signin");
+  assert.equal(report.manualIntervention?.kind, "login");
+});
+
+test("collectSurfaceState treats empty browser shells as needs_takeover instead of no_visible_thread", async () => {
+  const request: SurfaceStateRequest = {
+    surface: "browser",
+    appName: null,
+    packName: "generic-mail-browser",
+    workspaceName: "state-mail-browser-empty-shell",
+    sampleLimit: 5,
+    timeoutMs: 1500,
+    requireAccessibility: false,
+    waitReady: false,
+    url: "https://outlook.office.com/mail/",
+    browserProfilePath: null
+  };
+
+  const report = await collectSurfaceState(request, {
+    browserAdapter: {
+      async act() {
+        return { ok: true };
+      },
+      async observe() {
+        return {
+          version: 1,
+          surface: "browser",
+          workspaceId: "workspace-state-browser",
+          appContext: {
+            title: "Outlook",
+            url: "https://outlook.office.com/mail/"
+          },
+          capture: null,
+          ocrBlocks: [],
+          interactionCandidates: [],
+          visibleText: "",
+          recentActions: [],
+          summary: "Outlook",
+          timestamp: new Date().toISOString()
+        };
+      },
+      async shutdown() {}
+    }
+  });
+
+  assert.equal(report.readinessState, "needs_takeover");
+  assert.deepEqual(report.blockers, ["needs_takeover"]);
+  assert.deepEqual(report.skipReasons, ["needs_takeover"]);
+  assert.equal(report.recoverySuggested, "takeover");
+});

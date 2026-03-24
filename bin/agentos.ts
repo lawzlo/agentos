@@ -23,6 +23,7 @@ import { commandProposals } from "./commands/proposals-command.js";
 import { commandJobs } from "./commands/jobs-command.js";
 import { commandSetup } from "./commands/setup-command.js";
 import { commandModel } from "./commands/model-command.js";
+import { commandLicense } from "./commands/license-command.js";
 import { commandUninstall } from "./commands/uninstall-command.js";
 import { commandDesktop } from "./commands/desktop-command.js";
 import { commandState } from "./commands/state-command.js";
@@ -32,7 +33,8 @@ import { boolOption, parseArgs, print, type CliOptions } from "./cli-utils.js";
 function helpText() {
   return `agentos
 agentos "<goal>" [--surface browser|desktop] [--workspace name] [--wait]
-agentos model setup|status|clear [--provider openai|anthropic|gemini|openai_compatible] [--tier fast|balanced|strong] [--api-key ...] [--model ...] [--base-url ...]
+agentos model setup|status|clear [--provider openai|anthropic|gemini|openai_compatible|claude_code_cli] [--tier fast|balanced|strong] [--api-key ...] [--model ...] [--base-url ...]
+agentos license status|login|activate|refresh|logout|init-dev|issue-token|serve [--token ...]
 agentos setup [--fix] [--dry-run]
 agentos uninstall [--purge] [--dry-run]
 agentos state [--surface browser|desktop] [--app WeChat] [--pack wechat-desktop|slack-browser|outlook-desktop|generic-mail-browser|boss-browser] [--url https://...] [--workspace name] [--limit 8] [--timeout-ms 1800] [--wait-ready false]
@@ -69,6 +71,7 @@ function isKnownCommand(command: string | undefined) {
     "run",
     "setup",
     "model",
+    "license",
     "uninstall",
     "state",
     "desktop",
@@ -159,6 +162,11 @@ async function main() {
 
   if (command === "model") {
     await commandModel(subcommand, positionals, sharedOptions);
+    return;
+  }
+
+  if (command === "license") {
+    await commandLicense(subcommand, positionals, sharedOptions);
     return;
   }
 

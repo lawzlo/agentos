@@ -48,6 +48,19 @@ function createWatchRule(): WatchRule {
   };
 }
 
+test("createModelBudget allows Outlook desktop watches to use the higher watch request budget", () => {
+  const service = createService();
+  const watchRule = {
+    ...createWatchRule(),
+    livePack: "outlook-desktop",
+    appTarget: "Microsoft Outlook"
+  } satisfies WatchRule;
+
+  const budget = service.createModelBudget(watchRule);
+
+  assert.equal(budget.maxRequests, 8);
+});
+
 test("buildTaskSpecFromWatchRule strips explicit send steps when autoSend is false", () => {
   const service = createService();
   const watchRule = createWatchRule();
@@ -171,6 +184,7 @@ test("buildTaskSpecFromWatchRule forces explicit reply plans into planned mode a
       }
     },
     {
+      openTarget: "#general",
       replyText: "This is a longer reply body that should still expose a stable preview snippet for verification."
     }
   );
@@ -178,6 +192,36 @@ test("buildTaskSpecFromWatchRule forces explicit reply plans into planned mode a
   assert.equal(taskSpec.executionMode, "planned");
   assert.equal(typeof taskSpec.inputs?.typeTextPreview, "string");
   assert.equal(String(taskSpec.inputs?.typeTextPreview).startsWith("This is a longer reply body"), true);
+  assert.equal(typeof taskSpec.inputs?.typeTextMiddlePreview, "string");
+  assert.equal(String(taskSpec.inputs?.typeTextMiddlePreview).includes("still expose a stable preview"), true);
+  assert.equal(typeof taskSpec.inputs?.typeTextTailPreview, "string");
+  assert.equal(String(taskSpec.inputs?.typeTextTailPreview).endsWith("snippet for verification."), true);
+  assert.equal(typeof taskSpec.inputs?.typeTextSuffixPreview, "string");
+  assert.equal(String(taskSpec.inputs?.typeTextSuffixPreview).endsWith("verification."), true);
+});
+
+test("buildTaskSpecFromWatchRule rejects unresolved typeText placeholders", () => {
+  const service = createService();
+  const watchRule = createWatchRule();
+
+  assert.throws(
+    () =>
+      service.buildTaskSpecFromWatchRule(watchRule, {
+        summary: "#general",
+        taskSpec: {
+          preferredSurface: "desktop",
+          steps: [
+            {
+              label: "Type reply",
+              surface: "desktop",
+              action: "typeText",
+              params: { text: "{{typeText}}" }
+            }
+          ]
+        }
+      }),
+    /unresolved template inputs: typeText/i
+  );
 });
 
 test("scan drafts a reply when explicit reply steps use the typeText placeholder", async () => {
@@ -298,6 +342,41 @@ test("scan drafts a reply when explicit reply steps use the typeText placeholder
 
   assert.equal(draftReplyCalls, 1);
   assert.equal((createdTaskSpec?.inputs as Record<string, unknown>)?.typeText, "Generated reply text");
+});
+
+test("draftReply fallback stays English for an English thread even when the workspace UI contains Chinese", async () => {
+  const service = new WatchExecutionService({
+    controlPlane: {
+      modelClient: {
+        isConfigured() {
+          return false;
+        }
+      }
+    } as never,
+    store: {} as never,
+    eventBus: {
+      broadcast() {}
+    } as never,
+    livePackRegistry: {} as never
+  });
+
+  const draft = await service.draftReply({
+    watchRule: {
+      ...createWatchRule(),
+      goal: "Always watch Outlook and prefill replies"
+    },
+    detection: {
+      summary: "Re: extend runway",
+      context: [
+        "Should I share info?",
+        "Curious, are you using AWS or Google Cloud?",
+        "收件箱"
+      ]
+    } as never,
+    pack: null
+  });
+
+  assert.equal(draft.replyText, "Got it. I will follow up shortly.");
 });
 
 test("scan skips a watch trigger when extractContext cannot produce a stable reply context", async () => {
@@ -517,14 +596,21 @@ test("scan records no-trigger details for wechat desktop scans", async () => {
   assert.equal(storedRule.dedupeState.lastNoTriggerStage, "detect_items");
   assert.equal(storedRule.dedupeState.lastNoTriggerRunnerType, "desktop_vlm");
   assert.equal(storedRule.dedupeState.lastNoTriggerScene, "unknown");
-  assert.deepEqual(storedRule.dedupeState.lastNoTriggerSkipReasons, ["no_visible_thread"]);
+  const skipReasons = Array.isArray(storedRule.dedupeState.lastNoTriggerSkipReasons)
+    ? storedRule.dedupeState.lastNoTriggerSkipReasons.map((entry) => String(entry))
+    : [];
+  assert.equal(skipReasons.includes("no_visible_thread"), true);
   assert.equal(storedRule.dedupeState.lastNoTriggerUnreadCandidate, null);
   assert.deepEqual(storedRule.dedupeState.lastNoTriggerTopUnread, []);
 });
 
 test("scan records stage details when a watch stage times out", async () => {
   const timestamp = new Date().toISOString();
-  let storedRule = createWatchRule();
+  let storedRule: WatchRule = {
+    ...createWatchRule(),
+    appTarget: "Mail",
+    livePack: "mail-desktop"
+  };
 
   const service = new WatchExecutionService({
     controlPlane: {
@@ -635,4 +721,297 @@ test("scan records stage details when a watch stage times out", async () => {
   assert.equal(health?.runnerType, null);
   assert.equal(health?.scene, null);
   assert.deepEqual(health?.lastSkipReasons, []);
+});
+
+test("scan cools down repeated slack desktop no-trigger cycles", async () => {
+  const timestamp = new Date().toISOString();
+  let storedRule = createWatchRule();
+
+  const service = new WatchExecutionService({
+    controlPlane: {
+      modelClient: {
+        isConfigured() {
+          return true;
+        },
+        createUsageBudget({ id, maxRequests }: { id: string; maxRequests: number }) {
+          return {
+            id,
+            maxRequests,
+            status: "ok" as const,
+            usage: {
+              requestCount: 0,
+              inputTokens: 0,
+              outputTokens: 0,
+              totalTokens: 0,
+              estimatedCostUsd: null
+            }
+          };
+        },
+        async runWithUsageBudget<T>(_: unknown, work: () => Promise<T>) {
+          return work();
+        }
+      },
+      artifactStore: {
+        async getUsage() {
+          return {
+            workspaceArtifactBytes: 0,
+            workspaceArtifactLimitBytes: 500 * 1024 * 1024,
+            globalArtifactBytes: 0,
+            globalArtifactLimitBytes: 3 * 1024 * 1024 * 1024,
+            prunedFiles: 0
+          };
+        }
+      },
+      surfaceRegistry: {},
+      workspaceManager: {
+        async prepareProfile() {
+          return {
+            id: "profile-watch",
+            name: "desktop-main",
+            rootPath: "/tmp/desktop-main",
+            profilePath: "/tmp/desktop-main/profile",
+            downloadsPath: "/tmp/desktop-main/downloads",
+            artifactsPath: "/tmp/desktop-main/artifacts",
+            scratchPath: "/tmp/desktop-main/scratch",
+            metadata: {},
+            createdAt: timestamp,
+            updatedAt: timestamp
+          };
+        }
+      },
+      watchService: {
+        decorate(rule: WatchRule) {
+          return {
+            ...rule,
+            health: buildWatchHealth(rule)
+          };
+        }
+      },
+      policyEngine: {
+        evaluateAutomation() {
+          return {
+            action: "draft",
+            policy: "draft_only",
+            riskLevel: "normal",
+            reasons: []
+          };
+        }
+      },
+      draftService: {
+        create() {
+          throw new Error("drafts should not be created");
+        }
+      },
+      listReplyStylePreferences() {
+        return [];
+      },
+      createTask() {
+        throw new Error("tasks should not be created");
+      }
+    } as never,
+    store: {
+      getWatchRule() {
+        return storedRule;
+      },
+      getTask() {
+        return null;
+      },
+      getDraft() {
+        return null;
+      },
+      putWatchRule(rule: WatchRule) {
+        storedRule = rule;
+        return rule;
+      }
+    } as never,
+    eventBus: {
+      broadcast() {}
+    } as never,
+    livePackRegistry: {
+      get() {
+        return {
+          async detectNewItems() {
+            return null;
+          }
+        };
+      }
+    } as never
+  });
+
+  await service.scan(storedRule.id);
+  assert.equal(storedRule.dedupeState.surfaceHealth, "healthy");
+  assert.equal(storedRule.dedupeState.repeatedNoTriggerCount, 1);
+
+  await service.scan(storedRule.id);
+  assert.equal(storedRule.dedupeState.surfaceHealth, "cooldown");
+  assert.equal(storedRule.dedupeState.repeatedNoTriggerCount, 2);
+  assert.ok(Number(storedRule.dedupeState.retryAfter ?? 0) > Date.now());
+
+  const health = buildWatchHealth(storedRule);
+  assert.equal(health?.surfaceHealth, "cooldown");
+  assert.equal(health?.budgetStatus, "ok");
+});
+
+test("draft reply stage timeout honors the configured model timeout floor", () => {
+  const service = new WatchExecutionService({
+    controlPlane: {
+      modelClient: {
+        config: {
+          timeoutMs: 45000
+        },
+        isConfigured() {
+          return true;
+        }
+      },
+      artifactStore: {
+        async getUsage() {
+          return {
+            workspaceArtifactBytes: 0,
+            workspaceArtifactLimitBytes: 500 * 1024 * 1024,
+            globalArtifactBytes: 0,
+            globalArtifactLimitBytes: 3 * 1024 * 1024 * 1024,
+            prunedFiles: 0
+          };
+        }
+      }
+    } as never,
+    store: {} as never,
+    eventBus: {
+      broadcast() {}
+    } as never,
+    livePackRegistry: {} as never
+  });
+
+  const slackRule = createWatchRule();
+  const outlookRule: WatchRule = {
+    ...createWatchRule(),
+    livePack: "outlook-desktop",
+    appTarget: "Microsoft Outlook"
+  };
+
+  assert.equal(service.scanStageTimeoutForRule(slackRule, "draft_reply"), 50000);
+  assert.equal(service.scanStageTimeoutForRule(outlookRule, "draft_reply"), 50000);
+  assert.equal(service.scanStageTimeoutForRule(outlookRule, "detect_items"), 90000);
+});
+
+test("scan pauses when the storage guard threshold is exceeded", async () => {
+  const timestamp = new Date().toISOString();
+  const previousThreshold = process.env.AGENTOS_STORAGE_GUARD_MAX_USED_PERCENT;
+  process.env.AGENTOS_STORAGE_GUARD_MAX_USED_PERCENT = "1";
+  let storedRule = createWatchRule();
+  let detectCalls = 0;
+
+  try {
+    const service = new WatchExecutionService({
+      controlPlane: {
+        modelClient: {
+          isConfigured() {
+            return true;
+          },
+          createUsageBudget() {
+            return {
+              id: "budget-storage-guard",
+              maxRequests: 8,
+              requestCount: 0,
+              usage: {
+                requestCount: 0,
+                inputTokens: 0,
+                outputTokens: 0,
+                totalTokens: 0,
+                estimatedCostUsd: null
+              },
+              status: "ok"
+            };
+          },
+          async runWithUsageBudget(_budget: unknown, work: () => Promise<unknown>) {
+            return work();
+          },
+          usageSummary(budget: { usage: Record<string, unknown> }) {
+            return budget.usage;
+          }
+        },
+        artifactStore: {
+          async getUsage() {
+            return {
+              workspaceArtifactBytes: 0,
+              workspaceArtifactLimitBytes: 500 * 1024 * 1024,
+              globalArtifactBytes: 0,
+              globalArtifactLimitBytes: 3 * 1024 * 1024 * 1024,
+              prunedFiles: 0
+            };
+          }
+        },
+        surfaceRegistry: {},
+        workspaceManager: {
+          async prepareProfile() {
+            return {
+              id: "profile-watch",
+              name: "desktop-main",
+              rootPath: process.cwd(),
+              profilePath: `${process.cwd()}/profile`,
+              downloadsPath: `${process.cwd()}/downloads`,
+              artifactsPath: `${process.cwd()}/artifacts`,
+              scratchPath: `${process.cwd()}/scratch`,
+              metadata: {},
+              createdAt: timestamp,
+              updatedAt: timestamp
+            };
+          }
+        },
+        watchService: {
+          decorate(rule: WatchRule) {
+            return {
+              ...rule,
+              health: buildWatchHealth(rule)
+            };
+          }
+        }
+      } as never,
+      store: {
+        getWatchRule() {
+          return storedRule;
+        },
+        getTask() {
+          return null;
+        },
+        getDraft() {
+          return null;
+        },
+        putWatchRule(rule: WatchRule) {
+          storedRule = rule;
+          return rule;
+        }
+      } as never,
+      eventBus: {
+        broadcast() {}
+      } as never,
+      livePackRegistry: {
+        get() {
+          return {
+            async detectNewItems() {
+              detectCalls += 1;
+              return null;
+            }
+          };
+        }
+      } as never
+    });
+
+    await service.scan(storedRule.id);
+
+    assert.equal(detectCalls, 0);
+    assert.equal(storedRule.status, "backoff");
+    assert.match(String(storedRule.lastError ?? ""), /storage_guard_triggered/i);
+
+    const health = buildWatchHealth(storedRule);
+    assert.equal(health?.budgetStatus, "paused");
+    assert.equal(health?.storageGuard?.active, true);
+    assert.equal(health?.storageGuard?.maximumUsedPercent, 1);
+  } finally {
+    if (previousThreshold === undefined) {
+      delete process.env.AGENTOS_STORAGE_GUARD_MAX_USED_PERCENT;
+    } else {
+      process.env.AGENTOS_STORAGE_GUARD_MAX_USED_PERCENT = previousThreshold;
+    }
+  }
 });

@@ -577,8 +577,39 @@ fn normalize_key_token(input: &str) -> String {
         "end" => "{END}".to_string(),
         "pageup" => "{PGUP}".to_string(),
         "pagedown" => "{PGDN}".to_string(),
+        "f1" => "{F1}".to_string(),
+        "f2" => "{F2}".to_string(),
+        "f3" => "{F3}".to_string(),
+        "f4" => "{F4}".to_string(),
+        "f5" => "{F5}".to_string(),
+        "f6" => "{F6}".to_string(),
+        "f7" => "{F7}".to_string(),
+        "f8" => "{F8}".to_string(),
+        "f9" => "{F9}".to_string(),
+        "f10" => "{F10}".to_string(),
+        "f11" => "{F11}".to_string(),
+        "f12" => "{F12}".to_string(),
         _ if normalized.chars().count() == 1 => escape_send_keys_text(normalized.as_str()),
         _ => escape_send_keys_text(input),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_key_token;
+
+    #[test]
+    fn normalize_key_token_supports_navigation_keys() {
+        assert_eq!(normalize_key_token("tab"), "{TAB}");
+        assert_eq!(normalize_key_token("escape"), "{ESC}");
+        assert_eq!(normalize_key_token("pageDown"), "{PGDN}");
+    }
+
+    #[test]
+    fn normalize_key_token_supports_function_keys() {
+        assert_eq!(normalize_key_token("F1"), "{F1}");
+        assert_eq!(normalize_key_token("f6"), "{F6}");
+        assert_eq!(normalize_key_token("F12"), "{F12}");
     }
 }
 

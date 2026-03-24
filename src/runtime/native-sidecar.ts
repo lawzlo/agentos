@@ -60,6 +60,14 @@ export class NativeSidecarClient {
     this.stderr = "";
   }
 
+  #rejectAllPending(message: string) {
+    for (const { reject, timer } of this.pending.values()) {
+      clearTimeout(timer);
+      reject(new Error(message));
+    }
+    this.pending.clear();
+  }
+
   async isAvailable(): Promise<boolean> {
     if (this.disabled) {
       return false;
@@ -107,13 +115,8 @@ export class NativeSidecarClient {
       );
 
       try {
-        const [cachedStats, targetStats] = await Promise.all([
-          fs.stat(cachedBinary),
-          fs.stat(targetBinary)
-        ]);
-        if (cachedStats.mtimeMs >= targetStats.mtimeMs) {
-          return { command: cachedBinary, args: [] };
-        }
+        await fs.access(targetBinary);
+        return { command: targetBinary, args: [] };
       } catch {
       }
 
@@ -127,6 +130,12 @@ export class NativeSidecarClient {
           this.manifestPath,
           "--release"
         ]);
+      }
+
+      try {
+        await fs.access(targetBinary);
+        return { command: targetBinary, args: [] };
+      } catch {
       }
 
       await fs.mkdir(path.dirname(cachedBinary), { recursive: true });
@@ -161,18 +170,18 @@ export class NativeSidecarClient {
       child.stderr.on("data", (chunk: Buffer | string) => {
         this.stderr += chunk.toString();
       });
+      child.stdin.on("error", (error: Error) => {
+        this.#rejectAllPending(
+          `Rust sidecar stdin closed unexpectedly.${error?.message ? ` ${error.message}` : ""}`
+        );
+        this.child = null;
+        this.readline?.close();
+        this.readline = null;
+      });
       child.on("exit", () => {
-        for (const { reject, timer } of this.pending.values()) {
-          clearTimeout(timer);
-          reject(
-            new Error(
-              `Rust sidecar exited unexpectedly.${
-                this.stderr ? ` ${this.stderr.trim()}` : ""
-              }`
-            )
-          );
-        }
-        this.pending.clear();
+        this.#rejectAllPending(
+          `Rust sidecar exited unexpectedly.${this.stderr ? ` ${this.stderr.trim()}` : ""}`
+        );
         this.child = null;
         this.readline?.close();
         this.readline = null;
@@ -244,13 +253,35 @@ export class NativeSidecarClient {
         reject,
         timer
       });
-      child.stdin.write(
-        `${JSON.stringify({
-          id,
-          method,
-          params
-        })}\n`
-      );
+      try {
+        child.stdin.write(
+          `${JSON.stringify({
+            id,
+            method,
+            params
+          })}\n`,
+          (error) => {
+            if (!error) {
+              return;
+            }
+            clearTimeout(timer);
+            this.pending.delete(id);
+            reject(
+              new Error(
+                `Rust sidecar write failed for ${method}.${error.message ? ` ${error.message}` : ""}`
+              )
+            );
+          }
+        );
+      } catch (error) {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(
+          new Error(
+            `Rust sidecar write failed for ${method}.${error instanceof Error && error.message ? ` ${error.message}` : ""}`
+          )
+        );
+      }
     });
   }
 

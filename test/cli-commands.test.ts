@@ -979,6 +979,7 @@ test("cli setup summarizes readiness and recommended next steps", async () => {
     assert.match(result.stdout, /Low-risk fixes AgentOS can apply now:/);
     assert.match(result.stdout, /Manual steps you still need to finish:/);
     assert.match(result.stdout, /Setup guides:/);
+    assert.match(result.stdout, /License and activation/);
     assert.match(result.stdout, /CLI runtime/);
     assert.match(result.stdout, /Browser app sessions/);
     assert.match(result.stdout, /Pack availability:/);
@@ -1025,6 +1026,7 @@ test("cli setup --json returns structured onboarding data", async () => {
     assert.equal(Array.isArray(payload.manualSteps), true);
     assert.equal(payload.manualSteps.some((entry: string) => entry.includes("agentos model setup")), true);
     assert.equal(Array.isArray(payload.onboardingGuides), true);
+    assert.equal(payload.onboardingGuides.some((entry: { id: string }) => entry.id === "license"), true);
     assert.equal(payload.onboardingGuides.some((entry: { id: string }) => entry.id === "model-access"), true);
     assert.equal(
       payload.onboardingGuides.some((entry: { id: string; actionKind: string }) => entry.id === "always-on" && entry.actionKind === "mixed"),
@@ -1233,6 +1235,63 @@ test("cli model setup saves a provider config and model status reads it back", a
     assert.equal(statusPayload.source, "saved_config");
   } finally {
     await modelApi.close();
+    await fs.rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("cli model setup supports claude_code_cli without API credentials", async () => {
+  const dataDir = await createTempDir("agentos-model-claude-code-");
+  const env = {
+    ...process.env,
+    AGENTOS_DATA_DIR: dataDir
+  };
+
+  try {
+    const setupResult = await execFileAsync(
+      process.execPath,
+      [
+        "dist/bin/agentos.js",
+        "model",
+        "setup",
+        "--provider",
+        "claude_code_cli",
+        "--model",
+        "sonnet",
+        "--json"
+      ],
+      {
+        cwd: process.cwd(),
+        env
+      }
+    );
+    const setupPayload = JSON.parse(setupResult.stdout);
+    assert.equal(setupPayload.provider, "claude_code_cli");
+    assert.equal(setupPayload.model, "sonnet");
+    assert.equal(setupPayload.apiKey, null);
+    assert.equal(setupPayload.baseUrl, null);
+    assert.equal(setupPayload.catalogSource, "unavailable");
+
+    const saved = JSON.parse(await fs.readFile(path.join(dataDir, "model-config.json"), "utf8"));
+    assert.equal(saved.provider, "claude_code_cli");
+    assert.equal(saved.name, "sonnet");
+    assert.equal("apiKey" in saved, false);
+    assert.equal("baseUrl" in saved, false);
+
+    const statusResult = await execFileAsync(
+      process.execPath,
+      ["dist/bin/agentos.js", "model", "status", "--json"],
+      {
+        cwd: process.cwd(),
+        env
+      }
+    );
+    const statusPayload = JSON.parse(statusResult.stdout);
+    assert.equal(statusPayload.configured, true);
+    assert.equal(statusPayload.provider, "claude_code_cli");
+    assert.equal(statusPayload.model, "sonnet");
+    assert.equal(statusPayload.apiKey, null);
+    assert.equal(statusPayload.baseUrl, null);
+  } finally {
     await fs.rm(dataDir, { recursive: true, force: true });
   }
 });

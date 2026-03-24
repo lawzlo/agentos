@@ -44,8 +44,12 @@ test("package-release stages a bundled runtime and records it in install metadat
     const wrapper = await fs.readFile(path.join(releaseDir, "staging", "darwin", "root", "usr", "local", "bin", "agentos"), "utf8");
 
     assert.equal(manifest.bundledRuntime, true);
+    assert.equal(manifest.buildChannel, "stable");
+    assert.equal(manifest.licenseEnforced, true);
     assert.equal(manifest.runtimeExecutable, `/opt/agentos/${packageVersion}/runtime/bin/node`);
     assert.equal(metadata.bundledRuntime, true);
+    assert.equal(metadata.buildChannel, "stable");
+    assert.equal(metadata.licenseEnforced, true);
     assert.equal(metadata.runtimeExecutablePath, `/opt/agentos/${packageVersion}/runtime/bin/node`);
     assert.equal(wrapper.includes(`AGENTOS_RUNTIME="/opt/agentos/${packageVersion}/runtime/bin/node"`), true);
     assert.equal(

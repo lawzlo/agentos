@@ -1,3 +1,4 @@
+import { defaultBrowserStartUrlForPack } from "./browser-pack-defaults.js";
 import type { WatchGovernance, WatchProfile, WatchQuietHours } from "../types/runtime-schema.js";
 
 type ExecutionMode = "planned" | "autonomous";
@@ -49,7 +50,7 @@ export interface NormalizedWatchRule {
 
 function defaultAppTargetForLivePack(livePack: string, preferredSurface: "browser" | "desktop", appTarget: string | null | undefined): string | null {
   if (preferredSurface !== "desktop") {
-    return appTarget ?? null;
+    return appTarget ?? defaultBrowserStartUrlForPack(livePack);
   }
 
   if (appTarget) {
@@ -182,7 +183,10 @@ function inferPack(
     return {
       livePack: preferredSurface === "browser" ? "slack-browser" : "slack-desktop",
       preferredSurface,
-      appTarget: preferredSurface === "browser" ? input.appTarget ?? null : (input.appTarget ?? "Slack"),
+      appTarget:
+        preferredSurface === "browser"
+          ? defaultAppTargetForLivePack("slack-browser", "browser", input.appTarget)
+          : (input.appTarget ?? "Slack"),
       triggerTexts: ["unread", "new message", "new messages", "未读"]
     };
   }
@@ -201,7 +205,10 @@ function inferPack(
     return {
       livePack: preferredSurface === "browser" ? "generic-mail-browser" : "outlook-desktop",
       preferredSurface,
-      appTarget: preferredSurface === "browser" ? input.appTarget ?? null : (input.appTarget ?? "Microsoft Outlook"),
+      appTarget:
+        preferredSurface === "browser"
+          ? defaultAppTargetForLivePack("generic-mail-browser", "browser", input.appTarget)
+          : (input.appTarget ?? "Microsoft Outlook"),
       triggerTexts: ["unread", "inbox", "mail", "email", "outlook", "邮件", "未读", "收件箱"]
     };
   }
@@ -211,7 +218,10 @@ function inferPack(
     return {
       livePack: preferredSurface === "browser" ? "generic-mail-browser" : "generic-mail-desktop",
       preferredSurface,
-      appTarget: preferredSurface === "browser" ? input.appTarget ?? null : (input.appTarget ?? null),
+      appTarget:
+        preferredSurface === "browser"
+          ? defaultAppTargetForLivePack("generic-mail-browser", "browser", input.appTarget)
+          : (input.appTarget ?? null),
       triggerTexts: ["unread", "inbox", "mail", "邮件", "未读", "收件箱"]
     };
   }

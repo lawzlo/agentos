@@ -31,6 +31,7 @@ function safe(fn, fallback) {
     return fallback;
   }
 }
+
 function toArray(collection) {
   if (!collection) {
     return [];
@@ -109,6 +110,257 @@ JSON.stringify({
 `.trim();
 }
 
+function buildFrontmostAppSwiftScript() {
+  return `
+import AppKit
+import Foundation
+
+let appName = NSWorkspace.shared.frontmostApplication?.localizedName ?? ""
+let bundleIdentifier = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""
+let payload: [String: String] = [
+  "appName": appName,
+  "bundleIdentifier": bundleIdentifier
+]
+let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+FileHandle.standardOutput.write(data)
+`.trim();
+}
+
+function buildListWindowsSwiftScript() {
+  return `
+import CoreGraphics
+import Foundation
+
+func number(_ value: Any?) -> Double? {
+  switch value {
+  case let number as NSNumber:
+    return number.doubleValue
+  case let value as Double:
+    return value
+  case let value as Int:
+    return Double(value)
+  default:
+    return nil
+  }
+}
+
+var windows: [[String: Any]] = []
+if let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] {
+  for entry in info {
+    let ownerName = entry[kCGWindowOwnerName as String] as? String ?? ""
+    let windowName = entry[kCGWindowName as String] as? String ?? ""
+    let layer = Int(number(entry[kCGWindowLayer as String]) ?? -1)
+    let alpha = number(entry[kCGWindowAlpha as String]) ?? 0
+    if ownerName.isEmpty || layer != 0 || alpha <= 0 {
+      continue
+    }
+    let windowNumber = Int(number(entry[kCGWindowNumber as String]) ?? -1)
+    let ownerPID = Int(number(entry[kCGWindowOwnerPID as String]) ?? -1)
+    let boundsValue = entry[kCGWindowBounds as String] as? [String: Any] ?? [:]
+    let x = number(boundsValue["X"]) ?? 0
+    let y = number(boundsValue["Y"]) ?? 0
+    let width = number(boundsValue["Width"]) ?? 0
+    let height = number(boundsValue["Height"]) ?? 0
+    windows.append([
+      "ownerName": ownerName,
+      "windowName": windowName,
+      "ownerPID": ownerPID,
+      "windowNumber": windowNumber,
+      "layer": layer,
+      "alpha": alpha,
+      "bounds": [
+        "x": x,
+        "y": y,
+        "width": width,
+        "height": height,
+        "centerX": x + width / 2,
+        "centerY": y + height / 2
+      ]
+    ])
+  }
+}
+
+let payload: [String: Any] = ["windows": windows]
+let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+FileHandle.standardOutput.write(data)
+`.trim();
+}
+
+function buildPermissionsSwiftScript() {
+  return `
+import ApplicationServices
+import CoreGraphics
+import Foundation
+
+let payload: [String: Any] = [
+  "accessibility": AXIsProcessTrusted(),
+  "screenRecording": CGPreflightScreenCaptureAccess()
+]
+let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+FileHandle.standardOutput.write(data)
+`.trim();
+}
+
+function isUsableFrontmostApp(payload: { appName?: string; bundleIdentifier?: string } | null | undefined) {
+  const appName = String(payload?.appName ?? "").trim();
+  const bundleIdentifier = String(payload?.bundleIdentifier ?? "").trim();
+  if (!appName) {
+    return false;
+  }
+  if (appName === "loginwindow" || bundleIdentifier === "com.apple.loginwindow") {
+    return false;
+  }
+  return true;
+}
+
+function buildOcrSwiftScript(filePath: string, options: SidecarOcrOptions = {}) {
+  const normalizedPath = JSON.stringify(String(filePath ?? "").trim());
+  const region = options.region ?? null;
+  const scale = Number(options.scale ?? 0);
+  return `
+import Foundation
+import Vision
+import ImageIO
+import CoreGraphics
+
+let filePath = ${normalizedPath}
+let cropX = CGFloat(${Number(region?.x ?? -1)})
+let cropY = CGFloat(${Number(region?.y ?? -1)})
+let cropWidth = CGFloat(${Number(region?.width ?? -1)})
+let cropHeight = CGFloat(${Number(region?.height ?? -1)})
+let requestedScale = CGFloat(${Number.isFinite(scale) && scale > 0 ? scale : 1})
+
+func boxDictionary(_ box: CGRect, width: CGFloat, height: CGFloat, offsetX: CGFloat, offsetY: CGFloat, scale: CGFloat) -> [String: Double] {
+  let effectiveScale = scale > 0 ? scale : 1
+  let rect = CGRect(
+    x: offsetX + ((box.origin.x * width) / effectiveScale),
+    y: offsetY + (((1 - box.origin.y - box.size.height) * height) / effectiveScale),
+    width: (box.size.width * width) / effectiveScale,
+    height: (box.size.height * height) / effectiveScale
+  )
+  return [
+    "x": Double(rect.origin.x),
+    "y": Double(rect.origin.y),
+    "width": Double(rect.size.width),
+    "height": Double(rect.size.height),
+    "centerX": Double(rect.midX),
+    "centerY": Double(rect.midY)
+  ]
+}
+
+func cropImage(_ image: CGImage, region: CGRect) -> CGImage? {
+  let width = CGFloat(image.width)
+  let height = CGFloat(image.height)
+  var cropRect = CGRect(
+    x: max(0, min(width - 1, region.origin.x * width)),
+    y: max(0, min(height - 1, region.origin.y * height)),
+    width: max(1, min(width, region.size.width * width)),
+    height: max(1, min(height, region.size.height * height))
+  )
+  cropRect.origin.x = min(cropRect.origin.x, width - cropRect.size.width)
+  cropRect.origin.y = min(cropRect.origin.y, height - cropRect.size.height)
+  return image.cropping(to: cropRect)
+}
+
+func scaleImage(_ image: CGImage, scale: CGFloat) -> CGImage? {
+  if scale <= 1.01 {
+    return image
+  }
+  let width = max(1, Int(CGFloat(image.width) * scale))
+  let height = max(1, Int(CGFloat(image.height) * scale))
+  guard
+    let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+    let context = CGContext(
+      data: nil,
+      width: width,
+      height: height,
+      bitsPerComponent: 8,
+      bytesPerRow: 0,
+      space: colorSpace,
+      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+    )
+  else {
+    return image
+  }
+  context.interpolationQuality = .high
+  context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+  return context.makeImage()
+}
+
+let url = URL(fileURLWithPath: filePath)
+guard let source = CGImageSourceCreateWithURL(url as CFURL, nil), let baseImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+  let data = try JSONSerialization.data(withJSONObject: ["observations": []], options: [])
+  FileHandle.standardOutput.write(data)
+  exit(0)
+}
+
+var workingImage = baseImage
+var offsetX: CGFloat = 0
+var offsetY: CGFloat = 0
+let scaleFactor = max(CGFloat(1), requestedScale)
+
+if cropWidth > 0 && cropHeight > 0 {
+  var normalized = CGRect(
+    x: max(CGFloat(0), min(CGFloat(1), cropX)),
+    y: max(CGFloat(0), min(CGFloat(1), cropY)),
+    width: max(CGFloat(0.01), min(CGFloat(1), cropWidth)),
+    height: max(CGFloat(0.01), min(CGFloat(1), cropHeight))
+  )
+  if normalized.origin.x + normalized.size.width > 1 {
+    normalized.size.width = max(CGFloat(0.01), CGFloat(1) - normalized.origin.x)
+  }
+  if normalized.origin.y + normalized.size.height > 1 {
+    normalized.size.height = max(CGFloat(0.01), CGFloat(1) - normalized.origin.y)
+  }
+  offsetX = normalized.origin.x * CGFloat(baseImage.width)
+  offsetY = normalized.origin.y * CGFloat(baseImage.height)
+  if let cropped = cropImage(baseImage, region: normalized) {
+    workingImage = cropped
+  }
+}
+
+if let scaled = scaleImage(workingImage, scale: scaleFactor) {
+  workingImage = scaled
+}
+
+let request = VNRecognizeTextRequest()
+request.recognitionLevel = .accurate
+request.usesLanguageCorrection = true
+let handler = VNImageRequestHandler(cgImage: workingImage, options: [:])
+do {
+  try handler.perform([request])
+} catch {
+  let data = try JSONSerialization.data(withJSONObject: ["observations": []], options: [])
+  FileHandle.standardOutput.write(data)
+  exit(0)
+}
+
+let width = CGFloat(workingImage.width)
+let height = CGFloat(workingImage.height)
+let observations = (request.results ?? []).compactMap { observation -> [String: Any]? in
+  guard let candidate = observation.topCandidates(1).first else {
+    return nil
+  }
+  return [
+    "text": candidate.string,
+    "confidence": candidate.confidence,
+    "box": boxDictionary(
+      observation.boundingBox,
+      width: width,
+      height: height,
+      offsetX: offsetX,
+      offsetY: offsetY,
+      scale: scaleFactor
+    )
+  ]
+}
+
+let payload: [String: Any] = ["observations": observations]
+let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+FileHandle.standardOutput.write(data)
+`.trim();
+}
+
 export interface MacOSHostBridgeOptions {
   dataDir?: string;
   sidecarExecutablePath?: string | null;
@@ -167,21 +419,59 @@ export class MacOSHostBridge {
   }
 
   async getFrontmostApp(): Promise<unknown> {
-    return this.#requestSidecar("frontmost_app", {}, async () => {
-      const { stdout } = await execFileAsync("osascript", [
-        "-e",
-        'tell application "System Events" to get name of first application process whose frontmost is true'
-      ]);
-      return { appName: stdout.trim() };
-    }, { timeoutMs: 700 });
+    const swiftFallback = async () => {
+      const { stdout } = await execFileAsync("swift", ["-e", buildFrontmostAppSwiftScript()], {
+        maxBuffer: 1024 * 1024
+      });
+      const payload = JSON.parse(stdout.trim() || "{}") as { appName?: string; bundleIdentifier?: string };
+      return {
+        appName: String(payload.appName ?? "").trim(),
+        bundleIdentifier: String(payload.bundleIdentifier ?? "").trim()
+      };
+    };
+    const result = await this.#requestSidecar<Record<string, unknown>>("frontmost_app", {}, swiftFallback, { timeoutMs: 700 });
+    if (isUsableFrontmostApp(result as { appName?: string; bundleIdentifier?: string })) {
+      return result;
+    }
+    const windows = await this.listWindows().catch(() => ({ windows: [] }));
+    const firstWindow = Array.isArray(windows?.windows) ? windows.windows[0] : null;
+    if (firstWindow && String(firstWindow.ownerName ?? "").trim()) {
+      return {
+        appName: String(firstWindow.ownerName ?? "").trim(),
+        bundleIdentifier: ""
+      };
+    }
+    return swiftFallback();
   }
 
   async getPermissionsStatus(): Promise<SidecarPermissionsResult> {
-    return this.#requestSidecar<SidecarPermissionsResult>("permissions_status", {}, null, { timeoutMs: 1500 });
+    return this.#requestSidecar<SidecarPermissionsResult>("permissions_status", {}, async () => {
+      const { stdout } = await execFileAsync("swift", ["-e", buildPermissionsSwiftScript()], {
+        maxBuffer: 1024 * 1024
+      });
+      const payload = JSON.parse(stdout.trim() || "{}") as Partial<SidecarPermissionsResult>;
+      return {
+        accessibility: Boolean(payload.accessibility),
+        screenRecording: Boolean(payload.screenRecording)
+      };
+    }, { timeoutMs: 1500 });
   }
 
   async listWindows(): Promise<SidecarListWindowsResult> {
-    return this.#requestSidecar<SidecarListWindowsResult>("list_windows", {}, null, { timeoutMs: 1500 });
+    const fallback = async () => {
+      const { stdout } = await execFileAsync("swift", ["-e", buildListWindowsSwiftScript()], {
+        maxBuffer: 1024 * 1024 * 8
+      });
+      const payload = JSON.parse(stdout.trim() || "{}") as Partial<SidecarListWindowsResult>;
+      return {
+        windows: Array.isArray(payload.windows) ? payload.windows : []
+      };
+    };
+    const result = await this.#requestSidecar<SidecarListWindowsResult>("list_windows", {}, fallback, { timeoutMs: 1500 });
+    if (Array.isArray(result?.windows) && result.windows.length > 0) {
+      return result;
+    }
+    return fallback();
   }
 
   async getAccessibilitySnapshot(appName: string): Promise<SidecarAccessibilitySnapshotResult> {
@@ -220,6 +510,21 @@ export class MacOSHostBridge {
     return this.#requestSidecar("type_text", { text }, null);
   }
 
+  async pasteText(text: string): Promise<unknown> {
+    const previousClipboard = await this.#readClipboardText();
+    await this.#writeClipboardText(text);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      const result = await this.pressKey("v", ["cmd"]);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      return result;
+    } finally {
+      if (previousClipboard !== null) {
+        await this.#writeClipboardText(previousClipboard).catch(() => null);
+      }
+    }
+  }
+
   async pressKey(key: string, modifiers: string[] = []): Promise<unknown> {
     return this.#requestSidecar("key_press", { key, modifiers }, null);
   }
@@ -246,7 +551,15 @@ export class MacOSHostBridge {
         ...(region ? { region } : {}),
         ...(Number.isFinite(scale) && scale > 0 ? { scale } : {})
       },
-      null,
+      async () => {
+        const { stdout } = await execFileAsync("swift", ["-e", buildOcrSwiftScript(filePath, options)], {
+          maxBuffer: 1024 * 1024 * 8
+        });
+        const payload = JSON.parse(stdout.trim() || "{}") as Partial<SidecarOcrResult>;
+        return {
+          observations: Array.isArray(payload.observations) ? payload.observations : []
+        };
+      },
       { timeoutMs: 3500 }
     );
   }
@@ -264,6 +577,27 @@ export class MacOSHostBridge {
       cwd
     });
     return { stdout, stderr };
+  }
+
+  async #readClipboardText(): Promise<string | null> {
+    try {
+      const { stdout } = await execFileAsync("pbpaste", [], {
+        maxBuffer: 1024 * 1024 * 8
+      });
+      return stdout;
+    } catch {
+      return null;
+    }
+  }
+
+  async #writeClipboardText(text: string): Promise<void> {
+    await execFileAsync("zsh", ["-lc", "printf %s \"$AGENTOS_PASTE_TEXT\" | pbcopy"], {
+      env: {
+        ...process.env,
+        AGENTOS_PASTE_TEXT: text
+      },
+      maxBuffer: 1024 * 1024 * 8
+    });
   }
 
   async shutdown(): Promise<void> {

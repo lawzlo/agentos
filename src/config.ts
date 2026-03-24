@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { LivePack } from "./runtime/live-pack-registry.js";
+import type { LicenseTier } from "./types/system.js";
 
 const CHROME_CANDIDATES: Record<string, string[]> = {
   darwin: [
@@ -29,7 +30,7 @@ export interface AgentModelConfig {
   timeoutMs: number;
 }
 
-export type AgentModelProvider = "openai" | "anthropic" | "gemini" | "openai_compatible";
+export type AgentModelProvider = "openai" | "anthropic" | "gemini" | "openai_compatible" | "claude_code_cli";
 export type AgentModelTier = "fast" | "balanced" | "strong";
 
 export interface PersistedModelConfig {
@@ -53,6 +54,7 @@ export interface AgentOsConfig {
   browserExecutable?: string;
   livePacks: Record<string, LivePack> | null;
   model: AgentModelConfig;
+  license: LicenseConfig;
   learning: LearningConfig;
   jobs: JobsConfig;
 }
@@ -64,8 +66,19 @@ export interface ConfigOverrides {
   browserExecutable?: string;
   livePacks?: Record<string, LivePack> | null;
   model?: Partial<AgentModelConfig>;
+  license?: Partial<LicenseConfig>;
   learning?: Partial<LearningConfig>;
   jobs?: Partial<JobsConfig>;
+}
+
+export interface LicenseConfig {
+  baseUrl?: string;
+  publicKey?: string;
+  offlineGraceDays: number;
+  enforceInSource: boolean;
+  sourceCheckoutTier: LicenseTier;
+  freeMaxWatches: number;
+  proMaxWatches: number;
 }
 
 export interface LearningConfig {
@@ -89,13 +102,26 @@ function firstExisting(paths: string[]): string | undefined {
   return paths.find((entry) => fs.existsSync(entry));
 }
 
+function safeReadTextFile(targetPath: string | null | undefined): string | undefined {
+  const normalized = String(targetPath ?? "").trim();
+  if (!normalized) {
+    return undefined;
+  }
+  try {
+    return fs.readFileSync(path.isAbsolute(normalized) ? normalized : path.resolve(normalized), "utf8");
+  } catch {
+    return undefined;
+  }
+}
+
 const DEFAULT_MODEL_TIER: AgentModelTier = "balanced";
 
 const MODEL_LABELS: Record<AgentModelProvider, string> = {
   openai: "OpenAI",
   anthropic: "Anthropic Claude",
   gemini: "Google Gemini",
-  openai_compatible: "OpenAI-compatible"
+  openai_compatible: "OpenAI-compatible",
+  claude_code_cli: "Claude Code CLI"
 };
 
 const PROVIDER_DEFAULT_BASE_URL: Partial<Record<AgentModelProvider, string>> = {
@@ -124,6 +150,11 @@ const PROVIDER_DEFAULT_MODELS: Record<AgentModelProvider, Record<AgentModelTier,
     fast: null,
     balanced: null,
     strong: null
+  },
+  claude_code_cli: {
+    fast: "sonnet",
+    balanced: "sonnet",
+    strong: "opus"
   }
 };
 
@@ -137,11 +168,20 @@ function normalizeModelProvider(value: unknown): AgentModelProvider | null {
     return "openai_compatible";
   }
 
+  if (
+    normalized === "claude_code_cli" ||
+    normalized === "claude-code-cli" ||
+    normalized === "claude_code" ||
+    normalized === "claudecode"
+  ) {
+    return "claude_code_cli";
+  }
+
   if (normalized === "claude") {
     return "anthropic";
   }
 
-  return ["openai", "anthropic", "gemini", "openai_compatible"].includes(normalized)
+  return ["openai", "anthropic", "gemini", "openai_compatible", "claude_code_cli"].includes(normalized)
     ? (normalized as AgentModelProvider)
     : null;
 }
@@ -288,6 +328,19 @@ export function resolveConfig(overrides: ConfigOverrides = {}): AgentOsConfig {
       path.join(dataDir, "dist"),
       path.join(dataDir, "target")
     ];
+  const configuredLicensePublicKeyPath =
+    typeof process.env.AGENTOS_LICENSE_PUBLIC_KEY_PATH === "string"
+      ? process.env.AGENTOS_LICENSE_PUBLIC_KEY_PATH.trim()
+      : "";
+  const resolvedLicensePublicKey =
+    overrides.license?.publicKey ??
+    process.env.AGENTOS_LICENSE_PUBLIC_KEY ??
+    safeReadTextFile(configuredLicensePublicKeyPath);
+  const resolvedSourceCheckoutTier =
+    String(overrides.license?.sourceCheckoutTier ?? process.env.AGENTOS_LICENSE_SOURCE_TIER ?? "pro").trim().toLowerCase() ===
+    "free"
+      ? "free"
+      : "pro";
 
   return {
     port: Number(overrides.port ?? process.env.PORT ?? 3017),
@@ -320,6 +373,22 @@ export function resolveConfig(overrides: ConfigOverrides = {}): AgentOsConfig {
       timeoutMs: Number(
         overrides.model?.timeoutMs ?? process.env.MODEL_TIMEOUT_MS ?? persistedModel.timeoutMs ?? 45000
       )
+    },
+    license: {
+      baseUrl:
+        overrides.license?.baseUrl ??
+        process.env.AGENTOS_LICENSE_BASE_URL ??
+        process.env.AGENTOS_API_BASE_URL ??
+        undefined,
+      publicKey: resolvedLicensePublicKey,
+      offlineGraceDays: Number(
+        overrides.license?.offlineGraceDays ?? process.env.AGENTOS_LICENSE_OFFLINE_GRACE_DAYS ?? 14
+      ),
+      enforceInSource:
+        overrides.license?.enforceInSource ?? process.env.AGENTOS_LICENSE_ENFORCE_IN_SOURCE === "1",
+      sourceCheckoutTier: resolvedSourceCheckoutTier,
+      freeMaxWatches: Number(overrides.license?.freeMaxWatches ?? process.env.AGENTOS_FREE_MAX_WATCHES ?? 1),
+      proMaxWatches: Number(overrides.license?.proMaxWatches ?? process.env.AGENTOS_PRO_MAX_WATCHES ?? 10)
     },
     learning: {
       enabled: overrides.learning?.enabled ?? process.env.AGENTOS_LEARNING_ENABLED !== "false",

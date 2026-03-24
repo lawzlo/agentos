@@ -371,6 +371,14 @@ Add-Type -AssemblyName System.Windows.Forms
     });
   }
 
+  async pasteText(text: string): Promise<{ typed: number; text: string; method: string }> {
+    const result = await this.typeText(text);
+    return {
+      ...result,
+      method: "type"
+    };
+  }
+
   async pressKey(
     key: string,
     modifiers: string[] = []

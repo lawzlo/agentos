@@ -18,6 +18,8 @@ test("detectInstallSource reads bundled runtime metadata from a managed installa
         source: "macos_pkg",
         installRoot: "/opt/agentos/0.1.0",
         wrapperPath: "/usr/local/bin/agentos",
+        buildChannel: "stable",
+        licenseEnforced: true,
         bundledRuntime: true,
         runtimeExecutablePath: "/opt/agentos/0.1.0/runtime/bin/node"
       },
@@ -33,6 +35,8 @@ test("detectInstallSource reads bundled runtime metadata from a managed installa
     assert.equal(installSource.managedInstallation, true);
     assert.equal(installSource.bundledRuntime, true);
     assert.equal(installSource.runtimeExecutablePath, "/opt/agentos/0.1.0/runtime/bin/node");
+    assert.equal(installSource.buildChannel, "stable");
+    assert.equal(installSource.licenseEnforced, true);
   } finally {
     await fs.rm(tempDir, { recursive: true, force: true });
   }
@@ -49,8 +53,9 @@ test("detectInstallSource falls back to source mode when install metadata is mis
     assert.equal(installSource.managedInstallation, false);
     assert.equal(installSource.bundledRuntime, false);
     assert.equal(installSource.runtimeExecutablePath, process.execPath);
+    assert.equal(installSource.buildChannel, "source");
+    assert.equal(installSource.licenseEnforced, false);
   } finally {
     await fs.rm(tempDir, { recursive: true, force: true });
   }
 });
-
