@@ -913,6 +913,48 @@ test("desktop verify supports matching region text across multiple candidate reg
   assert.equal(result.details.regionTextAnyChecks[1]?.matched, true);
 });
 
+test("desktop verify can match region text against the combined OCR preview of a single region", async () => {
+  const { adapter } = createObserveAdapter();
+  adapter.bridge.getFrontmostApp = async () => ({ appName: "Microsoft Outlook" });
+  adapter.bridge.ocrImage = async () => ({
+    observations: [
+      {
+        text: "Thanks for your email.",
+        confidence: 0.96,
+        box: { x: 640, y: 340, width: 210, height: 24, centerX: 745, centerY: 352 }
+      },
+      {
+        text: "I received it and will follow up shortly.",
+        confidence: 0.95,
+        box: { x: 640, y: 372, width: 320, height: 24, centerX: 800, centerY: 384 }
+      }
+    ]
+  });
+
+  const result = await adapter.verify({
+    task: { id: "task_test" },
+    workspace: {
+      id: "workspace_test",
+      artifactsPath: "/tmp",
+      rootPath: "/tmp"
+    },
+    traceId: "trace_test",
+    expectation: {
+      frontmostApp: "Outlook",
+      regionTextVisible: {
+        text: "Thanks for your email. I received it and will follow up shortly.",
+        region: { x: 0.38, y: 0.27, width: 0.22, height: 0.14 },
+        scale: 2.4
+      }
+    }
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.details.frontmostApp, "Outlook");
+  assert.equal(result.details.regionTextVisible, true);
+  assert.equal((result.details.regionTextMatch as { source?: string } | undefined)?.source, "combined_preview");
+});
+
 test("desktop verify falls back to matching windows when frontmost app lookup times out", async () => {
   const { adapter } = createObserveAdapter({
     frontmostMs: 10,

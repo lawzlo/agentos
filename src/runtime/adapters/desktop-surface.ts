@@ -104,6 +104,32 @@ function observationMatchesQuery(text: unknown, query: string) {
   );
 }
 
+function combinedObservationPreview(observations: Array<{ text?: unknown }> = []): string {
+  return uniqueStrings(observations.map((entry) => entry?.text)).join(" ").trim();
+}
+
+function findRegionObservationMatch(
+  observations: Array<{ text?: unknown; confidence?: unknown; box?: unknown }> = [],
+  query: string
+) {
+  const directMatch = observations.find((entry) => observationMatchesQuery(entry?.text, query)) ?? null;
+  if (directMatch) {
+    return directMatch;
+  }
+
+  const combinedText = combinedObservationPreview(observations);
+  if (!combinedText || !observationMatchesQuery(combinedText, query)) {
+    return null;
+  }
+
+  return {
+    text: combinedText,
+    confidence: null,
+    box: null,
+    source: "combined_preview"
+  };
+}
+
 function normalizeCompactSearchText(value: unknown) {
   return String(value ?? "")
     .replace(/[\s\p{P}\p{S}]+/gu, "")
@@ -1313,8 +1339,7 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
         ...(Number.isFinite(scale) && scale > 0 ? { scale } : {})
       });
       const observations = Array.isArray(result?.observations) ? result.observations : [];
-      const match =
-        observations.find((entry) => observationMatchesQuery(entry?.text, regionTextVisible.text)) ?? null;
+      const match = findRegionObservationMatch(observations, regionTextVisible.text);
       details.regionTextVisible = Boolean(match);
       details.regionTextQuery = regionTextVisible.text;
       if (region) {
@@ -1322,6 +1347,7 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
       }
       if (!match) {
         details.regionTextPreview = uniqueStrings(observations.map((entry) => entry?.text)).slice(0, 8);
+        details.regionTextCombinedPreview = combinedObservationPreview(observations) || null;
         return { ok: false, details };
       }
       details.regionTextMatch = match;
@@ -1350,12 +1376,13 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
           ...(Number.isFinite(scale) && scale > 0 ? { scale } : {})
         });
         const observations = Array.isArray(result?.observations) ? result.observations : [];
-        const match = observations.find((observation) => observationMatchesQuery(observation?.text, text)) ?? null;
+        const match = findRegionObservationMatch(observations, text);
         attemptedChecks.push({
           text,
           ...(region ? { region } : {}),
           ...(Number.isFinite(scale) && scale > 0 ? { scale } : {}),
           preview: uniqueStrings(observations.map((observation) => observation?.text)).slice(0, 8),
+          combinedPreview: combinedObservationPreview(observations) || null,
           matched: Boolean(match)
         });
         if (match) {

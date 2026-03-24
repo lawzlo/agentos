@@ -673,3 +673,47 @@ setTimeout(() => {
     await fs.rm(tempDir, { recursive: true, force: true });
   }
 });
+
+test("claude_code_cli reports a clear reauthentication message when the local Claude session has expired", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agentos-claude-code-reauth-"));
+  const fakeCliPath = path.join(tempDir, "fake-claude-reauth");
+  const previousCli = process.env.AGENTOS_CLAUDE_CODE_BIN;
+  process.env.AGENTOS_CLAUDE_CODE_BIN = fakeCliPath;
+
+  try {
+    await fs.writeFile(
+      fakeCliPath,
+      `#!/usr/bin/env node
+console.error("OAuth token has expired. Please obtain a new token or refresh your existing token.");
+process.exit(1);
+`,
+      "utf8"
+    );
+    await fs.chmod(fakeCliPath, 0o755);
+
+    const client = new AgentModelClient({
+      provider: "claude_code_cli",
+      name: "sonnet",
+      tier: "balanced",
+      timeoutMs: 5000
+    });
+
+    await assert.rejects(
+      () =>
+        client.draftReply({
+          goal: "Reply politely",
+          livePack: "outlook-desktop",
+          summary: "Need a quick reply",
+          context: ["Please confirm receipt."]
+        }),
+      /claude \/login/i
+    );
+  } finally {
+    if (previousCli === undefined) {
+      delete process.env.AGENTOS_CLAUDE_CODE_BIN;
+    } else {
+      process.env.AGENTOS_CLAUDE_CODE_BIN = previousCli;
+    }
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});

@@ -70,6 +70,8 @@ export interface ModelClientStatus {
   tier: AgentModelTier | null;
 }
 
+type ClaudeCodeCliErrorKind = "reauth_required" | "unavailable" | "failed";
+
 function emptyUsageSummary(): UsageSummary {
   return {
     requestCount: 0,
@@ -148,6 +150,40 @@ function claudeCodeCommand(): string {
   return String(process.env.AGENTOS_CLAUDE_CODE_BIN ?? process.env.CLAUDE_CODE_BIN ?? "claude").trim() || "claude";
 }
 
+class ClaudeCodeCliError extends Error {
+  kind: ClaudeCodeCliErrorKind;
+  stderr: string;
+
+  constructor(kind: ClaudeCodeCliErrorKind, message: string, stderr = "") {
+    super(message);
+    this.name = "ClaudeCodeCliError";
+    this.kind = kind;
+    this.stderr = stderr;
+  }
+}
+
+function classifyClaudeCodeCliError(detail: string): ClaudeCodeCliErrorKind {
+  const normalized = String(detail ?? "").toLowerCase();
+  if (
+    normalized.includes("oauth token has expired")
+    || normalized.includes("please obtain a new token")
+    || normalized.includes("run claude /login")
+    || normalized.includes("reauth")
+    || normalized.includes("authentication required")
+  ) {
+    return "reauth_required";
+  }
+  if (
+    normalized.includes("enoent")
+    || normalized.includes("not found")
+    || normalized.includes("command not found")
+    || normalized.includes("spawn claude")
+  ) {
+    return "unavailable";
+  }
+  return "failed";
+}
+
 async function runClaudeCodeCommand(args: string[], timeoutMs: number): Promise<{ stdout: string; stderr: string }> {
   return await new Promise((resolve, reject) => {
     const child = spawn(claudeCodeCommand(), args, {
@@ -183,7 +219,8 @@ async function runClaudeCodeCommand(args: string[], timeoutMs: number): Promise<
         clearTimeout(timeoutHandle);
         timeoutHandle = null;
       }
-      reject(error);
+      const detail = error instanceof Error ? error.message : String(error ?? "Claude Code CLI process failed");
+      reject(new ClaudeCodeCliError(classifyClaudeCodeCliError(detail), detail, detail));
     });
     child.on("close", (code, signal) => {
       if (settled) {
@@ -200,8 +237,10 @@ async function runClaudeCodeCommand(args: string[], timeoutMs: number): Promise<
         resolve({ stdout, stderr });
         return;
       }
-      const suffix = stderr.trim() ? `: ${stderr.trim().slice(0, 400)}` : signal ? ` (signal: ${signal})` : "";
-      reject(new Error(`Claude Code CLI exited with code ${code ?? "unknown"}${suffix}`));
+      const trimmedStderr = stderr.trim();
+      const suffix = trimmedStderr ? `: ${trimmedStderr.slice(0, 400)}` : signal ? ` (signal: ${signal})` : "";
+      const message = `Claude Code CLI exited with code ${code ?? "unknown"}${suffix}`;
+      reject(new ClaudeCodeCliError(classifyClaudeCodeCliError(trimmedStderr || message), message, trimmedStderr));
     });
   });
 }
@@ -802,6 +841,14 @@ export class AgentModelClient {
       }
       return parseJsonPayload<TResponse>(String(payload.result ?? ""), schemaName);
     } catch (error) {
+      if (error instanceof ClaudeCodeCliError) {
+        if (error.kind === "reauth_required") {
+          throw new Error("Claude Code CLI requires reauthentication. Run `claude /login` in your terminal and try again.");
+        }
+        if (error.kind === "unavailable") {
+          throw new Error("Claude Code CLI is unavailable. Install `claude` or point AGENTOS_CLAUDE_CODE_BIN at a working Claude Code binary.");
+        }
+      }
       const stderr =
         error && typeof error === "object" && "stderr" in error ? String((error as { stderr?: unknown }).stderr ?? "").trim() : "";
       const detail = stderr ? `: ${stderr.slice(0, 400)}` : "";
