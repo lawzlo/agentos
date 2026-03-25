@@ -22,6 +22,11 @@ import {
   inferOutlookSemanticFacts,
   type OutlookSemanticFacts
 } from "./outlook-semantic-facts.js";
+import {
+  inferSlackSemanticFacts,
+  normalizeSlackSummary,
+  type SlackSemanticFacts
+} from "./slack-semantic-facts.js";
 import { inferReplyLanguage } from "./reply-language.js";
 import { packDefaultReplyPolicy } from "./reply-policy.js";
 import type { SurfaceRegistry } from "./surface-registry.js";
@@ -664,6 +669,7 @@ async function draftPackReply({
 }): Promise<LivePackDraftResponse> {
   const bossSemanticFacts = ((metadata ?? {}) as { semanticFacts?: BossSemanticFacts | null }).semanticFacts ?? null;
   const outlookSemanticFacts = ((metadata ?? {}) as { semanticFacts?: OutlookSemanticFacts | null }).semanticFacts ?? null;
+  const slackSemanticFacts = ((metadata ?? {}) as { semanticFacts?: SlackSemanticFacts | null }).semanticFacts ?? null;
   const effectiveContext =
     livePack === "boss-browser" && bossSemanticFacts
       ? uniqueStrings([
@@ -677,6 +683,12 @@ async function draftPackReply({
             ...outlookSemanticFacts.salientContext,
             ...context
           ]).filter(Boolean)
+        : livePack.startsWith("slack-") && slackSemanticFacts
+          ? uniqueStrings([
+              slackSemanticFacts.latestInboundMessage,
+              ...slackSemanticFacts.salientContext,
+              ...context
+            ]).filter(Boolean)
         : context;
   const stylePreferences = learnedReplyStylePreferences({
     controlPlane,
@@ -1041,14 +1053,6 @@ function wechatPrefillVerificationExpectation(): Record<string, unknown> {
       scale: 2.2
     }
   };
-}
-
-function normalizeSlackSummary(value: string): string {
-  return String(value ?? "")
-    .replace(/^[●•]\s*/u, "")
-    .replace(/^(unread thread|unread|mention|new message|new messages|未读|新消息)\s*[:：-]?\s*/iu, "")
-    .replace(/\s+\(\d+\)$/u, "")
-    .trim();
 }
 
 function slackChromeKey(text: string): string {
@@ -8308,7 +8312,19 @@ function createSlackPack({
             String(thread.replyReason ?? "").trim(),
             ...contextForSignal(effectiveWorldState, { text: openTarget })
           ]).slice(0, 4);
-          const itemFingerprint = fingerprint(`${name}:${surface}:${rule.workspaceName ?? "default"}:${openTarget}:${context.join("|")}`);
+          const semanticFacts = await inferSlackSemanticFacts({
+            modelClient: controlPlane.modelClient,
+            worldState: effectiveWorldState,
+            summary: openTarget,
+            preferredLatestSnippet: String(thread.latestSnippet ?? "").trim() || null,
+            threadSummary: openTarget
+          });
+          const semanticContext = uniqueStrings([
+            semanticFacts.latestInboundMessage,
+            ...semanticFacts.salientContext,
+            ...context
+          ]).filter(Boolean).slice(0, 6);
+          const itemFingerprint = fingerprint(`${name}:${surface}:${rule.workspaceName ?? "default"}:${openTarget}:${semanticContext.join("|")}`);
           if (dedupeState.lastFingerprint === itemFingerprint) {
             return null;
           }
@@ -8317,11 +8333,11 @@ function createSlackPack({
             fingerprint: itemFingerprint,
             summary: openTarget,
             text: openTarget,
-            context,
+            context: semanticContext,
             inputs: {
               watchItemText: openTarget,
               watchSummary: openTarget,
-              watchContext: context.join("\n"),
+              watchContext: semanticContext.join("\n"),
               openTarget,
               threadTitle: openTarget,
               openX: openPoint.x,
@@ -8346,7 +8362,7 @@ function createSlackPack({
                 packName: name,
                 surface,
                 summary: openTarget,
-                context,
+                context: semanticContext,
                 openTarget,
                 candidate: {
                   id: "slack-vision-unread",
@@ -8355,7 +8371,10 @@ function createSlackPack({
                   isInteractive: true,
                   bounds: threadBounds
                 } as InteractionCandidate
-              })
+              }),
+              semanticFacts,
+              ...(semanticFacts.senderName ? { sender: semanticFacts.senderName } : {}),
+              ...(semanticFacts.speakerRole === "sender" ? { direction: "inbound" as const } : {})
             },
             taskSpec: {
               preferredSurface: "desktop",
@@ -8384,8 +8403,19 @@ function createSlackPack({
       }
 
       const context = contextForSignal(worldState, { text: candidate.text || summary });
+      const semanticFacts = await inferSlackSemanticFacts({
+        modelClient: controlPlane.modelClient,
+        worldState,
+        summary,
+        threadSummary: summary
+      });
+      const semanticContext = uniqueStrings([
+        semanticFacts.latestInboundMessage,
+        ...semanticFacts.salientContext,
+        ...context
+      ]).filter(Boolean).slice(0, 6);
       const itemFingerprint = fingerprint(
-        `${name}:${surface}:${rule.workspaceName ?? "default"}:${summary}:${context.join("|")}`
+        `${name}:${surface}:${rule.workspaceName ?? "default"}:${summary}:${semanticContext.join("|")}`
       );
       if (dedupeState.lastFingerprint === itemFingerprint) {
         return null;
@@ -8395,28 +8425,49 @@ function createSlackPack({
         fingerprint: itemFingerprint,
         summary,
         text: summary,
-        context,
+        context: semanticContext,
         inputs: {
           watchItemText: summary,
           watchSummary: summary,
-          watchContext: context.join("\n"),
+          watchContext: semanticContext.join("\n"),
           openTarget: String(candidate.text ?? summary).trim() || summary
         },
-        metadata: buildConversationMetadata({
-          packName: name,
-          surface,
-          summary,
-          context,
-          openTarget: String(candidate.text ?? summary).trim() || summary,
-          candidate
-        })
+        metadata: {
+          ...buildConversationMetadata({
+            packName: name,
+            surface,
+            summary,
+            context: semanticContext,
+            openTarget: String(candidate.text ?? summary).trim() || summary,
+            candidate
+          }),
+          semanticFacts,
+          ...(semanticFacts.senderName ? { sender: semanticFacts.senderName } : {}),
+          ...(semanticFacts.speakerRole === "sender" ? { direction: "inbound" as const } : {})
+        }
       };
     },
     async extractContext(args) {
       if (surface === "desktop" && args.detection.metadata?.visualAnalysis) {
         const summary = String(args.detection.summary ?? "").trim();
-        const context = Array.isArray(args.detection.context) ? args.detection.context : [];
+        const fallbackContext = Array.isArray(args.detection.context) ? args.detection.context : [];
         const openTarget = String(args.detection.inputs?.openTarget ?? summary).trim() || summary;
+        const semanticFacts =
+          ((args.detection.metadata ?? {}) as { semanticFacts?: SlackSemanticFacts | null }).semanticFacts
+          ?? await inferSlackSemanticFacts({
+            modelClient: args.controlPlane.modelClient,
+            worldState: args.worldState,
+            summary: openTarget,
+            threadSummary: openTarget,
+            preferredLatestSnippet: String(
+              ((args.detection.metadata?.visualThread as { latestSnippet?: unknown } | null)?.latestSnippet ?? "")
+            ).trim() || null
+          });
+        const context = uniqueStrings([
+          semanticFacts.latestInboundMessage,
+          ...semanticFacts.salientContext,
+          ...fallbackContext
+        ]).filter(Boolean).slice(0, 6);
         return {
           summary,
           context,
@@ -8435,7 +8486,10 @@ function createSlackPack({
               context,
               openTarget,
               candidate: (args.detection.metadata?.openCandidate ?? null) as InteractionCandidate | Record<string, unknown> | null
-            })
+            }),
+            semanticFacts,
+            ...(semanticFacts.senderName ? { sender: semanticFacts.senderName } : {}),
+            ...(semanticFacts.speakerRole === "sender" ? { direction: "inbound" as const } : {})
           },
           taskSpec: args.detection.taskSpec ?? undefined
         };
@@ -8448,8 +8502,19 @@ function createSlackPack({
       const composeTarget = pickSlackComposeQuery(threadState, surface);
       const sendTarget = pickSlackSendQuery(threadState, surface);
       const summary = String(args.detection.summary ?? "").trim();
-      const context = extractSlackThreadContext(threadState, summary);
+      const fallbackContext = extractSlackThreadContext(threadState, summary);
       const openTarget = String(args.detection.inputs?.openTarget ?? summary).trim() || summary;
+      const semanticFacts = await inferSlackSemanticFacts({
+        modelClient: args.controlPlane.modelClient,
+        worldState: threadState,
+        summary: openTarget,
+        threadSummary: openTarget
+      });
+      const context = uniqueStrings([
+        semanticFacts.latestInboundMessage,
+        ...semanticFacts.salientContext,
+        ...fallbackContext
+      ]).filter(Boolean).slice(0, 6);
       return {
         summary,
         context,
@@ -8469,7 +8534,10 @@ function createSlackPack({
             context,
             openTarget,
             candidate: (args.detection.metadata?.openCandidate ?? null) as InteractionCandidate | Record<string, unknown> | null
-          })
+          }),
+          semanticFacts,
+          ...(semanticFacts.senderName ? { sender: semanticFacts.senderName } : {}),
+          ...(semanticFacts.speakerRole === "sender" ? { direction: "inbound" as const } : {})
         },
         taskSpec: {
           preferredSurface: surface,
@@ -8487,7 +8555,8 @@ function createSlackPack({
         family: "chat",
         goal: rule.goal,
         summary,
-        context
+        context,
+        metadata: detection.metadata ?? null
       });
     }
   };

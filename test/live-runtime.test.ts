@@ -1564,6 +1564,7 @@ test("slack desktop pack can detect unread threads and build reply steps from a 
   assert.equal(context?.inputs?.sendTarget, "Send");
   assert.equal(context?.metadata?.threadKey, "acme renewal");
   assert.equal(context?.metadata?.sender, "Customer");
+  assert.equal((context?.metadata?.semanticFacts as { latestInboundMessage?: string } | undefined)?.latestInboundMessage, "Customer: Can you share pricing?");
   assert.equal(Array.isArray(context?.taskSpec?.steps), true);
   assert.equal(context?.taskSpec?.steps?.[0]?.action, "clickTarget");
   assert.equal(context?.taskSpec?.steps?.[2]?.params?.text, "{{typeText}}");
@@ -2055,6 +2056,75 @@ test("slack desktop pack can use visual model analysis to build a prefill task w
     "Focus Slack composer area",
     "Type Slack reply",
     "Verify Slack prefill"
+  ]);
+  assert.equal((detection?.metadata?.semanticFacts as { latestInboundMessage?: string } | undefined)?.latestInboundMessage, "Can you take a look at this?");
+});
+
+test("slack desktop pack draft replies enrich model context with semantic facts", async () => {
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({})
+  });
+  const pack = registry.get("slack-desktop");
+  let receivedContext: string[] | null = null;
+
+  const reply = await pack?.draftReply?.({
+    rule: {
+      id: "watch-slack-semantic-draft",
+      goal: "Always watch Slack and reply to unread threads",
+      enabled: true,
+      status: "watching",
+      preferredSurface: "desktop",
+      workspaceName: "slack-desktop-main",
+      skillName: null,
+      appTarget: "Slack",
+      livePack: "slack-desktop",
+      pollIntervalMs: 1000,
+      watchProfile: {},
+      taskInputs: {},
+      dedupeState: {},
+      lastObservedAt: null,
+      lastTriggeredAt: null,
+      lastError: null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    } as WatchRule,
+    detection: {
+      summary: "Acme renewal",
+      context: ["Acme renewal", "Teammate: Keep it short."],
+      metadata: {
+        semanticFacts: {
+          latestInboundMessage: "Customer: Can you share pricing?",
+          salientContext: ["Customer: Can you share pricing?"],
+          senderName: "Customer",
+          speakerRole: "sender",
+          threadSummary: "Acme renewal",
+          replyLanguageHint: "en",
+          source: "model",
+          evidence: "latest customer question visible"
+        }
+      }
+    } as never,
+    controlPlane: {
+      listReplyStylePreferences: () => [],
+      modelClient: {
+        isConfigured: () => true,
+        async draftReply({ context }) {
+          receivedContext = Array.isArray(context) ? [...context] : null;
+          return {
+            replyText: "Happy to share pricing shortly.",
+            confidence: 0.9,
+            rationale: "semantic facts included"
+          };
+        }
+      }
+    } as never
+  });
+
+  assert.equal(reply?.replyText, "Happy to share pricing shortly.");
+  assert.deepEqual(receivedContext, [
+    "Customer: Can you share pricing?",
+    "Acme renewal",
+    "Teammate: Keep it short."
   ]);
 });
 
