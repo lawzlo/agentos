@@ -13407,6 +13407,242 @@ test("boss browser extractContext dismisses the duplicate-login modal before gro
   assert.equal(context?.inputs?.typeTarget, "");
 });
 
+test("boss browser semantic facts can use model-backed unlabeled thread lines", async () => {
+  let opened = false;
+  const initialWorldState = {
+    version: 1,
+    surface: "browser",
+    workspaceId: "workspace-boss-semantic-facts",
+    appContext: {
+      title: "BOSS直聘",
+      url: "http://boss.local/boss"
+    },
+    capture: {
+      path: "/tmp/boss-browser-main-semantic-facts.png",
+      metadata: {
+        windowBounds: {
+          x: 0,
+          y: 0,
+          width: 1440,
+          height: 960,
+          centerX: 720,
+          centerY: 480
+        }
+      }
+    },
+    ocrBlocks: [],
+    interactionCandidates: [
+      {
+        id: "boss-candidate-lazaro",
+        surface: "browser",
+        kind: "link",
+        text: "Lazaro Waters",
+        role: "link",
+        bounds: { x: 16, y: 18, width: 220, height: 32, centerX: 126, centerY: 34 },
+        confidence: 0.91,
+        sourceHints: { source: "browser", ariaLabel: "Lazaro Waters", href: "/boss/candidate?id=lazaro" },
+        isInteractive: true
+      }
+    ],
+    visibleText: [
+      "BOSS直聘",
+      "Lazaro Waters",
+      "Partnerships Coordinator",
+      "Curious, are you using AWS or Google Cloud?"
+    ].join("\n"),
+    recentActions: [],
+    summary: "BOSS candidate list",
+    timestamp: new Date().toISOString()
+  };
+  const threadWorldState = {
+    ...initialWorldState,
+    appContext: {
+      title: "Lazaro Waters - BOSS直聘",
+      url: "http://boss.local/boss/candidate?id=lazaro"
+    },
+    interactionCandidates: [
+      {
+        id: "reply-box",
+        surface: "browser",
+        kind: "textarea",
+        text: "",
+        role: "textbox",
+        bounds: { x: 620, y: 760, width: 420, height: 80, centerX: 830, centerY: 800 },
+        confidence: 0.88,
+        sourceHints: { source: "browser", placeholder: "Message Lazaro Waters", tag: "textarea" },
+        isInteractive: true
+      },
+      {
+        id: "send",
+        surface: "browser",
+        kind: "button",
+        text: "Send",
+        role: "button",
+        bounds: { x: 1060, y: 760, width: 64, height: 32, centerX: 1092, centerY: 776 },
+        confidence: 0.86,
+        sourceHints: { source: "browser", ariaLabel: "Send message", tag: "button" },
+        isInteractive: true
+      }
+    ],
+    visibleText: [
+      "BOSS直聘",
+      "Lazaro Waters",
+      "Partnerships Coordinator",
+      "Curious, are you using AWS or Google Cloud?",
+      "We help funded startups stretch runway by getting them $50-100k+ in cloud credits.",
+      "在线沟通",
+      "Message Lazaro Waters",
+      "Send"
+    ].join("\n")
+  };
+  const fakeSurface = {
+    async observe() {
+      return opened ? threadWorldState : initialWorldState;
+    },
+    async act({ step }: { step: { action: string } }) {
+      if (step.action === "clickTarget" || step.action === "clickAt") {
+        opened = true;
+      }
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      browser: fakeSurface as never
+    })
+  });
+  const pack = registry.get("boss-browser");
+  const rule: WatchRule = {
+    id: "watch-boss-semantic-facts",
+    goal: "Always watch BOSS直聘 and reply to candidate messages",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "browser",
+    workspaceName: "boss-browser-main",
+    skillName: null,
+    appTarget: null,
+    livePack: "boss-browser",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {
+      startUrl: "http://boss.local/boss"
+    },
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-boss-semantic-facts",
+    name: "boss-browser-main",
+    rootPath: "/tmp/boss-browser-main",
+    profilePath: "/tmp/boss-browser-main/profile",
+    downloadsPath: "/tmp/boss-browser-main/downloads",
+    artifactsPath: "/tmp/boss-browser-main/artifacts",
+    scratchPath: "/tmp/boss-browser-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const semanticModelClient = {
+    isConfigured: () => true,
+    supportsImageJson: () => false,
+    async completeJson() {
+      return {
+        latestInboundMessage: "Curious, are you using AWS or Google Cloud?",
+        salientContext: [
+          "Curious, are you using AWS or Google Cloud?",
+          "We help funded startups stretch runway by getting them $50-100k+ in cloud credits."
+        ],
+        speakerRole: "candidate",
+        threadSummary: "Lazaro Waters",
+        evidence: "latest candidate question and context are visible in the thread"
+      };
+    }
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: initialWorldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: semanticModelClient
+    } as never
+  });
+
+  assert.equal(detection?.context?.[0], "Curious, are you using AWS or Google Cloud?");
+  assert.equal((detection?.metadata?.semanticFacts as { source?: string } | undefined)?.source, "model");
+
+  const context = await pack?.extractContext?.({
+    rule,
+    worldState: initialWorldState as never,
+    detection: detection as never,
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: semanticModelClient
+    } as never
+  });
+
+  assert.equal(context?.context?.[0], "Curious, are you using AWS or Google Cloud?");
+  assert.equal((context?.metadata?.semanticFacts as { latestInboundMessage?: string } | undefined)?.latestInboundMessage, "Curious, are you using AWS or Google Cloud?");
+});
+
+test("boss browser heuristic drafts can use semantic facts instead of prefixed chat heuristics", async () => {
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({})
+  });
+  const pack = registry.get("boss-browser");
+  const reply = await pack?.draftReply?.({
+    rule: {
+      id: "watch-boss-semantic-draft",
+      goal: "Always watch BOSS直聘 and reply to candidate messages",
+      enabled: true,
+      status: "watching",
+      preferredSurface: "browser",
+      workspaceName: "boss-browser-main",
+      skillName: null,
+      appTarget: null,
+      livePack: "boss-browser",
+      pollIntervalMs: 1000,
+      watchProfile: {},
+      taskInputs: {},
+      dedupeState: {},
+      lastObservedAt: null,
+      lastTriggeredAt: null,
+      lastError: null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    } as WatchRule,
+    detection: {
+      summary: "Lazaro Waters",
+      context: ["Lazaro Waters", "Partnerships Coordinator"],
+      metadata: {
+        semanticFacts: {
+          latestInboundMessage: "Curious, are you using AWS or Google Cloud?",
+          salientContext: ["Curious, are you using AWS or Google Cloud?"],
+          speakerRole: "candidate",
+          threadSummary: "Lazaro Waters",
+          source: "model",
+          evidence: "candidate question visible"
+        }
+      }
+    } as never,
+    controlPlane: {
+      listReplyStylePreferences: () => [],
+      modelClient: {
+        isConfigured: () => false
+      }
+    } as never
+  });
+
+  assert.equal(reply?.replyText, "Thanks for your note. I saw the cloud partnership details and will review it before following up shortly.");
+});
+
 test("mail browser watch rules infer the browser pack, draft replies, and can be approved into tasks", async () => {
   const dataDir = await createTempDir();
   const mail = await startMailFixtureServer();

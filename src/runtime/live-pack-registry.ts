@@ -127,6 +127,17 @@ interface DesktopVisualAnalysis {
   prefillVisible?: boolean | null;
 }
 
+interface BossSemanticFacts {
+  latestInboundMessage: string | null;
+  salientContext: string[];
+  speakerRole: "candidate" | "recruiter" | "unknown";
+  threadSummary: string | null;
+  source: "model" | "heuristic" | "vision";
+  evidence: string;
+}
+
+type BossSemanticModelClient = Pick<LivePackControlPlane["modelClient"], "isConfigured" | "completeJson"> | null | undefined;
+
 interface WeChatVisualAnalysis {
   openThread: string | null;
   visibleUnreadThreads: WeChatVisualThreadSummary[];
@@ -662,8 +673,220 @@ function extractBossConversationContextLines(lines: string[], normalizedSummary:
   );
 }
 
-function pickBossReplyTopic(context: string[], language: "zh" | "en"): string | null {
-  const normalizedContext = context.map((entry) => sanitizeBossReplySnippet(entry)).filter(Boolean);
+function resolveBossContextWindow(
+  worldState: WorldState | null,
+  summary: string,
+  {
+    trailingWindow = 5,
+    includePreviousLine = true,
+    excludeComposeChrome = false
+  }: {
+    trailingWindow?: number;
+    includePreviousLine?: boolean;
+    excludeComposeChrome?: boolean;
+  } = {}
+): string[] {
+  const lines = visibleLines(worldState).filter((line) => !isBossUiChrome(line));
+  const normalizedSummary = normalizeBossSummary(summary);
+  const summaryIndex = lines.findIndex((line) => normalizeBossSummary(line) === normalizedSummary);
+  const startIndex =
+    summaryIndex === -1
+      ? 0
+      : Math.max(0, summaryIndex - (includePreviousLine ? 1 : 0));
+  const pool = summaryIndex === -1 ? lines : lines.slice(startIndex, summaryIndex + trailingWindow);
+  return excludeComposeChrome
+    ? pool.filter((line) => !/^(发送消息|message|reply|chat|contact|沟通|回复|输入|联系)/iu.test(line.trim()))
+    : pool;
+}
+
+function fallbackBossSemanticFacts({
+  worldState,
+  summary,
+  preferredLatestSnippet = null,
+  threadSummary = null,
+  trailingWindow = 6,
+  excludeComposeChrome = false
+}: {
+  worldState: WorldState | null;
+  summary: string;
+  preferredLatestSnippet?: string | null;
+  threadSummary?: string | null;
+  trailingWindow?: number;
+  excludeComposeChrome?: boolean;
+}): BossSemanticFacts {
+  const contextLines = (
+    excludeComposeChrome
+      ? extractBossThreadContext(worldState, summary)
+      : extractBossContext(worldState, summary)
+  ).slice(0, Math.max(1, trailingWindow));
+  const normalizedPreferredSnippet = sanitizeBossReplySnippet(String(preferredLatestSnippet ?? ""));
+  const latestInboundMessage =
+    normalizedPreferredSnippet && !bossSnippetLooksLikeProfileMetadata(normalizedPreferredSnippet)
+      ? normalizedPreferredSnippet
+      : (contextLines
+          .map((line) => sanitizeBossReplySnippet(line))
+          .find((line) => bossSnippetLooksUsable(line)) ?? null);
+  const salientContext = uniqueStrings([
+    latestInboundMessage,
+    ...contextLines
+  ]).filter(Boolean).slice(0, 6);
+  return {
+    latestInboundMessage,
+    salientContext,
+    speakerRole: "candidate",
+    threadSummary: normalizeBossSummary(threadSummary || summary) || null,
+    source: preferredLatestSnippet ? "vision" : "heuristic",
+    evidence: preferredLatestSnippet ? "vision latest snippet with heuristic context fallback" : "heuristic context extraction"
+  };
+}
+
+function canonicalizeBossSemanticLine(line: string, sourceLines: string[]): string | null {
+  const normalized = normalizeBossSummary(line);
+  if (!normalized) {
+    return null;
+  }
+
+  const exact = sourceLines.find((entry) => normalizeBossSummary(entry) === normalized);
+  if (exact) {
+    return exact.trim();
+  }
+
+  const fuzzy = sourceLines.find((entry) => {
+    const entrySummary = normalizeBossSummary(entry);
+    return entrySummary && (entrySummary.includes(normalized) || normalized.includes(entrySummary));
+  });
+  return fuzzy?.trim() ?? null;
+}
+
+async function inferBossSemanticFacts({
+  modelClient,
+  worldState,
+  summary,
+  preferredLatestSnippet = null,
+  threadSummary = null,
+  trailingWindow = 6,
+  excludeComposeChrome = false
+}: {
+  modelClient: BossSemanticModelClient;
+  worldState: WorldState | null;
+  summary: string;
+  preferredLatestSnippet?: string | null;
+  threadSummary?: string | null;
+  trailingWindow?: number;
+  excludeComposeChrome?: boolean;
+}): Promise<BossSemanticFacts> {
+  const fallback = fallbackBossSemanticFacts({
+    worldState,
+    summary,
+    preferredLatestSnippet,
+    threadSummary,
+    trailingWindow,
+    excludeComposeChrome
+  });
+
+  if (!modelClient?.isConfigured?.() || typeof modelClient.completeJson !== "function") {
+    return fallback;
+  }
+
+  const visibleConversationLines = resolveBossContextWindow(worldState, summary, {
+    trailingWindow,
+    excludeComposeChrome
+  })
+    .map((line) => String(line ?? "").trim())
+    .filter(Boolean)
+    .slice(0, 18);
+  if (!visibleConversationLines.length) {
+    return fallback;
+  }
+
+  try {
+    const result = await modelClient.completeJson<
+      {
+        summary: string;
+        threadSummary: string | null;
+        preferredLatestSnippet: string | null;
+        visibleConversationLines: string[];
+        heuristicContext: string[];
+      },
+      {
+        latestInboundMessage: string | null;
+        salientContext: string[];
+        speakerRole: "candidate" | "recruiter" | "unknown";
+        threadSummary: string | null;
+        evidence: string | null;
+      }
+    >({
+      schemaName: "agentos_boss_semantic_facts",
+      schema: {
+        type: "object",
+        properties: {
+          latestInboundMessage: { type: ["string", "null"] },
+          salientContext: { type: "array", items: { type: "string" } },
+          speakerRole: { type: "string", enum: ["candidate", "recruiter", "unknown"] },
+          threadSummary: { type: ["string", "null"] },
+          evidence: { type: ["string", "null"] }
+        },
+        required: ["latestInboundMessage", "salientContext", "speakerRole", "threadSummary", "evidence"],
+        additionalProperties: false
+      },
+      systemPrompt: [
+        "You extract semantic conversation facts for AgentOS from BOSS直聘 chat text.",
+        "Use only the supplied visibleConversationLines. Do not invent or rewrite lines.",
+        "Ignore candidate names, role/location metadata, browser chrome, and message composer placeholders.",
+        "latestInboundMessage must be the latest visible message from the candidate that the recruiter should reply to.",
+        "salientContext should contain up to 4 exact visible lines that best preserve the candidate's request.",
+        "speakerRole should describe who wrote latestInboundMessage.",
+        "threadSummary should be the candidate name or short thread title when visible.",
+        "Return strict JSON only."
+      ].join(" "),
+      userPayload: {
+        summary,
+        threadSummary,
+        preferredLatestSnippet,
+        visibleConversationLines,
+        heuristicContext: fallback.salientContext
+      },
+      temperature: 0
+    });
+
+    const latestInboundMessage = canonicalizeBossSemanticLine(String(result.latestInboundMessage ?? ""), visibleConversationLines);
+    const salientContext = uniqueStrings(
+      (Array.isArray(result.salientContext) ? result.salientContext : [])
+        .map((line) => canonicalizeBossSemanticLine(String(line ?? ""), visibleConversationLines))
+        .filter((line): line is string => Boolean(line))
+    ).slice(0, 6);
+    const normalizedThreadSummary = normalizeBossSummary(String(result.threadSummary ?? threadSummary ?? summary));
+
+    if (!latestInboundMessage && !salientContext.length) {
+      return fallback;
+    }
+
+    return {
+      latestInboundMessage: latestInboundMessage ?? fallback.latestInboundMessage,
+      salientContext: uniqueStrings([
+        latestInboundMessage,
+        ...salientContext,
+        ...fallback.salientContext
+      ]).filter(Boolean).slice(0, 6),
+      speakerRole: result.speakerRole ?? fallback.speakerRole,
+      threadSummary: normalizedThreadSummary || fallback.threadSummary,
+      source: "model",
+      evidence: String(result.evidence ?? "").trim() || "model semantic conversation facts"
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+function pickBossReplyTopic(
+  context: string[],
+  language: "zh" | "en",
+  latestInboundMessage: string | null = null
+): string | null {
+  const normalizedContext = uniqueStrings([
+    sanitizeBossReplySnippet(String(latestInboundMessage ?? "")),
+    ...context.map((entry) => sanitizeBossReplySnippet(entry))
+  ]).filter(Boolean);
   const prioritizedContext = [...normalizedContext].reverse();
   const snippet =
     prioritizedContext.find(
@@ -706,20 +929,26 @@ function pickBossReplyTopic(context: string[], language: "zh" | "en"): string | 
 function draftBossHeuristicReply({
   summary,
   context,
+  semanticFacts = null,
   stylePreferences,
   modelError
 }: {
   summary: string;
   context: string[];
+  semanticFacts?: BossSemanticFacts | null;
   stylePreferences: string[];
   modelError: string | null;
 }): LivePackDraftResponse {
-  const replyLanguageHint = inferReplyLanguage({ summary, context });
+  const semanticContext = uniqueStrings([
+    String(semanticFacts?.latestInboundMessage ?? "").trim(),
+    ...context
+  ]).filter(Boolean);
+  const replyLanguageHint = inferReplyLanguage({ summary, context: semanticContext });
   const chinese =
     replyLanguageHint === "zh"
-    || (replyLanguageHint === null && /[\u4e00-\u9fff]/u.test(`${summary} ${context.join(" ")} ${stylePreferences.join(" ")}`));
+    || (replyLanguageHint === null && /[\u4e00-\u9fff]/u.test(`${summary} ${semanticContext.join(" ")} ${stylePreferences.join(" ")}`));
   const wantsConcise = /(?:short|concise|brief|直接|简短|简洁)/iu.test(stylePreferences.join(" "));
-  const topic = pickBossReplyTopic(context, chinese ? "zh" : "en");
+  const topic = pickBossReplyTopic(semanticContext, chinese ? "zh" : "en", semanticFacts?.latestInboundMessage ?? null);
 
   const replyText = chinese
     ? wantsConcise
@@ -756,7 +985,8 @@ async function draftPackReply({
   family,
   goal,
   summary,
-  context
+  context,
+  metadata = null
 }: {
   controlPlane: LivePackControlPlane;
   livePack: string;
@@ -765,7 +995,9 @@ async function draftPackReply({
   goal: string;
   summary: string;
   context: string[];
+  metadata?: Record<string, unknown> | null;
 }): Promise<LivePackDraftResponse> {
+  const semanticFacts = ((metadata ?? {}) as { semanticFacts?: BossSemanticFacts | null }).semanticFacts ?? null;
   const stylePreferences = learnedReplyStylePreferences({
     controlPlane,
     livePack,
@@ -800,6 +1032,7 @@ async function draftPackReply({
     return draftBossHeuristicReply({
       summary,
       context,
+      semanticFacts,
       stylePreferences,
       modelError
     });
@@ -10814,11 +11047,19 @@ function createBossPack(): LivePack {
         return null;
       }
 
+      const semanticFacts = await inferBossSemanticFacts({
+        modelClient: controlPlane.modelClient,
+        worldState: effectiveWorldState,
+        summary: candidate.text || summary,
+        preferredLatestSnippet: String(visualThread?.latestSnippet ?? "").trim() || null,
+        threadSummary: summary,
+        trailingWindow: 5
+      });
       const context = uniqueStrings([
-        String(visualThread?.latestSnippet ?? "").trim(),
+        semanticFacts.latestInboundMessage,
         String(visualThread?.replyReason ?? "").trim(),
-        ...extractBossContext(effectiveWorldState, candidate.text || summary)
-      ]).slice(0, 5);
+        ...semanticFacts.salientContext
+      ]).filter(Boolean).slice(0, 5);
       const itemFingerprint = fingerprint(
         `boss-browser:${rule.workspaceName ?? "default"}:${summary}:${context.join("|")}`
       );
@@ -10863,6 +11104,13 @@ function createBossPack(): LivePack {
             openTarget: deriveBossOpenTarget(String(candidate.text ?? summary)) || summary,
             candidate
           }),
+          ...(semanticFacts.speakerRole === "candidate"
+            ? {
+                sender: "候选人",
+                direction: "inbound"
+              }
+            : {}),
+          semanticFacts,
           skillName: "boss-open-candidate"
         }
       };
@@ -10885,10 +11133,19 @@ function createBossPack(): LivePack {
             worldState: threadState
           }).catch(() => null)
         : null;
+      const semanticFacts = await inferBossSemanticFacts({
+        modelClient: args.controlPlane.modelClient,
+        worldState: threadState,
+        summary,
+        preferredLatestSnippet: String(pickDesktopVisualUnreadThread(vision)?.latestSnippet ?? "").trim() || null,
+        threadSummary: visibleThreadSummary || summary,
+        trailingWindow: 8,
+        excludeComposeChrome: true
+      });
       const context = uniqueStrings([
-        String(pickDesktopVisualUnreadThread(vision)?.latestSnippet ?? "").trim(),
-        ...extractBossThreadContext(threadState, summary)
-      ]).slice(0, 6);
+        semanticFacts.latestInboundMessage,
+        ...semanticFacts.salientContext
+      ]).filter(Boolean).slice(0, 6);
       const replyWorkflow = wantsBossReplyWorkflow(args.rule.goal);
       const detectedOpenTarget = String(args.detection.inputs?.openTarget ?? summary).trim() || summary;
       const resolvedThreadNameIsUsable =
@@ -10982,6 +11239,13 @@ function createBossPack(): LivePack {
             openTarget,
             candidate: (args.detection.metadata?.openCandidate ?? null) as InteractionCandidate | Record<string, unknown> | null
           }),
+          ...(semanticFacts.speakerRole === "candidate"
+            ? {
+                sender: "候选人",
+                direction: "inbound"
+              }
+            : {}),
+          semanticFacts,
           ...(args.detection.metadata?.skillName ? { skillName: args.detection.metadata.skillName } : {})
         },
         ...(replyWorkflow
@@ -11008,7 +11272,8 @@ function createBossPack(): LivePack {
         family: "generic",
         goal: rule.goal,
         summary,
-        context
+        context,
+        metadata: ((detection?.metadata ?? null) as Record<string, unknown> | null) ?? null
       });
     }
   };

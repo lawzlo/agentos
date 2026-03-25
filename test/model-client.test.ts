@@ -546,7 +546,7 @@ if (schema.properties && schema.properties.steps) {
       ]
     }
   }));
-} else {
+} else if (schema.properties && schema.properties.replyText) {
   process.stdout.write(JSON.stringify({
     type: "result",
     subtype: "success",
@@ -555,6 +555,19 @@ if (schema.properties && schema.properties.steps) {
     structured_output: {
       replyText: "Local Claude Code reply",
       confidence: 0.91
+    }
+  }));
+} else {
+  process.stdout.write(JSON.stringify({
+    type: "result",
+    subtype: "success",
+    is_error: false,
+    result: "",
+    structured_output: {
+      latestInboundMessage: "Can we talk Wednesday afternoon?",
+      salientContext: ["Can we talk Wednesday afternoon?"],
+      speakerRole: "candidate",
+      threadSummary: "Lazaro Waters"
     }
   }));
 }
@@ -587,6 +600,35 @@ if (schema.properties && schema.properties.steps) {
       context: ["Can you send a quick acknowledgment?"]
     });
     assert.equal(draft.replyText, "Local Claude Code reply");
+
+    const semanticFacts = await client.completeJson<
+      { thread: string },
+      {
+        latestInboundMessage: string;
+        salientContext: string[];
+        speakerRole: string;
+        threadSummary: string;
+      }
+    >({
+      schemaName: "agentos_boss_semantic_facts",
+      schema: {
+        type: "object",
+        properties: {
+          latestInboundMessage: { type: "string" },
+          salientContext: { type: "array", items: { type: "string" } },
+          speakerRole: { type: "string" },
+          threadSummary: { type: "string" }
+        },
+        required: ["latestInboundMessage", "salientContext", "speakerRole", "threadSummary"],
+        additionalProperties: false
+      },
+      systemPrompt: "Return semantic facts.",
+      userPayload: {
+        thread: "Lazaro Waters"
+      }
+    });
+    assert.equal(semanticFacts.latestInboundMessage, "Can we talk Wednesday afternoon?");
+    assert.equal(semanticFacts.speakerRole, "candidate");
 
     const captured = JSON.parse(await fs.readFile(capturePath, "utf8"));
     assert.equal(captured.args.includes("-p"), true);

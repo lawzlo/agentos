@@ -655,6 +655,22 @@ export class AgentModelClient {
     throw new Error(`Image JSON analysis is not supported for provider ${this.config.provider}.`);
   }
 
+  async completeJson<TPayload, TResponse>({
+    schemaName,
+    schema,
+    systemPrompt,
+    userPayload,
+    temperature = 0
+  }: JsonSchemaRequest<TPayload>): Promise<TResponse> {
+    return this.#requestJson<TPayload, TResponse>({
+      schemaName,
+      schema,
+      systemPrompt,
+      userPayload,
+      temperature
+    });
+  }
+
   async #requestOpenAICompatibleJson<TPayload, TResponse>({
     schemaName,
     schema,
