@@ -2,11 +2,15 @@ import crypto from "node:crypto";
 import path from "node:path";
 import { minimumLicenseTierForPack } from "../license.js";
 import type { ControlPlane } from "./control-plane.js";
+import { defaultBrowserStartUrlForPack } from "./browser-pack-defaults.js";
 import {
-  browserPackLabel,
-  defaultBrowserStartUrlForPack,
-  inferBrowserManualInterventionFromUrl
-} from "./browser-pack-defaults.js";
+  detectBrowserManualIntervention,
+  inferBrowserPageUrl,
+  isDriveUiChrome,
+  isFeishuDocsUiChrome,
+  isGoogleDocsUiChrome,
+  normalizeDocsSummary
+} from "./browser-pack-utils.js";
 import {
   isExpectedDesktopForeground,
   isOutlookDesktopForeground,
@@ -22,6 +26,32 @@ import {
   sanitizeBossReplySnippet,
   type BossSemanticFacts
 } from "./boss-semantic-facts.js";
+import {
+  deriveBossComposeFallbackBounds,
+  deriveBossComposeFallbackPoint,
+  deriveBossOpenTarget,
+  deriveBossTopVisibleRowPoint,
+  deriveBossVisionRowPoint,
+  extractBossContext,
+  extractBossThreadContext,
+  findBossCandidate,
+  findBossComposeCandidate,
+  findBossDuplicateLoginConfirmCandidate,
+  findBossListCandidateByTarget,
+  findBossSendCandidate,
+  hasBossDuplicateLoginModal,
+  isBossLikelyMidListCandidate,
+  isLowQualityBossSummary,
+  isBossSiteAlertConfirmModal,
+  isBossUiChrome,
+  isBrowserUiChrome,
+  pickBossComposeQuery,
+  pickBossSendQuery,
+  pickBossThreadName,
+  scoreBossCandidate,
+  scoreBossTargetNameMatch,
+  sanitizeBossOpenCandidate
+} from "./boss-pack-utils.js";
 import { draftPackReply as draftPackReplyInternal } from "./live-pack-drafting.js";
 import {
   buildBossReplySteps,
@@ -145,6 +175,7 @@ interface DesktopSurfaceReadinessProbe {
   }) => Promise<{ ready: boolean }>;
 }
 export type { DesktopProbeCandidateSummary } from "./surface-signal-utils.js";
+export { detectBrowserManualIntervention } from "./browser-pack-utils.js";
 
 export interface DesktopConversationPackAnalysis {
   packName: string;
@@ -317,31 +348,9 @@ interface LivePackMarkHandledArgs {
 type LivePackSurface = "browser" | "desktop";
 
 const SEND_PATTERN = /(send|reply|submit|发送|回复|提交)/iu;
-const BOSS_TIMESTAMP_PATTERN = /^(?:(?:[01]?\d|2[0-3]):[0-5]\d|昨天|today|yesterday|刚刚)$/iu;
 const UNREAD_PATTERN = /(unread|mention|new message|new messages|未读|新消息)/iu;
 const WECHAT_UI_CHROME_PATTERN =
   /^(wechat|微信|搜索|search|send|发送|reply|回复|聊天信息|聊天记录|通讯录|contacts|发现|moments|我|me|文件传输助手|表情|图片|文件|语音消息)$/iu;
-const BOSS_UI_CHROME_PATTERN =
-  /^(boss直聘|boss zhipin|boss|搜索|search|筛选|filter|推荐|推荐牛人|消息|message|messages|职位|jobs|候选人列表|沟通|在线沟通|立即沟通|发消息|发送|send|查看简历)$/iu;
-const BROWSER_UI_CHROME_PATTERN =
-  /^(your repositories|application:\s|new tab|https?:\/\/|www\.|[\w.-]+\.(com|cn|io|ai|co|org|net|app|cloud|info)(\/.*)?$)/iu;
-const GOOGLE_DRIVE_UI_CHROME_PATTERN =
-  /^(google drive|my drive|priority|recent|shared with me|shared drives|starred|trash|upload to drive|drive uploaded|search)$/iu;
-const GOOGLE_DOCS_UI_CHROME_PATTERN =
-  /^(google docs|google docs editor|save google doc|saved in google docs|share|comment|format|insert|tools|extensions)$/iu;
-const FEISHU_DOCS_UI_CHROME_PATTERN =
-  /^(feishu docs|飞书文档编辑区|保存到飞书|已保存到飞书|分享|评论|工具栏|更多)$/iu;
-const LOGIN_REQUIRED_PATTERN =
-  /(sign in|log in|login|sign into|continue with|重新登录|重新登入|请登录|请先登录|登录继续|登录后继续|登入|登陆|登录|扫码登录)/iu;
-const SESSION_EXPIRED_PATTERN =
-  /(session expired|sign in again|log in again|reauthenticate|重新登录|会话已过期|登录已过期|登录失效|当前登录状态已失效|登录状态已失效|身份已过期)/iu;
-const VERIFICATION_REQUIRED_PATTERN =
-  /(captcha|recaptcha|hcaptcha|verify you are human|verify you're human|security check|bot check|are you human|人机验证|验证码|安全验证|验证你是人类|请完成验证)/iu;
-const ACCESS_DENIED_PATTERN =
-  /(access denied|forbidden|permission denied|unauthorized|not authorized|拒绝访问|无权限|没有权限|访问受限)/iu;
-const BOSS_DUPLICATE_LOGIN_MODAL_PATTERN =
-  /(账号已经登录过了?|请勿重复登录|重复登录|已在其他窗口登录|已经登录过)/iu;
-const BOSS_MODAL_CONFIRM_PATTERN = /^(ok|确定)$/iu;
 
 function createWatchTask(rule: WatchRule): TaskRecord {
   const timestamp = new Date().toISOString();
@@ -4627,67 +4636,6 @@ function extractWeChatThreadContext(worldState: WorldState | null, summary: stri
   ).slice(0, 4);
 }
 
-function hasBossThreadContent(worldState: WorldState | null): boolean {
-  const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
-  const threadSignals = candidates.filter((candidate) => {
-    const source = String(((candidate.sourceHints ?? {}) as Record<string, unknown>).source ?? "").trim().toLowerCase();
-    if (!source.startsWith("ocr-boss-thread")) {
-      return false;
-    }
-    const summary = normalizeBossSummary(candidate.text || candidateHintText(candidate));
-    return Boolean(summary) && !isLowQualityBossSummary(summary) && !isBossUiChrome(summary);
-  });
-  if (threadSignals.length >= 2) {
-    return true;
-  }
-
-  const visible = String(worldState?.visibleText ?? "");
-  return /在线沟通/u.test(visible) && /boss/iu.test(String(worldState?.appContext?.title ?? ""));
-}
-
-function deriveBossComposeFallbackPoint(worldState: WorldState | null): { x: number; y: number } | null {
-  if (!hasBossThreadContent(worldState)) {
-    return null;
-  }
-  return { x: 0.47, y: 0.87 };
-}
-
-function deriveBossComposeFallbackBounds(worldState: WorldState | null): InteractionCandidate["bounds"] | null {
-  if (!hasBossThreadContent(worldState)) {
-    return null;
-  }
-  const frame = ((worldState?.capture as { metadata?: { windowBounds?: InteractionCandidate["bounds"] } } | null)?.metadata
-    ?.windowBounds ?? null) as InteractionCandidate["bounds"] | null;
-  if (!frame) {
-    return null;
-  }
-
-  const x = Number(frame.x ?? 0);
-  const y = Number(frame.y ?? 0);
-  const width = Number(frame.width ?? 0);
-  const height = Number(frame.height ?? 0);
-  if (!(width > 0 && height > 0)) {
-    return null;
-  }
-
-  const left = x + width * 0.44;
-  const top = y + height * 0.79;
-  const right = x + width * 0.95;
-  const bottom = y + height * 0.95;
-  if (!(right > left && bottom > top)) {
-    return null;
-  }
-
-  return {
-    x: left,
-    y: top,
-    width: right - left,
-    height: bottom - top,
-    centerX: left + (right - left) / 2,
-    centerY: top + (bottom - top) / 2
-  };
-}
-
 function deriveWeChatComposerFallback(worldState: WorldState | null): { x: number; y: number } | null {
   const bounds = findDesktopWindowBounds(worldState, "WeChat");
   if (!bounds) {
@@ -4726,580 +4674,9 @@ async function deriveWeChatVisualComposerFallback(
   return { x, y };
 }
 
-function deriveBossOpenTarget(value: string): string {
-  const normalized = normalizeBossSummary(value);
-  if (!normalized) {
-    return "";
-  }
-
-  const separatorPrefix = normalized.split(/\s*[·•｜|]\s*/u)[0]?.trim() ?? "";
-  if (separatorPrefix && separatorPrefix !== normalized) {
-    return separatorPrefix;
-  }
-
-  const cjkLead = normalized.match(/^([\u4e00-\u9fff]{2,8})\s+\S+/u);
-  if (cjkLead?.[1]) {
-    return cjkLead[1];
-  }
-
-  return normalized;
-}
-
-function scoreBossTargetNameMatch(candidateText: string, target: string): number | null {
-  const summary = normalizeBossSummary(candidateText);
-  const normalizedTarget = normalizeBossSummary(target);
-  if (!summary || !normalizedTarget) {
-    return null;
-  }
-  if (summary === normalizedTarget) {
-    return 120;
-  }
-  if (summary.startsWith(normalizedTarget) || normalizedTarget.startsWith(summary)) {
-    return 108;
-  }
-  if (summary.includes(normalizedTarget) || normalizedTarget.includes(summary)) {
-    return 96;
-  }
-  return null;
-}
-
-function findBossListCandidateByTarget(
-  worldState: WorldState | null,
-  target: string
-): InteractionCandidate | null {
-  const normalizedTarget = normalizeBossSummary(target);
-  if (!normalizedTarget) {
-    return null;
-  }
-
-  const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
-  const ranked = candidates
-    .filter((candidate) => {
-      const source = String(((candidate.sourceHints ?? {}) as Record<string, unknown>).source ?? "").trim().toLowerCase();
-      return source.startsWith("ocr-boss-list");
-    })
-    .map((candidate) => ({
-      candidate,
-      score: scoreBossTargetNameMatch(candidate.text || candidateHintText(candidate), normalizedTarget)
-    }))
-    .filter((entry): entry is { candidate: InteractionCandidate; score: number } => Number.isFinite(entry.score))
-    .sort((left, right) => {
-      const scoreDelta = right.score - left.score;
-      if (scoreDelta !== 0) {
-        return scoreDelta;
-      }
-      const leftY = Number(left.candidate.bounds?.centerY ?? Number.POSITIVE_INFINITY);
-      const rightY = Number(right.candidate.bounds?.centerY ?? Number.POSITIVE_INFINITY);
-      return leftY - rightY;
-    });
-  return ranked[0]?.candidate ?? null;
-}
-
-function isBossLikelyMidListCandidate(candidate: InteractionCandidate | null | undefined, worldState: WorldState | null): boolean {
-  if (!candidate) {
-    return false;
-  }
-  const source = String(((candidate.sourceHints ?? {}) as Record<string, unknown>).source ?? "").trim().toLowerCase();
-  if (!source.startsWith("ocr-boss-list")) {
-    return false;
-  }
-  const centerY = Number(candidate.bounds?.centerY ?? NaN);
-  const appBounds = ((worldState?.capture?.metadata ?? {}) as {
-    windowBounds?: { y?: number; height?: number };
-  }).windowBounds;
-  const threshold =
-    Number.isFinite(Number(appBounds?.y)) && Number.isFinite(Number(appBounds?.height))
-      ? Number(appBounds?.y) + Number(appBounds?.height) * 0.38
-      : Number.NaN;
-  return Number.isFinite(centerY) && Number.isFinite(threshold) && centerY > threshold;
-}
-
-function deriveBossTopVisibleRowPoint(worldState: WorldState | null): { x: number; y: number } | null {
-  const frame = ((worldState?.capture as { metadata?: { windowBounds?: InteractionCandidate["bounds"] } } | null)?.metadata
-    ?.windowBounds ?? null) as InteractionCandidate["bounds"] | null;
-  if (!frame) {
-    return null;
-  }
-  return { x: 0.31, y: 0.275 };
-}
-
-function deriveBossVisionRowPoint(
-  visionThread: DesktopVisualThreadSummary | null | undefined
-): { x: number; y: number } | null {
-  const box = visionThread?.approxBox ?? null;
-  if (!box) {
-    return null;
-  }
-  const centerY = clampUnit(box.y + box.height * 0.5, 0.275);
-  return {
-    x: 0.31,
-    y: centerY
-  };
-}
-
-function pickBossThreadName(worldState: WorldState | null, fallback: string): string {
-  const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
-  const frame = ((worldState?.capture as { metadata?: { windowBounds?: InteractionCandidate["bounds"] } } | null)?.metadata
-    ?.windowBounds ?? null) as InteractionCandidate["bounds"] | null;
-  const headerCutoff =
-    Number.isFinite(Number(frame?.y)) && Number.isFinite(Number(frame?.height))
-      ? Number(frame?.y) + Number(frame?.height) * 0.26
-      : Number.NaN;
-  const ranked = candidates
-    .filter((candidate) => {
-      const source = String(((candidate.sourceHints ?? {}) as Record<string, unknown>).source ?? "").trim().toLowerCase();
-      if (!source.startsWith("ocr-boss-thread")) {
-        return false;
-      }
-      const summary = normalizeBossSummary(candidate.text || candidateHintText(candidate));
-      if (!summary || isLowQualityBossSummary(summary) || isBossUiChrome(summary)) {
-        return false;
-      }
-      const centerY = Number(candidate.bounds?.centerY ?? NaN);
-      return !Number.isFinite(headerCutoff) || !Number.isFinite(centerY) || centerY <= headerCutoff;
-    })
-    .sort((left, right) => {
-      const leftY = Number(left.bounds?.centerY ?? Number.POSITIVE_INFINITY);
-      const rightY = Number(right.bounds?.centerY ?? Number.POSITIVE_INFINITY);
-      return leftY - rightY;
-    });
-  return normalizeBossSummary(ranked[0]?.text || candidateHintText(ranked[0])) || fallback;
-}
-
-function isLowQualityBossSummary(summary: string): boolean {
-  const normalized = normalizeBossSummary(summary);
-  if (!normalized) {
-    return true;
-  }
-  if (BOSS_TIMESTAMP_PATTERN.test(normalized)) {
-    return true;
-  }
-
-  const chars = Array.from(normalized);
-  const allowedChars = chars.filter((char) => /[\u4e00-\u9fffA-Za-z0-9\s._&@'’\-+()/]/u.test(char));
-  const suspiciousChars = chars.filter((char) => !/[\u4e00-\u9fffA-Za-z0-9\s._&@'’\-+()/]/u.test(char));
-  const alphaNumericOrCjkChars = chars.filter((char) => /[\u4e00-\u9fffA-Za-z0-9]/u.test(char));
-  const asciiWordTokens = normalized.match(/[A-Za-z]+/gu) ?? [];
-
-  if (alphaNumericOrCjkChars.length === 0) {
-    return true;
-  }
-  if (!/[\u4e00-\u9fff]/u.test(normalized) && asciiWordTokens.length > 0 && asciiWordTokens.every((token) => token.length <= 1)) {
-    return true;
-  }
-  if (allowedChars.length <= Math.floor(chars.length / 2)) {
-    return true;
-  }
-  if (suspiciousChars.length >= 2 && suspiciousChars.length >= Math.ceil(chars.length / 3)) {
-    return true;
-  }
-
-  return false;
-}
-
-function normalizeDocsSummary(value: string, prefixes: string[] = []): string {
-  let summary = String(value ?? "")
-    .replace(/^[●•]\s*/u, "")
-    .replace(/^\(\d+\)\s*/u, "")
-    .replace(/\s+\(\d+\)$/u, "")
-    .trim();
-
-  for (const prefix of prefixes) {
-    const pattern = new RegExp(`^${prefix}\\s*[:：-]?\\s*`, "iu");
-    summary = summary.replace(pattern, "").trim();
-  }
-
-  return summary;
-}
-
-function isBossUiChrome(text: string): boolean {
-  return BOSS_UI_CHROME_PATTERN.test(String(text ?? "").trim());
-}
-
-function isBrowserUiChrome(text: string): boolean {
-  return BROWSER_UI_CHROME_PATTERN.test(String(text ?? "").trim());
-}
-
-function isDriveUiChrome(text: string): boolean {
-  return GOOGLE_DRIVE_UI_CHROME_PATTERN.test(String(text ?? "").trim());
-}
-
-function isGoogleDocsUiChrome(text: string): boolean {
-  return GOOGLE_DOCS_UI_CHROME_PATTERN.test(String(text ?? "").trim());
-}
-
-function isFeishuDocsUiChrome(text: string): boolean {
-  return FEISHU_DOCS_UI_CHROME_PATTERN.test(String(text ?? "").trim());
-}
-
-function inferBrowserPageUrl(worldState: WorldState | null): string | null {
-  const url = String(((worldState?.appContext ?? {}) as { url?: unknown }).url ?? "").trim();
-  return /^https?:\/\//u.test(url) ? url : null;
-}
-
-export function detectBrowserManualIntervention({
-  packName,
-  worldState,
-  rule,
-  dedupeState = {}
-}: {
-  packName: string;
-  worldState: WorldState | null;
-  rule: WatchRule;
-  dedupeState?: Record<string, unknown>;
-}): WatchDetection | null {
-  const lines = visibleLines(worldState).slice(0, 40);
-  const pageText = lines.join("\n");
-  const url = inferBrowserPageUrl(worldState);
-  const packLabel = browserPackLabel(packName);
-  const baseInputs = {
-    startUrl: String(rule.taskInputs?.startUrl ?? rule.taskInputs?.url ?? url ?? defaultBrowserStartUrlForPack(packName) ?? "").trim()
-  };
-
-  let kind: WatchDetectionMetadata["manualInterventionKind"] = null;
-  let detail = "";
-  let action = "";
-  let summary = "";
-
-  const manualInterventionFromUrl = inferBrowserManualInterventionFromUrl({ packName, url });
-  if (manualInterventionFromUrl) {
-    kind = manualInterventionFromUrl.kind;
-    summary = manualInterventionFromUrl.summary;
-    detail = manualInterventionFromUrl.detail;
-    action = manualInterventionFromUrl.action;
-  }
-
-  if (!kind && !pageText.trim()) {
-    return null;
-  }
-
-  if (!kind && VERIFICATION_REQUIRED_PATTERN.test(pageText)) {
-    kind = "verification";
-    summary = `${packLabel} needs a human verification step`;
-    detail = `${packLabel} is showing a verification or CAPTCHA page. AgentOS should pause this watch until you clear it manually.`;
-    action = `Open ${packLabel} in the AgentOS browser workspace, complete the verification once, then let the watch continue.`;
-  } else if (!kind && SESSION_EXPIRED_PATTERN.test(pageText)) {
-    kind = "session_expired";
-    summary = `${packLabel} session expired`;
-    detail = `${packLabel} looks signed out or the browser session expired. AgentOS cannot continue this watch until the session is restored.`;
-    action = `Open ${packLabel} in the AgentOS browser workspace and sign in again, then retry the watch.`;
-  } else if (!kind && LOGIN_REQUIRED_PATTERN.test(pageText)) {
-    kind = "login";
-    summary = `${packLabel} needs sign-in`;
-    detail = `${packLabel} is asking for sign-in before AgentOS can continue watching it.`;
-    action = `Open ${packLabel} in the AgentOS browser workspace and sign in once, then retry the watch.`;
-  } else if (!kind && ACCESS_DENIED_PATTERN.test(pageText)) {
-    kind = "access_denied";
-    summary = `${packLabel} access is blocked`;
-    detail = `${packLabel} is showing an access or permission error. AgentOS cannot continue until the account or page access is fixed.`;
-    action = `Check the current ${packLabel} account and permissions in the AgentOS browser workspace, then retry the watch.`;
-  }
-
-  if (!kind) {
-    return null;
-  }
-
-  const fingerprintValue = fingerprint(`${packName}:manual:${kind}:${url ?? ""}:${pageText.slice(0, 500)}`);
-  if (dedupeState.lastFingerprint === fingerprintValue) {
-    return null;
-  }
-
-  return {
-    fingerprint: fingerprintValue,
-    summary,
-    goal: `${summary}. ${action}`,
-    text: summary,
-    context: lines.slice(0, 6),
-    inputs: {
-      watchSummary: summary,
-      watchContext: lines.slice(0, 6).join("\n"),
-      ...baseInputs
-    },
-    metadata: {
-      surface: "browser",
-      requiresAttention: true,
-      requiresManualIntervention: true,
-      manualInterventionKind: kind,
-      manualInterventionDetail: detail,
-      manualInterventionAction: action
-    }
-  };
-}
-
-function scoreBossCandidate({
-  candidate,
-  worldState
-}: {
-  candidate: InteractionCandidate;
-  worldState: WorldState | null;
-}): number | null {
-  const hintText = candidateHintText(candidate);
-  const summary = normalizeBossSummary(candidate.text || hintText);
-  if (!summary || isLowQualityBossSummary(summary) || isBossUiChrome(summary) || isBrowserUiChrome(summary) || SEND_PATTERN.test(summary)) {
-    return null;
-  }
-
-  const centerX = Number(candidate.bounds?.centerX ?? NaN);
-  const appBounds = ((worldState?.capture?.metadata ?? {}) as {
-    windowBounds?: { x?: number; width?: number };
-  }).windowBounds;
-  const candidateListRightCutoff =
-    Number.isFinite(Number(appBounds?.x)) && Number.isFinite(Number(appBounds?.width))
-      ? Number(appBounds?.x) + Number(appBounds?.width) * 0.48
-      : Number.NaN;
-  if (Number.isFinite(centerX) && Number.isFinite(candidateListRightCutoff) && centerX >= candidateListRightCutoff) {
-    return null;
-  }
-
-  let score = candidate.isInteractive ? 12 : 4;
-  if (candidate.role === "button" || candidate.role === "link") {
-    score += 4;
-  }
-  if (/(candidate|候选人|resume|简历|new candidate|新候选人|待沟通|待跟进|沟通中|message|消息|chat|在线沟通)/iu.test(hintText)) {
-    score += 24;
-  }
-
-  const lines = visibleLines(worldState);
-  for (const [index, line] of lines.entries()) {
-    if (!/(candidate|候选人|新候选人|待沟通|待跟进|消息|沟通)/iu.test(line)) {
-      continue;
-    }
-    const nearby = lines
-      .slice(Math.max(0, index - 1), index + 6)
-      .some((entry) => entry.includes(summary) || summary.includes(normalizeBossSummary(entry)));
-    if (nearby) {
-      score += 16;
-      break;
-    }
-  }
-
-  if (summary.length >= 2 && summary.length <= 80) {
-    score += 3;
-  }
-  if (/[\u4e00-\u9fff]/u.test(summary)) {
-    score += 2;
-  }
-  const confidence = Number(candidate.confidence ?? NaN);
-  const source = String(((candidate.sourceHints ?? {}) as Record<string, unknown>).source ?? "");
-  if (source.startsWith("ocr-boss-") && Number.isFinite(confidence) && confidence < 0.55) {
-    score -= 18;
-  }
-  if (source === "ocr-boss-list-names") {
-    score += 22;
-  }
-  if (!source.startsWith("ocr-boss-list")) {
-    score -= 12;
-  }
-
-  return score;
-}
-
-function bossCandidateSourcePriority(candidate: InteractionCandidate): number {
-  const source = String(((candidate.sourceHints ?? {}) as Record<string, unknown>).source ?? "").trim().toLowerCase();
-  if (source === "ocr-boss-list-names") {
-    return 0;
-  }
-  if (source.startsWith("ocr-boss-list")) {
-    return 1;
-  }
-  if (source.startsWith("ocr-boss-thread")) {
-    return 3;
-  }
-  return 2;
-}
-
-function findBossCandidate(worldState: WorldState | null): InteractionCandidate | null {
-  const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
-  const ranked = candidates
-    .map((candidate) => ({ candidate, score: scoreBossCandidate({ candidate, worldState }) }))
-    .filter((entry): entry is { candidate: InteractionCandidate; score: number } => Number.isFinite(entry.score))
-    .sort((left, right) => {
-      const sourceDelta = bossCandidateSourcePriority(left.candidate) - bossCandidateSourcePriority(right.candidate);
-      if (sourceDelta !== 0) {
-        return sourceDelta;
-      }
-      const scoreDelta = right.score - left.score;
-      if (Math.abs(scoreDelta) >= 8) {
-        return scoreDelta;
-      }
-      const leftY = Number(left.candidate.bounds?.centerY ?? Number.POSITIVE_INFINITY);
-      const rightY = Number(right.candidate.bounds?.centerY ?? Number.POSITIVE_INFINITY);
-      if (Number.isFinite(leftY) || Number.isFinite(rightY)) {
-        return leftY - rightY;
-      }
-      return scoreDelta;
-    });
-  return ranked[0]?.candidate ?? null;
-}
-
-function sanitizeBossOpenCandidate(candidate: Record<string, unknown> | InteractionCandidate | null): Record<string, unknown> | null {
-  if (!candidate || typeof candidate !== "object") {
-    return null;
-  }
-  const text = String((candidate as { text?: unknown }).text ?? "").trim();
-  if (!text) {
-    return null;
-  }
-  const sourceHints = ((candidate as { sourceHints?: unknown }).sourceHints ?? null) as Record<string, unknown> | null;
-  const source = String(sourceHints?.source ?? "").trim().toLowerCase();
-  if (source && source !== "vision") {
-    return candidate as Record<string, unknown>;
-  }
-  return {
-    id: String((candidate as { id?: unknown }).id ?? "boss-open-target").trim() || "boss-open-target",
-    surface: "browser",
-    kind: "text",
-    text,
-    role: String((candidate as { role?: unknown }).role ?? "text").trim() || "text",
-    isInteractive: true,
-    ...(((candidate as { bounds?: unknown }).bounds && typeof (candidate as { bounds?: unknown }).bounds === "object")
-      ? { bounds: (candidate as { bounds?: unknown }).bounds as Record<string, unknown> }
-      : {}),
-    ...(sourceHints ? { sourceHints } : {})
-  };
-}
-
-function extractBossContext(worldState: WorldState | null, summary: string): string[] {
-  const lines = visibleLines(worldState).filter((line) => !isBossUiChrome(line));
-  const normalizedSummary = normalizeBossSummary(summary);
-  const summaryIndex = lines.findIndex((line) => normalizeBossSummary(line) === normalizedSummary);
-  const pool = summaryIndex === -1 ? lines : lines.slice(Math.max(0, summaryIndex - 1), summaryIndex + 5);
-  return uniqueStrings(
-    pool.filter((line) => {
-      const normalized = normalizeBossSummary(line);
-      return (
-        normalized
-        && normalized !== normalizedSummary
-        && !SEND_PATTERN.test(line)
-        && !isBossUiChrome(line)
-        && !bossSnippetLooksLikeCandidateName(line)
-        && !bossSnippetLooksLikeProfileMetadata(line)
-        && bossSnippetLooksUsable(line)
-      );
-    })
-  ).slice(0, 5);
-}
-
 function wantsBossReplyWorkflow(goal: string): boolean {
   return /(reply|respond|contact|message|chat|follow up|outreach|沟通|回复|联系|跟进|发消息)/iu.test(String(goal ?? ""));
 }
-
-function findBossComposeCandidate(worldState: WorldState | null): InteractionCandidate | null {
-  const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
-  return (
-    candidates.find((candidate) => {
-      const hintText = candidateHintText(candidate);
-      const summary = normalizeBossSummary(candidate.text || hintText);
-      const tag = String(((candidate.sourceHints ?? {}) as Record<string, unknown>).tag ?? "").toLowerCase();
-      const centerY = Number(candidate.bounds?.centerY ?? NaN);
-      const appBounds = ((worldState?.capture?.metadata ?? {}) as {
-        windowBounds?: { y?: number; height?: number };
-      }).windowBounds;
-      const upperChromeCutoff =
-        Number.isFinite(Number(appBounds?.y)) && Number.isFinite(Number(appBounds?.height))
-          ? Number(appBounds?.y) + Number(appBounds?.height) * 0.22
-          : Number.NaN;
-      if (
-        !summary
-        || isBossUiChrome(summary)
-        || isBrowserUiChrome(summary)
-        || /zhipin\.com\/web\/chat/iu.test(summary)
-        || (Number.isFinite(centerY) && Number.isFinite(upperChromeCutoff) && centerY <= upperChromeCutoff)
-      ) {
-        return false;
-      }
-      if (candidate.role === "textbox" || ["input", "textarea"].includes(tag)) {
-        return true;
-      }
-      if (candidate.role === "button") {
-        return false;
-      }
-      return (
-        /(message|reply|chat|contact|消息|回复|输入|联系)/iu.test(hintText) ||
-        /(message|reply|chat|contact|消息|回复|输入|联系)/iu.test(candidate.text)
-      );
-    }) ?? null
-  );
-}
-
-function pickBossComposeQuery(worldState: WorldState | null): string {
-  const composeCandidate = findBossComposeCandidate(worldState);
-
-  if (!composeCandidate) {
-    return /[\u4e00-\u9fff]/u.test(String(worldState?.visibleText ?? "")) ? "发送消息" : "Message";
-  }
-
-  const hints = (composeCandidate.sourceHints ?? {}) as Record<string, unknown>;
-  return (
-    String(hints.placeholder ?? hints.ariaLabel ?? composeCandidate.text ?? "").trim() ||
-    (/[\u4e00-\u9fff]/u.test(String(worldState?.visibleText ?? "")) ? "发送消息" : "Message")
-  );
-}
-
-function findBossSendCandidate(worldState: WorldState | null): InteractionCandidate | null {
-  const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
-  return (
-    candidates.find((candidate) => {
-      const hintText = candidateHintText(candidate);
-      return candidate.role === "button" && (SEND_PATTERN.test(hintText) || SEND_PATTERN.test(candidate.text));
-    }) ?? null
-  );
-}
-
-function pickBossSendQuery(worldState: WorldState | null): string {
-  const sendCandidate = findBossSendCandidate(worldState);
-
-  if (!sendCandidate) {
-    return /[\u4e00-\u9fff]/u.test(String(worldState?.visibleText ?? "")) ? "发送" : "Send";
-  }
-
-  return (
-    String(sendCandidate.text ?? "").trim() ||
-    String(((sendCandidate.sourceHints ?? {}) as Record<string, unknown>).ariaLabel ?? "").trim() ||
-    (/[\u4e00-\u9fff]/u.test(String(worldState?.visibleText ?? "")) ? "发送" : "Send")
-  );
-}
-
-function hasBossDuplicateLoginModal(worldState: WorldState | null): boolean {
-  const lines = visibleLines(worldState)
-    .slice(0, 60)
-    .map((line) => String(line ?? "").trim())
-    .filter(Boolean);
-  const pageText = lines.join("\n");
-  if (BOSS_DUPLICATE_LOGIN_MODAL_PATTERN.test(pageText)) {
-    return true;
-  }
-
-  const hasBossSiteAlert = lines.some((line) => /(www\.zhipin\.com says|zhipin\.com says)/iu.test(line));
-  const hasConfirm = lines.some((line) => BOSS_MODAL_CONFIRM_PATTERN.test(line));
-  return hasBossSiteAlert && hasConfirm;
-}
-
-function isBossSiteAlertConfirmModal(worldState: WorldState | null): boolean {
-  const lines = visibleLines(worldState)
-    .slice(0, 60)
-    .map((line) => String(line ?? "").trim())
-    .filter(Boolean);
-  const hasBossSiteAlert = lines.some((line) => /(www\.zhipin\.com says|zhipin\.com says)/iu.test(line));
-  const hasConfirm = lines.some((line) => BOSS_MODAL_CONFIRM_PATTERN.test(line));
-  return hasBossSiteAlert && hasConfirm;
-}
-
-function findBossDuplicateLoginConfirmCandidate(worldState: WorldState | null): InteractionCandidate | null {
-  const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
-  const ranked = candidates
-    .filter((candidate) => {
-      const text = String(candidate.text ?? "").trim();
-      const hintText = candidateHintText(candidate);
-      return (
-        BOSS_MODAL_CONFIRM_PATTERN.test(text)
-        || (candidate.role === "button" && BOSS_MODAL_CONFIRM_PATTERN.test(hintText))
-      );
-    })
-    .sort((left, right) => Number(right.confidence ?? 0) - Number(left.confidence ?? 0));
-  return ranked[0] ?? null;
-}
-
 async function dismissBossDuplicateLoginModalIfPresent({
   rule,
   workspace,
@@ -5427,29 +4804,6 @@ async function dismissBossDuplicateLoginModalIfPresent({
     controlPlane: {} as LivePackControlPlane,
     surface: "browser"
   });
-}
-
-function extractBossThreadContext(worldState: WorldState | null, summary: string): string[] {
-  const lines = visibleLines(worldState).filter((line) => !isBossUiChrome(line));
-  const normalizedSummary = normalizeBossSummary(summary);
-  const summaryIndex = lines.findIndex((line) => normalizeBossSummary(line) === normalizedSummary);
-  const pool = summaryIndex === -1 ? lines : lines.slice(Math.max(0, summaryIndex - 1), summaryIndex + 8);
-  return uniqueStrings(
-    pool
-      .filter((line) => !/^(发送消息|message|reply|chat|contact|沟通|回复|输入|联系)/iu.test(line.trim()))
-      .filter((line) => {
-        const normalized = normalizeBossSummary(line);
-        return (
-          normalized
-          && normalized !== normalizedSummary
-          && !SEND_PATTERN.test(line)
-          && !isBossUiChrome(line)
-          && !bossSnippetLooksLikeCandidateName(line)
-          && !bossSnippetLooksLikeProfileMetadata(line)
-          && bossSnippetLooksUsable(line)
-        );
-      })
-  ).slice(0, 6);
 }
 
 export function analyzeConversationPack(
