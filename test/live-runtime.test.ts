@@ -2388,6 +2388,11 @@ test("wechat desktop pack can detect unread conversations and build reply steps 
   });
   assert.equal(detection?.summary, "张三");
   assert.equal(detection?.metadata?.threadKey, "张三");
+  assert.equal(
+    ((detection?.metadata?.semanticFacts as { latestInboundMessage?: string } | undefined)?.latestInboundMessage ?? null),
+    "客户: 明天下午方便吗？"
+  );
+  assert.equal((detection?.metadata?.sender ?? null), "张三");
   assert.equal(Number.isFinite(Number((detection?.metadata as { openPoint?: { x?: unknown } } | undefined)?.openPoint?.x ?? NaN)), true);
 
   const context = await pack?.extractContext?.({
@@ -2422,6 +2427,77 @@ test("wechat desktop pack can detect unread conversations and build reply steps 
   assert.equal(context?.taskSpec?.steps?.[6]?.action, "wait");
   assert.equal(verifyPrefillExpectShifted?.visualCheck?.type, "wechat_prefill");
   assert.equal(verifyPrefillExpectShifted?.visualCheck?.replyPreview, "{{typeTextPreview}}");
+});
+
+test("wechat desktop pack draft replies enrich model context with semantic facts", async () => {
+  const registry = new LivePackRegistry();
+  const pack = registry.get("wechat-desktop");
+  const seen: string[][] = [];
+  const rule: WatchRule = {
+    id: "watch-wechat-semantic-draft",
+    goal: "Always watch WeChat and prefill replies",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "wechat-desktop-main",
+    skillName: null,
+    appTarget: "WeChat",
+    livePack: "wechat-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const draft = await pack?.draftReply?.({
+    rule,
+    detection: {
+      summary: "张三",
+      context: ["Unread direct question likely needs a response"],
+      metadata: {
+        visualThread: {
+          latestSnippet: "客户: 明天下午方便吗？",
+          replyReason: "Unread direct question likely needs a response"
+        },
+        semanticFacts: {
+          latestInboundMessage: "客户: 明天下午方便吗？",
+          salientContext: [
+            "客户: 明天下午方便吗？",
+            "Unread direct question likely needs a response"
+          ],
+          senderName: "张三",
+          speakerRole: "sender",
+          threadSummary: "张三",
+          replyLanguageHint: "zh",
+          source: "model",
+          evidence: "latest direct question visible"
+        }
+      }
+    } as never,
+    controlPlane: {
+      modelClient: {
+        isConfigured: () => true,
+        async draftReply(args: { context?: string[] }) {
+          seen.push(Array.isArray(args.context) ? args.context : []);
+          return {
+            replyText: "收到，明天下午可以。",
+            confidence: 0.81,
+            rationale: "semantic facts included"
+          };
+        }
+      },
+      listReplyStylePreferences: () => []
+    } as never
+  });
+
+  assert.equal(draft?.replyText, "收到，明天下午可以。");
+  assert.equal(seen[0]?.includes("客户: 明天下午方便吗？"), true);
+  assert.equal(seen[0]?.includes("Unread direct question likely needs a response"), true);
 });
 
 test("wechat desktop pack recovers foreign views with a visible recovery control before scanning unread conversations", async () => {

@@ -27,6 +27,10 @@ import {
   normalizeSlackSummary,
   type SlackSemanticFacts
 } from "./slack-semantic-facts.js";
+import {
+  inferWeChatSemanticFacts,
+  type WeChatSemanticFacts
+} from "./wechat-semantic-facts.js";
 import { inferReplyLanguage } from "./reply-language.js";
 import { packDefaultReplyPolicy } from "./reply-policy.js";
 import type { SurfaceRegistry } from "./surface-registry.js";
@@ -670,6 +674,7 @@ async function draftPackReply({
   const bossSemanticFacts = ((metadata ?? {}) as { semanticFacts?: BossSemanticFacts | null }).semanticFacts ?? null;
   const outlookSemanticFacts = ((metadata ?? {}) as { semanticFacts?: OutlookSemanticFacts | null }).semanticFacts ?? null;
   const slackSemanticFacts = ((metadata ?? {}) as { semanticFacts?: SlackSemanticFacts | null }).semanticFacts ?? null;
+  const wechatSemanticFacts = ((metadata ?? {}) as { semanticFacts?: WeChatSemanticFacts | null }).semanticFacts ?? null;
   const effectiveContext =
     livePack === "boss-browser" && bossSemanticFacts
       ? uniqueStrings([
@@ -683,6 +688,12 @@ async function draftPackReply({
             ...outlookSemanticFacts.salientContext,
             ...context
           ]).filter(Boolean)
+        : livePack === "wechat-desktop" && wechatSemanticFacts
+          ? uniqueStrings([
+              wechatSemanticFacts.latestInboundMessage,
+              ...wechatSemanticFacts.salientContext,
+              ...context
+            ]).filter(Boolean)
         : livePack.startsWith("slack-") && slackSemanticFacts
           ? uniqueStrings([
               slackSemanticFacts.latestInboundMessage,
@@ -8670,11 +8681,20 @@ function createWeChatPack(): LivePack {
         targetThread: openTarget || summary
       }).catch(() => null);
 
+      const semanticFacts = await inferWeChatSemanticFacts({
+        modelClient: controlPlane.modelClient,
+        worldState: effectiveWorldState,
+        summary,
+        threadSummary: summary,
+        preferredLatestSnippet: String(visualThread?.latestSnippet ?? "").trim() || null,
+        replyReason: String(visualThread?.replyReason ?? "").trim() || null
+      });
       const context = uniqueStrings([
-        String(visualThread?.latestSnippet ?? "").trim(),
+        semanticFacts.latestInboundMessage,
+        ...semanticFacts.salientContext,
         String(visualThread?.replyReason ?? "").trim(),
         ...contextForSignal(effectiveWorldState, { text: openTarget || candidate?.text || summary })
-      ]).slice(0, 4);
+      ]).filter(Boolean).slice(0, 5);
       const itemFingerprint = fingerprint(
         `wechat-desktop:${rule.workspaceName ?? "default"}:${summary}:${context.join("|")}`
       );
@@ -8737,7 +8757,10 @@ function createWeChatPack(): LivePack {
           recoveryAttempts,
           scrollPasses,
           threadVerificationDeferred: true,
-          ...metadata
+          ...metadata,
+          semanticFacts,
+          ...(semanticFacts.senderName ? { sender: semanticFacts.senderName } : {}),
+          ...(semanticFacts.speakerRole === "sender" ? { direction: "inbound" as const } : {})
         },
         taskSpec: {
           preferredSurface: "desktop",
@@ -8756,6 +8779,8 @@ function createWeChatPack(): LivePack {
 
       const context = Array.isArray(detection.context) ? detection.context : [];
       const openTarget = String(detection.inputs?.openTarget ?? summary).trim() || summary;
+      const semanticFacts =
+        ((detection.metadata ?? {}) as { semanticFacts?: WeChatSemanticFacts | null }).semanticFacts ?? null;
       return {
         summary,
         context,
@@ -8776,7 +8801,10 @@ function createWeChatPack(): LivePack {
             context,
             openTarget,
             candidate: (detection.metadata?.openCandidate ?? null) as InteractionCandidate | Record<string, unknown> | null
-          })
+          }),
+          ...(semanticFacts ? { semanticFacts } : {}),
+          ...(semanticFacts?.senderName ? { sender: semanticFacts.senderName } : {}),
+          ...(semanticFacts?.speakerRole === "sender" ? { direction: "inbound" as const } : {})
         },
         taskSpec: detection.taskSpec ?? undefined
       };
@@ -8788,6 +8816,12 @@ function createWeChatPack(): LivePack {
         | Partial<WeChatVisualThreadSummary>
         | null;
       const enrichedContext = uniqueStrings([
+        String(
+          ((detection?.metadata as Record<string, unknown> | undefined)?.semanticFacts as { latestInboundMessage?: unknown } | null)
+            ?.latestInboundMessage ?? ""
+        ).trim(),
+        ...((((detection?.metadata as Record<string, unknown> | undefined)?.semanticFacts as { salientContext?: unknown[] } | null)
+          ?.salientContext ?? []) as unknown[]).map((line) => String(line ?? "").trim()),
         ...context,
         String(visualThread?.latestSnippet ?? "").trim(),
         String(visualThread?.replyReason ?? "").trim()
@@ -8805,7 +8839,8 @@ function createWeChatPack(): LivePack {
           "If the visible context is limited, write a concrete low-risk clarifying reply instead of a vague placeholder."
         ].join("\n"),
         summary,
-        context: enrichedContext
+        context: enrichedContext,
+        metadata: (detection?.metadata as Record<string, unknown> | null | undefined) ?? null
       });
     }
   };
