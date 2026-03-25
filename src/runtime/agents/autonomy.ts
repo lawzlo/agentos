@@ -3,7 +3,7 @@ import { normalizeStep } from "./planner.js";
 import type { GroundingEngine } from "../grounding-engine.js";
 import type { OpenAICompatibleModelClient } from "../model-client.js";
 import type { PolicyEngine } from "../policy-engine.js";
-import type { SurfaceRegistry } from "../surface-registry.js";
+import type { SurfaceCoordinator } from "../surface-coordinator.js";
 import type { TraceStore } from "../trace-store.js";
 import type {
   AutonomyExecutionResult,
@@ -103,7 +103,7 @@ interface AutonomySurface {
 
 interface AutonomyAgentOptions {
   modelClient: OpenAICompatibleModelClient;
-  surfaceRegistry: SurfaceRegistry;
+  surfaceCoordinator: SurfaceCoordinator;
   traceStore: TraceStore;
   policyEngine: PolicyEngine;
   groundingEngine: GroundingEngine;
@@ -111,13 +111,13 @@ interface AutonomyAgentOptions {
 
 export class AutonomyAgent {
   modelClient: OpenAICompatibleModelClient;
-  surfaceRegistry: SurfaceRegistry;
+  surfaceCoordinator: SurfaceCoordinator;
   traceStore: TraceStore;
   policyEngine: PolicyEngine;
   groundingEngine: GroundingEngine;
-  constructor({ modelClient, surfaceRegistry, traceStore, policyEngine, groundingEngine }: AutonomyAgentOptions) {
+  constructor({ modelClient, surfaceCoordinator, traceStore, policyEngine, groundingEngine }: AutonomyAgentOptions) {
     this.modelClient = modelClient;
-    this.surfaceRegistry = surfaceRegistry;
+    this.surfaceCoordinator = surfaceCoordinator;
     this.traceStore = traceStore;
     this.policyEngine = policyEngine;
     this.groundingEngine = groundingEngine;
@@ -161,18 +161,23 @@ export class AutonomyAgent {
         });
       }
 
-      let surface = this.surfaceRegistry.get<AutonomySurface>(activeSurface);
-      if (!surface) {
-        throw new PlanningError(`Unknown autonomous surface: ${activeSurface}`);
-      }
-
-      const observation = await surface.observe({
-        task,
-        workspace,
-        traceId,
-        label: `observe-${attempt + 1}`,
-        recentActions: stepResults
-      });
+      const observation = await this.surfaceCoordinator.withTaskStepSurface(
+        {
+          surface: activeSurface,
+          workspaceKey: workspace.id,
+          holderId: `task:${task.id}:autonomy:${attempt + 1}:observe`,
+          taskId: task.id,
+          reason: `autonomy observe ${activeSurface}`
+        },
+        async ({ adapter }) =>
+          (adapter as AutonomySurface).observe({
+            task,
+            workspace,
+            traceId,
+            label: `observe-${attempt + 1}`,
+            recentActions: stepResults
+          })
+      );
 
       this.traceStore.log({
         traceId,
@@ -242,8 +247,7 @@ export class AutonomyAgent {
 
       const previousSurface = activeSurface;
       activeSurface = step.surface;
-      const stepSurface = this.surfaceRegistry.get<AutonomySurface>(step.surface);
-      if (!stepSurface) {
+      if (!step.surface) {
         throw new PlanningError(`Unknown autonomous step surface: ${step.surface}`);
       }
 
@@ -251,14 +255,23 @@ export class AutonomyAgent {
       if (TARGET_ACTIONS.has(step.action) && !step.params?.target) {
         let targetObservation = observation;
         if (step.surface !== previousSurface) {
-          surface = this.surfaceRegistry.get<AutonomySurface>(step.surface);
-          targetObservation = await surface.observe({
-            task,
-            workspace,
-            traceId,
-            label: `observe-ground-${attempt + 1}`,
-            recentActions: stepResults
-          });
+          targetObservation = await this.surfaceCoordinator.withTaskStepSurface(
+            {
+              surface: step.surface,
+              workspaceKey: workspace.id,
+              holderId: `task:${task.id}:autonomy:${attempt + 1}:ground`,
+              taskId: task.id,
+              reason: `autonomy ground ${step.surface}`
+            },
+            async ({ adapter }) =>
+              (adapter as AutonomySurface).observe({
+                task,
+                workspace,
+                traceId,
+                label: `observe-ground-${attempt + 1}`,
+                recentActions: stepResults
+              })
+          );
         }
 
         const targetQuery = String(
@@ -289,42 +302,56 @@ export class AutonomyAgent {
         };
       }
 
-      const result = await stepSurface.act({
-        task,
-        step: executableStep,
-        workspace,
-        traceId,
-        outputs
-      });
+      const execution = await this.surfaceCoordinator.withTaskStepSurface(
+        {
+          surface: executableStep.surface,
+          workspaceKey: workspace.id,
+          holderId: `task:${task.id}:autonomy:${attempt + 1}:step:${executableStep.id}`,
+          taskId: task.id,
+          reason: executableStep.label ?? executableStep.action
+        },
+        async ({ adapter }) => {
+          const stepSurface = adapter as AutonomySurface;
+          const result = await stepSurface.act({
+            task,
+            step: executableStep,
+            workspace,
+            traceId,
+            outputs
+          });
 
-      const checkpoint =
-        executableStep.checkpoint === false
-          ? null
-          : await stepSurface.checkpoint({
+          const checkpoint =
+            executableStep.checkpoint === false
+              ? null
+              : await stepSurface.checkpoint({
+                  task,
+                  step: executableStep,
+                  workspace,
+                  traceId,
+                  label: `${executableStep.label} checkpoint`
+                });
+
+          let verification: StepVerification | null = null;
+          if (executableStep.expect) {
+            verification = await stepSurface.verify({
               task,
               step: executableStep,
               workspace,
               traceId,
-              label: `${executableStep.label} checkpoint`
+              expectation: executableStep.expect
             });
 
-      if (executableStep.saveAs) {
-        outputs[executableStep.saveAs] = result;
-      }
+            if (!verification.ok) {
+              throw new PlanningError(`Autonomous expectation failed for ${executableStep.label}`, { ...verification });
+            }
+          }
 
-      let verification: StepVerification | null = null;
-      if (executableStep.expect) {
-        verification = await stepSurface.verify({
-          task,
-          step: executableStep,
-          workspace,
-          traceId,
-          expectation: executableStep.expect
-        });
-
-        if (!verification.ok) {
-          throw new PlanningError(`Autonomous expectation failed for ${executableStep.label}`, { ...verification });
+          return { result, checkpoint, verification };
         }
+      );
+
+      if (executableStep.saveAs) {
+        outputs[executableStep.saveAs] = execution.result;
       }
 
       stepResults.push({
@@ -332,9 +359,9 @@ export class AutonomyAgent {
         label: executableStep.label,
         surface: executableStep.surface,
         action: executableStep.action,
-        result,
-        checkpoint,
-        verification
+        result: execution.result,
+        checkpoint: execution.checkpoint,
+        verification: execution.verification
       });
 
       if (controlGate) {

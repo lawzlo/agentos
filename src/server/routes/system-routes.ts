@@ -1,7 +1,8 @@
-import { json } from "../http-utils.js";
+import { json, readJsonBody } from "../http-utils.js";
 import { getDaemonInstallStatus } from "../../daemon-autostart.js";
 import { readDaemonState } from "../../daemon-state.js";
 import { detectInstallSource } from "../../install-source.js";
+import { collectSurfaceState, type SurfaceStateRequest } from "../../../bin/commands/state-command.js";
 import type { ApiRouteContext } from "../types.js";
 import type { DaemonLifecycle, DaemonStatus, DoctorReport } from "../../types/system.js";
 
@@ -103,6 +104,61 @@ export async function handleSystemRoutes({
   if (req.method === "GET" && url.pathname === "/version") {
     json(res, 200, {
       version: controlPlane.getVersionInfo()
+    });
+    return true;
+  }
+
+  if (req.method === "GET" && url.pathname === "/surfaces") {
+    json(res, 200, {
+      surfaces: controlPlane.surfaceCoordinator.listSnapshots()
+    });
+    return true;
+  }
+
+  if (req.method === "GET" && url.pathname.startsWith("/surfaces/")) {
+    const surfaceKey = decodeURIComponent(url.pathname.slice("/surfaces/".length));
+    const surface = controlPlane.surfaceCoordinator.getSnapshot(surfaceKey as never);
+    if (!surface) {
+      json(res, 404, { error: "Surface not found" });
+      return true;
+    }
+    json(res, 200, { surface });
+    return true;
+  }
+
+  if (req.method === "POST" && url.pathname === "/surface/state") {
+    const request = await readJsonBody<SurfaceStateRequest>(req);
+    const result = await controlPlane.surfaceCoordinator.withProbeSurface(
+      {
+        surface: request.surface,
+        workspaceKey: request.workspaceName,
+        holderId: `state:${request.surface}:${request.packName ?? request.appName ?? request.workspaceName}`,
+        reason: `state probe ${request.packName ?? request.appName ?? request.surface}`,
+        timeoutMs: 3000
+      },
+      async () =>
+        collectSurfaceState(request, {
+          browserAdapter: request.surface === "browser"
+            ? (controlPlane.surfaceRegistry.get("browser") as never)
+            : undefined
+        })
+    );
+
+    if (!result) {
+      const surfaceKey = controlPlane.surfaceCoordinator.resolveSurfaceKey(request.surface, request.workspaceName);
+      json(res, 200, {
+        busy: true,
+        surfaceKey,
+        lease: controlPlane.surfaceCoordinator.getSnapshot(surfaceKey)
+      });
+      return true;
+    }
+
+    const surfaceKey = controlPlane.surfaceCoordinator.resolveSurfaceKey(request.surface, request.workspaceName);
+    json(res, 200, {
+      report: result,
+      surfaceKey,
+      lease: controlPlane.surfaceCoordinator.getSnapshot(surfaceKey)
     });
     return true;
   }

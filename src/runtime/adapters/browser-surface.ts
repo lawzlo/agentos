@@ -103,6 +103,25 @@ export class BrowserSurfaceAdapter extends SurfaceAdapter {
     return existing ?? context.newPage();
   }
 
+  async #readPageText(page: Page): Promise<string> {
+    await page.waitForLoadState("domcontentloaded").catch(() => null);
+    let pageText = await page.locator("body").innerText().catch(() => "");
+    const normalized = pageText.trim();
+    if (normalized && !/^加载中，请稍候$/u.test(normalized)) {
+      return pageText;
+    }
+
+    await page.waitForTimeout(1200);
+    pageText = await page.locator("body").innerText().catch(() => "");
+    if (pageText.trim() && !/^加载中，请稍候$/u.test(pageText.trim())) {
+      return pageText;
+    }
+
+    await page.waitForLoadState("networkidle", { timeout: 1500 }).catch(() => null);
+    await page.waitForTimeout(500);
+    return page.locator("body").innerText().catch(() => pageText);
+  }
+
   async #collectCandidates(page: Page) {
     const rawCandidates = await page
       .locator("button, a[href], input, textarea, select, [role='button'], [role='textbox'], [contenteditable='true']")
@@ -205,6 +224,29 @@ export class BrowserSurfaceAdapter extends SurfaceAdapter {
     return null;
   }
 
+  async #resolveLocatorFromTargetQuery(page: Page, targetQuery: unknown): Promise<Locator | null> {
+    const query = String(targetQuery ?? "").trim();
+    if (!query) {
+      return null;
+    }
+
+    const locators = [
+      page.getByText(query, { exact: true }).first(),
+      page.getByText(query, { exact: false }).first(),
+      page.getByLabel(query, { exact: true }).first(),
+      page.getByPlaceholder(query, { exact: true }).first()
+    ];
+
+    for (const locator of locators) {
+      const count = await locator.count().catch(() => 0);
+      if (count > 0) {
+        return locator;
+      }
+    }
+
+    return null;
+  }
+
   async #clickByBounds(page: Page, bounds?: { centerX?: number; centerY?: number } | null) {
     if (!bounds) {
       return false;
@@ -272,8 +314,8 @@ export class BrowserSurfaceAdapter extends SurfaceAdapter {
 
   async observe({ task, workspace, traceId, label = "browser-observe", recentActions = [] }) {
     const page = await this.#page(workspace);
-    const [pageText, candidates, capture, title] = await Promise.all([
-      page.locator("body").innerText().catch(() => ""),
+    const pageText = await this.#readPageText(page);
+    const [candidates, capture, title] = await Promise.all([
       this.#collectCandidates(page),
       this.capture({ task, workspace, traceId, label }),
       page.title().catch(() => "")
@@ -434,9 +476,14 @@ export class BrowserSurfaceAdapter extends SurfaceAdapter {
         case "scrollSurface":
           await page.mouse.wheel(params.dx ?? 0, params.dy ?? 800);
           return { scrolled: true, dx: params.dx ?? 0, dy: params.dy ?? 800 };
+        case "clickAt":
+          await page.mouse.click(Number(params.x ?? 0), Number(params.y ?? 0));
+          return { clicked: true, x: Number(params.x ?? 0), y: Number(params.y ?? 0), resolutionMode: "point" };
         case "clickTarget":
         case "focusTarget": {
-          const locator = await this.#resolveLocatorFromTarget(page, params.target);
+          const locator =
+            (await this.#resolveLocatorFromTarget(page, params.target))
+            ?? (await this.#resolveLocatorFromTargetQuery(page, params.targetQuery));
           if (locator) {
             await locator.click({ timeout: params.timeoutMs ?? 15000 });
             return { clicked: true, resolvedTarget: params.target };
@@ -449,7 +496,9 @@ export class BrowserSurfaceAdapter extends SurfaceAdapter {
           return { clicked: true, resolvedTarget: params.target, resolutionMode: "bounds" };
         }
         case "typeIntoTarget": {
-          const locator = await this.#resolveLocatorFromTarget(page, params.target);
+          const locator =
+            (await this.#resolveLocatorFromTarget(page, params.target))
+            ?? (await this.#resolveLocatorFromTargetQuery(page, params.targetQuery));
           if (locator) {
             await locator.click({ timeout: params.timeoutMs ?? 15000 }).catch(() => {});
             if (params.clear !== false) {
@@ -467,7 +516,9 @@ export class BrowserSurfaceAdapter extends SurfaceAdapter {
           return { typed: params.text?.length ?? 0, resolvedTarget: params.target, resolutionMode: "bounds" };
         }
         case "waitForTarget": {
-          const locator = await this.#resolveLocatorFromTarget(page, params.target);
+          const locator =
+            (await this.#resolveLocatorFromTarget(page, params.target))
+            ?? (await this.#resolveLocatorFromTargetQuery(page, params.targetQuery));
           if (locator) {
             await locator.waitFor({ timeout: params.timeoutMs ?? 15000, state: params.state ?? "visible" });
             return { waitedForTarget: params.target?.id ?? null };
@@ -484,7 +535,9 @@ export class BrowserSurfaceAdapter extends SurfaceAdapter {
           throw new Error(`Could not wait for unresolved target ${params.target?.id ?? "unknown"}`);
         }
         case "extractFromTarget": {
-          const locator = await this.#resolveLocatorFromTarget(page, params.target);
+          const locator =
+            (await this.#resolveLocatorFromTarget(page, params.target))
+            ?? (await this.#resolveLocatorFromTargetQuery(page, params.targetQuery));
           if (locator) {
             const inputValue = await locator.inputValue().catch(() => null);
             if (inputValue !== null) {

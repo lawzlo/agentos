@@ -529,6 +529,19 @@ export class MacOSHostBridge {
     return this.#requestSidecar("key_press", { key, modifiers }, null);
   }
 
+  async captureSelectedText(): Promise<string | null> {
+    const previousClipboard = await this.#readClipboardText();
+    try {
+      await this.pressKey("c", ["cmd"]);
+      await new Promise((resolve) => setTimeout(resolve, 90));
+      return await this.#readClipboardText();
+    } finally {
+      if (previousClipboard !== null) {
+        await this.#writeClipboardText(previousClipboard).catch(() => null);
+      }
+    }
+  }
+
   async clickAt(x: number, y: number): Promise<unknown> {
     return this.#requestSidecar("click_at", { x, y }, null);
   }

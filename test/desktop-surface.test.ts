@@ -950,7 +950,7 @@ test("desktop verify can match region text against the combined OCR preview of a
   });
 
   assert.equal(result.ok, true);
-  assert.equal(result.details.frontmostApp, "Outlook");
+  assert.equal(result.details.frontmostApp, "Microsoft Outlook");
   assert.equal(result.details.regionTextVisible, true);
   assert.equal((result.details.regionTextMatch as { source?: string } | undefined)?.source, "combined_preview");
 });

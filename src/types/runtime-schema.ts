@@ -272,7 +272,7 @@ export type SceneType = "list" | "thread" | "foreign_view" | "signin" | "verific
 
 export type SurfaceRecoveryAction = "recover_to_list" | "complete_signin" | "complete_verification" | "takeover" | "none";
 
-export type SurfaceHealthState = "healthy" | "cooldown" | "unsupported" | "setup_required";
+export type SurfaceHealthState = "healthy" | "busy" | "cooldown" | "unsupported" | "setup_required";
 
 export type RunBudgetStatus = "ok" | "exceeded" | "paused";
 

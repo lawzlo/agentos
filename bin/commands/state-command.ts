@@ -1,9 +1,10 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
-import { boolOption, config, print, type CliOptions } from "../cli-utils.js";
+import { apiRequest, boolOption, config, print, type CliOptions } from "../cli-utils.js";
 import { collectDesktopProbe, type DesktopProbeDeps, type DesktopProbeReport, type DesktopProbeRequest } from "./desktop-command.js";
 import { BrowserSurfaceAdapter } from "../../src/runtime/adapters/browser-surface.js";
+import { ChromeMainSessionSurfaceAdapter } from "../../src/runtime/adapters/chrome-main-session-surface.js";
 import { defaultBrowserStartUrlForPack } from "../../src/runtime/browser-pack-defaults.js";
 import { detectInstallSourceSync } from "../../src/install-source.js";
 import { resolveLicenseState } from "../../src/license.js";
@@ -320,38 +321,47 @@ async function createStateWorkspace(
 }
 
 function createBrowserAdapter(): BrowserStateAdapter {
-  return new BrowserSurfaceAdapter({
-    artifactStore: {
-      async registerExistingFile({
+  const artifactStore = {
+    async registerExistingFile({
+      taskId,
+      traceId,
+      kind,
+      label,
+      filePath,
+      metadata = {}
+    }: {
+      taskId: string;
+      traceId: string | null;
+      kind: string;
+      label: string;
+      filePath: string;
+      metadata?: Record<string, unknown>;
+    }) {
+      return {
+        id: `artifact-${Date.now()}`,
         taskId,
         traceId,
         kind,
         label,
-        filePath,
-        metadata = {}
-      }: {
-        taskId: string;
-        traceId: string | null;
-        kind: string;
-        label: string;
-        filePath: string;
-        metadata?: Record<string, unknown>;
-      }) {
-        return {
-          id: `artifact-${Date.now()}`,
-          taskId,
-          traceId,
-          kind,
-          label,
-          path: filePath,
-          metadata,
-          createdAt: new Date().toISOString()
-        };
-      }
-    } as never,
-    browserExecutable: config.browserExecutable ?? null,
-    headless: config.headless
-  }) as BrowserStateAdapter;
+        path: filePath,
+        metadata,
+        createdAt: new Date().toISOString()
+      };
+    }
+  } as never;
+
+  return (
+    config.browserMode === "main_chrome" && process.platform === "darwin"
+      ? new ChromeMainSessionSurfaceAdapter({
+          artifactStore,
+          dataDir: config.dataDir
+        })
+      : new BrowserSurfaceAdapter({
+          artifactStore,
+          browserExecutable: config.browserExecutable ?? null,
+          headless: config.headless
+        })
+  ) as BrowserStateAdapter;
 }
 
 function buildSyntheticStateRule(request: SurfaceStateRequest): WatchRule {
@@ -515,6 +525,32 @@ function renderSurfaceState(report: SurfaceStateReport): string {
     }
   }
   return lines.join("\n");
+}
+
+function renderSurfaceBusy(payload: {
+  surfaceKey: string;
+  lease?: {
+    activeHolder?: {
+      holderKind?: string | null;
+      holderId?: string | null;
+      reason?: string | null;
+    } | null;
+    queue?: unknown[];
+  } | null;
+}): string {
+  const holder = payload.lease?.activeHolder;
+  return [
+    "AgentOS state",
+    "",
+    `State probe is blocked by an active surface lease on ${payload.surfaceKey}.`,
+    holder
+      ? `Active holder: ${String(holder.holderKind ?? "unknown")} ${String(holder.holderId ?? "").trim()}`.trim()
+      : "Active holder: unknown",
+    holder?.reason ? `Reason: ${holder.reason}` : null,
+    `Queue depth: ${Array.isArray(payload.lease?.queue) ? payload.lease?.queue.length : 0}`
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 async function collectBrowserState(
@@ -750,7 +786,39 @@ export async function commandState(subcommand: string | undefined, positionals: 
     }
   }
 
-  const report = await collectSurfaceState(request);
+  const response = await apiRequest<{
+    report?: SurfaceStateReport | null;
+    busy?: boolean;
+    surfaceKey?: string;
+    lease?: Record<string, unknown> | null;
+  }>("POST", "/surface/state", request);
+  if (response.busy) {
+    if (options.json) {
+      print(response, options);
+      return;
+    }
+
+    print(
+      renderSurfaceBusy({
+        surfaceKey: String(response.surfaceKey ?? "unknown"),
+        lease: (response.lease ?? null) as {
+          activeHolder?: {
+            holderKind?: string | null;
+            holderId?: string | null;
+            reason?: string | null;
+          } | null;
+          queue?: unknown[];
+        } | null
+      }),
+      options
+    );
+    return;
+  }
+
+  const report = response.report;
+  if (!report) {
+    throw new Error("Surface state probe returned no report.");
+  }
   if (options.json) {
     print(report, options);
     return;

@@ -36,9 +36,30 @@ function createOperator({
   };
 
   const operator = new OperatorAgent({
-    surfaceRegistry: {
-      get() {
-        return surface;
+    surfaceCoordinator: {
+      async withTaskStepSurface(_request, fn) {
+        return fn({
+          surface: "desktop",
+          surfaceKey: "desktop-global",
+          adapter: surface as never,
+          surfaceRegistry: {
+            get() {
+              return surface;
+            }
+          } as never,
+          lease: {
+            id: "lease-1",
+            surfaceKey: "desktop-global",
+            holderId: "task:task-1:step:step-1",
+            holderKind: "task_step",
+            priority: "task",
+            taskId: "task-1",
+            watchId: null,
+            workspaceKey: "workspace-1",
+            reason: "test",
+            acquiredAt: new Date().toISOString()
+          }
+        });
       }
     } as never,
     traceStore: {

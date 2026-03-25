@@ -1,6 +1,6 @@
 import { PolicyError, VerificationError } from "../errors.js";
 import type { PolicyEngine } from "../policy-engine.js";
-import type { SurfaceRegistry } from "../surface-registry.js";
+import type { SurfaceCoordinator } from "../surface-coordinator.js";
 import type { TraceStore } from "../trace-store.js";
 import type { GroundingEngine } from "../grounding-engine.js";
 import type {
@@ -64,19 +64,19 @@ interface ExecutableSurface {
 }
 
 interface OperatorAgentOptions {
-  surfaceRegistry: SurfaceRegistry;
+  surfaceCoordinator: SurfaceCoordinator;
   traceStore: TraceStore;
   policyEngine: PolicyEngine;
   groundingEngine: GroundingEngine;
 }
 
 export class OperatorAgent {
-  surfaceRegistry: SurfaceRegistry;
+  surfaceCoordinator: SurfaceCoordinator;
   traceStore: TraceStore;
   policyEngine: PolicyEngine;
   groundingEngine: GroundingEngine;
-  constructor({ surfaceRegistry, traceStore, policyEngine, groundingEngine }: OperatorAgentOptions) {
-    this.surfaceRegistry = surfaceRegistry;
+  constructor({ surfaceCoordinator, traceStore, policyEngine, groundingEngine }: OperatorAgentOptions) {
+    this.surfaceCoordinator = surfaceCoordinator;
     this.traceStore = traceStore;
     this.policyEngine = policyEngine;
     this.groundingEngine = groundingEngine;
@@ -123,12 +123,14 @@ export class OperatorAgent {
   }
 
   async #resolveTarget({
+    surface,
     task,
     step,
     workspace,
     traceId,
     stepResults
   }: {
+    surface: ExecutableSurface;
     task: TaskRecord;
     step: RuntimeStep;
     workspace: WorkspaceRecord;
@@ -139,7 +141,6 @@ export class OperatorAgent {
       return step;
     }
 
-    const surface = this.surfaceRegistry.get<ExecutableSurface>(step.surface);
     const observation = await surface.observe({
       task,
       workspace,
@@ -248,92 +249,106 @@ export class OperatorAgent {
         });
       }
 
-      const step = await this.#resolveTarget({
-        task,
-        step: rawStep,
-        workspace,
-        traceId,
-        stepResults
-      });
-      const surface = this.surfaceRegistry.get<ExecutableSurface>(step.surface);
-      if (!surface) {
-        throw new Error(`Unknown surface: ${step.surface}`);
+      if (!rawStep.surface) {
+        throw new Error(`Unknown surface: ${rawStep.surface}`);
       }
-
-      const stepPolicy = this.policyEngine.evaluateStep(taskSpec, step);
-      if (!stepPolicy.allowed) {
-        throw new PolicyError(`Policy denied step ${step.label}`, {
-          step,
-          reasons: stepPolicy.reasons
-        });
-      }
-
-      this.traceStore.log({
-        traceId,
-        taskId: task.id,
-        role: "operator",
-        type: "step.started",
-        stepId: step.id,
-        message: `Starting ${step.label}`,
-        payload: { action: step.action, surface: step.surface, params: step.params }
-      });
-
-      const result = await surface.act({ task, step, workspace, traceId, outputs });
-      let verification: StepVerification | null = null;
-      if (step.expect) {
-        verification = await surface.verify({
-          task,
-          step,
-          workspace,
-          traceId,
-          expectation: step.expect
-        });
-        verification = await this.#waitForInlineVerification({
-          surface,
-          task,
-          step,
-          workspace,
-          traceId,
-          initialVerification: verification
-        });
-
-        this.traceStore.log({
-          traceId,
+      const execution = await this.surfaceCoordinator.withTaskStepSurface(
+        {
+          surface: rawStep.surface,
+          workspaceKey: workspace.id,
+          holderId: `task:${task.id}:step:${rawStep.id}`,
           taskId: task.id,
-          role: "operator",
-          type: verification.ok ? "step.verified" : "step.verification_failed",
-          stepId: step.id,
-          message: verification.ok ? `Verified ${step.label} in-line` : `Inline verification failed for ${step.label}`,
-          payload: { ...verification }
-        });
+          reason: rawStep.label ?? rawStep.action
+        },
+        async ({ adapter }) => {
+          const leasedSurface = adapter as ExecutableSurface;
+          const step = await this.#resolveTarget({
+            surface: leasedSurface,
+            task,
+            step: rawStep,
+            workspace,
+            traceId,
+            stepResults
+          });
+          const stepPolicy = this.policyEngine.evaluateStep(taskSpec, step);
+          if (!stepPolicy.allowed) {
+            throw new PolicyError(`Policy denied step ${step.label}`, {
+              step,
+              reasons: stepPolicy.reasons
+            });
+          }
 
-        if (!verification.ok) {
-          throw new VerificationError(`Verification failed for ${step.label}`, { ...verification });
-        }
-      }
-      const checkpoint =
-        step.checkpoint === false
-          ? null
-          : await surface.checkpoint({
+          this.traceStore.log({
+            traceId,
+            taskId: task.id,
+            role: "operator",
+            type: "step.started",
+            stepId: step.id,
+            message: `Starting ${step.label}`,
+            payload: { action: step.action, surface: step.surface, params: step.params }
+          });
+
+          const result = await leasedSurface.act({ task, step, workspace, traceId, outputs });
+          let verification: StepVerification | null = null;
+          if (step.expect) {
+            verification = await leasedSurface.verify({
               task,
               step,
               workspace,
               traceId,
-              label: `${step.label} checkpoint`
+              expectation: step.expect
+            });
+            verification = await this.#waitForInlineVerification({
+              surface: leasedSurface,
+              task,
+              step,
+              workspace,
+              traceId,
+              initialVerification: verification
             });
 
-      if (step.saveAs) {
-        outputs[step.saveAs] = result;
+            this.traceStore.log({
+              traceId,
+              taskId: task.id,
+              role: "operator",
+              type: verification.ok ? "step.verified" : "step.verification_failed",
+              stepId: step.id,
+              message: verification.ok ? `Verified ${step.label} in-line` : `Inline verification failed for ${step.label}`,
+              payload: { ...verification }
+            });
+
+            if (!verification.ok) {
+              throw new VerificationError(`Verification failed for ${step.label}`, { ...verification });
+            }
+          }
+
+          const checkpoint =
+            step.checkpoint === false
+              ? null
+              : await leasedSurface.checkpoint({
+                  task,
+                  step,
+                  workspace,
+                  traceId,
+                  label: `${step.label} checkpoint`
+                });
+
+          return { step, result, verification, checkpoint };
+        }
+      );
+
+      if (execution.step.saveAs) {
+        outputs[execution.step.saveAs] = execution.result;
       }
 
       stepResults.push({
-        stepId: step.id,
-        label: step.label,
-        surface: step.surface,
-        action: step.action,
-        result,
-        checkpoint,
-        verification
+        stepId: execution.step.id,
+        label: execution.step.label,
+        surface: execution.step.surface,
+        action: execution.step.action,
+        result: execution.result,
+        checkpoint: execution.checkpoint,
+        verification: execution.verification
       });
 
       this.traceStore.log({
@@ -341,15 +356,15 @@ export class OperatorAgent {
         taskId: task.id,
         role: "operator",
         type: "step.completed",
-        stepId: step.id,
-        message: `Completed ${step.label}`,
-        payload: { result, checkpoint }
+        stepId: execution.step.id,
+        message: `Completed ${execution.step.label}`,
+        payload: { result: execution.result, checkpoint: execution.checkpoint }
       });
 
       if (controlGate) {
         await controlGate({
           phase: "after_step",
-          step,
+          step: execution.step,
           stepResults
         });
       }

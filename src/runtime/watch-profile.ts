@@ -180,7 +180,7 @@ export function materializeWatchValue(value, runtimeInputs = {}, templateInputs 
     }
 
     const key = match[1];
-    if (runtimeInputs[key] != null && runtimeInputs[key] !== "") {
+    if (Object.prototype.hasOwnProperty.call(runtimeInputs, key)) {
       return runtimeInputs[key];
     }
 

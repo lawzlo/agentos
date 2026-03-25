@@ -5,6 +5,44 @@ import { WatchExecutionService } from "../src/runtime/watch-execution-service.js
 import { buildWatchHealth } from "../src/runtime/watch-presenters.js";
 import type { WatchRule } from "../src/types/runtime-schema.js";
 
+function createSurfaceCoordinator() {
+  return {
+    async withWatchScanSession(
+      request: { surface: "browser" | "desktop" },
+      fn: (session: {
+        surface: "browser" | "desktop";
+        surfaceKey: string;
+        adapter: Record<string, unknown>;
+        surfaceRegistry: Record<string, unknown>;
+        lease: Record<string, unknown>;
+      }) => Promise<unknown>
+    ) {
+      return fn({
+        surface: request.surface,
+        surfaceKey: request.surface === "desktop" ? "desktop-global" : "browser-workspace:test",
+        adapter: {},
+        surfaceRegistry: {
+          get() {
+            return {};
+          }
+        },
+        lease: {
+          id: "lease-watch",
+          surfaceKey: request.surface === "desktop" ? "desktop-global" : "browser-workspace:test",
+          holderId: "watch:test:scan",
+          holderKind: "watch_scan",
+          priority: "watch",
+          taskId: null,
+          watchId: "watch-prefill-test",
+          workspaceKey: "desktop-main",
+          reason: "watch scan",
+          acquiredAt: new Date().toISOString()
+        }
+      });
+    }
+  } as never;
+}
+
 function createService() {
   return new WatchExecutionService({
     controlPlane: {
@@ -12,7 +50,8 @@ function createService() {
         isConfigured() {
           return true;
         }
-      }
+      },
+      surfaceCoordinator: createSurfaceCoordinator()
     } as never,
     store: {} as never,
     eventBus: {
@@ -238,6 +277,7 @@ test("scan drafts a reply when explicit reply steps use the typeText placeholder
         }
       },
       surfaceRegistry: {},
+      surfaceCoordinator: createSurfaceCoordinator(),
       workspaceManager: {
         async prepareProfile() {
           return {
@@ -392,6 +432,7 @@ test("scan skips a watch trigger when extractContext cannot produce a stable rep
         }
       },
       surfaceRegistry: {},
+      surfaceCoordinator: createSurfaceCoordinator(),
       workspaceManager: {
         async prepareProfile() {
           return {
@@ -509,6 +550,7 @@ test("scan records no-trigger details for wechat desktop scans", async () => {
         }
       },
       surfaceRegistry: {},
+      surfaceCoordinator: createSurfaceCoordinator(),
       workspaceManager: {
         async prepareProfile() {
           return {
@@ -620,6 +662,7 @@ test("scan records stage details when a watch stage times out", async () => {
         }
       },
       surfaceRegistry: {},
+      surfaceCoordinator: createSurfaceCoordinator(),
       workspaceManager: {
         async prepareProfile() {
           return {
@@ -763,6 +806,7 @@ test("scan cools down repeated slack desktop no-trigger cycles", async () => {
         }
       },
       surfaceRegistry: {},
+      surfaceCoordinator: createSurfaceCoordinator(),
       workspaceManager: {
         async prepareProfile() {
           return {
@@ -888,10 +932,20 @@ test("draft reply stage timeout honors the configured model timeout floor", () =
     livePack: "outlook-desktop",
     appTarget: "Microsoft Outlook"
   };
+  const bossRule: WatchRule = {
+    ...createWatchRule(),
+    preferredSurface: "browser",
+    appTarget: null,
+    livePack: "boss-browser",
+    workspaceName: "boss-browser-main"
+  };
 
   assert.equal(service.scanStageTimeoutForRule(slackRule, "draft_reply"), 50000);
   assert.equal(service.scanStageTimeoutForRule(outlookRule, "draft_reply"), 50000);
   assert.equal(service.scanStageTimeoutForRule(outlookRule, "detect_items"), 90000);
+  assert.equal(service.scanStageTimeoutForRule(bossRule, "activate_pack"), 20000);
+  assert.equal(service.scanStageTimeoutForRule(bossRule, "extract_context"), 40000);
+  assert.equal(service.scanStageTimeoutForRule(bossRule, "draft_reply"), 50000);
 });
 
 test("scan pauses when the storage guard threshold is exceeded", async () => {
@@ -942,6 +996,7 @@ test("scan pauses when the storage guard threshold is exceeded", async () => {
           }
         },
         surfaceRegistry: {},
+        surfaceCoordinator: createSurfaceCoordinator(),
         workspaceManager: {
           async prepareProfile() {
             return {

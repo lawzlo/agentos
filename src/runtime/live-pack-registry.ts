@@ -225,6 +225,7 @@ interface LivePackMarkHandledArgs {
 type LivePackSurface = "browser" | "desktop";
 
 const SEND_PATTERN = /(send|reply|submit|发送|回复|提交)/iu;
+const BOSS_TIMESTAMP_PATTERN = /^(?:(?:[01]?\d|2[0-3]):[0-5]\d|昨天|today|yesterday|刚刚)$/iu;
 const UNREAD_PATTERN = /(unread|mention|new message|new messages|未读|新消息)/iu;
 const SLACK_UI_CHROME_PATTERN =
   /^(search|compose|home|later|activity|more|threads|drafts|canvas|huddle|send|reply|message|messages|slack|搜索|撰写|发送|回复|消息)$/iu;
@@ -242,6 +243,8 @@ const OUTLOOK_UI_CHROME_PATTERN =
   /^(outlook|focused|other|archive|flag|categories|categorize|junk email|junk|trash|deleted items|drafts|sent items|reply all|forward|new mail|focused inbox|other inbox|respond|收件箱|其他|重点|归档|标记|分类|垃圾邮件|已删除|已发送|新建邮件|回复全部|转发)$/iu;
 const BOSS_UI_CHROME_PATTERN =
   /^(boss直聘|boss zhipin|boss|搜索|search|筛选|filter|推荐|推荐牛人|消息|message|messages|职位|jobs|候选人列表|沟通|在线沟通|立即沟通|发消息|发送|send|查看简历)$/iu;
+const BROWSER_UI_CHROME_PATTERN =
+  /^(your repositories|application:\s|new tab|https?:\/\/|www\.|[\w.-]+\.(com|cn|io|ai|co|org|net|app|cloud|info)(\/.*)?$)/iu;
 const GOOGLE_DRIVE_UI_CHROME_PATTERN =
   /^(google drive|my drive|priority|recent|shared with me|shared drives|starred|trash|upload to drive|drive uploaded|search)$/iu;
 const GOOGLE_DOCS_UI_CHROME_PATTERN =
@@ -251,11 +254,14 @@ const FEISHU_DOCS_UI_CHROME_PATTERN =
 const LOGIN_REQUIRED_PATTERN =
   /(sign in|log in|login|sign into|continue with|重新登录|重新登入|请登录|请先登录|登录继续|登录后继续|登入|登陆|登录|扫码登录)/iu;
 const SESSION_EXPIRED_PATTERN =
-  /(session expired|sign in again|log in again|reauthenticate|重新登录|会话已过期|登录已过期|登录失效|身份已过期)/iu;
+  /(session expired|sign in again|log in again|reauthenticate|重新登录|会话已过期|登录已过期|登录失效|当前登录状态已失效|登录状态已失效|身份已过期)/iu;
 const VERIFICATION_REQUIRED_PATTERN =
   /(captcha|recaptcha|hcaptcha|verify you are human|verify you're human|security check|bot check|are you human|人机验证|验证码|安全验证|验证你是人类|请完成验证)/iu;
 const ACCESS_DENIED_PATTERN =
   /(access denied|forbidden|permission denied|unauthorized|not authorized|拒绝访问|无权限|没有权限|访问受限)/iu;
+const BOSS_DUPLICATE_LOGIN_MODAL_PATTERN =
+  /(账号已经登录过了?|请勿重复登录|重复登录|已在其他窗口登录|已经登录过)/iu;
+const BOSS_MODAL_CONFIRM_PATTERN = /^(ok|确定)$/iu;
 
 function createWatchTask(rule: WatchRule): TaskRecord {
   const timestamp = new Date().toISOString();
@@ -571,6 +577,178 @@ function learnedReplyStylePreferences({
   });
 }
 
+function sanitizeBossReplySnippet(value: string): string {
+  return String(value ?? "")
+    .trim()
+    .replace(/^\[草稿\]\s*/iu, "")
+    .replace(/^候选人\s*[:：]\s*/u, "")
+    .replace(/\s+/gu, " ")
+    .trim();
+}
+
+function bossSnippetLooksUsable(snippet: string): boolean {
+  const normalized = sanitizeBossReplySnippet(snippet);
+  if (!normalized) {
+    return false;
+  }
+  const chars = Array.from(normalized);
+  const allowedChars = chars.filter((char) => /[\u4e00-\u9fffA-Za-z0-9\s,，。.!?？:：'’"“”\-+()/]/u.test(char));
+  if (allowedChars.length <= Math.floor(chars.length / 2)) {
+    return false;
+  }
+  return /[\u4e00-\u9fffA-Za-z]{2,}/u.test(normalized);
+}
+
+function bossSnippetLooksLikeCandidateName(snippet: string): boolean {
+  const normalized = sanitizeBossReplySnippet(snippet).replace(/\s+/gu, "");
+  if (!normalized) {
+    return false;
+  }
+  if (/[0-9]/u.test(normalized) || /[。！？!?，,：:;；"'“”‘’()（）]/u.test(normalized)) {
+    return false;
+  }
+  return /^[\u4e00-\u9fffA-Za-z·•]{2,16}$/u.test(normalized);
+}
+
+function bossSnippetLooksLikeProfileMetadata(snippet: string): boolean {
+  const normalized = sanitizeBossReplySnippet(snippet);
+  if (!normalized) {
+    return false;
+  }
+  if (/[。！？!?，,：:;；"'“”‘’()（）]/u.test(normalized)) {
+    return false;
+  }
+  if (
+    /(?:\d+\s*年经验|应届|本科|硕士|博士|产品经理|工程师|设计师|运营|销售|市场|实习|上海|北京|深圳|广州|杭州|苏州|成都|武汉|西安|远程|onsite|hybrid)$/iu.test(
+      normalized
+    )
+  ) {
+    return true;
+  }
+  return (
+    Array.from(normalized).length <= 6
+    && !/(岗位|职位|空缺|hc|机会|薪资|薪酬|待遇|base|简历|经历|背景|项目|作品|沟通|方便|可以|周[一二三四五六日天]|上午|下午|晚上|明天|后天|cloud|aws|google)/iu.test(
+      normalized
+    )
+  );
+}
+
+function isBossInboundMessageLine(line: string): boolean {
+  return /^候选人\s*[:：]/u.test(String(line ?? "").trim());
+}
+
+function isBossOutboundMessageLine(line: string): boolean {
+  return /^(招聘方|agentos|assistant|me)\s*[:：]/iu.test(String(line ?? "").trim());
+}
+
+function extractBossConversationContextLines(lines: string[], normalizedSummary: string): string[] {
+  const filtered = lines.filter((line) => {
+    const normalized = normalizeBossSummary(line);
+    return normalized && normalized !== normalizedSummary && !SEND_PATTERN.test(line) && !isBossUiChrome(line);
+  });
+
+  const inboundOnly = filtered.filter((line) => isBossInboundMessageLine(line));
+  if (inboundOnly.length) {
+    return uniqueStrings(inboundOnly);
+  }
+
+  return uniqueStrings(
+    filtered.filter(
+      (line) =>
+        !isBossOutboundMessageLine(line)
+        && !bossSnippetLooksLikeCandidateName(line)
+        && !bossSnippetLooksLikeProfileMetadata(line)
+    )
+  );
+}
+
+function pickBossReplyTopic(context: string[], language: "zh" | "en"): string | null {
+  const normalizedContext = context.map((entry) => sanitizeBossReplySnippet(entry)).filter(Boolean);
+  const prioritizedContext = [...normalizedContext].reverse();
+  const snippet =
+    prioritizedContext.find(
+      (entry) =>
+        bossSnippetLooksUsable(entry)
+        && !bossSnippetLooksLikeCandidateName(entry)
+        && !bossSnippetLooksLikeProfileMetadata(entry)
+    ) ?? null;
+  if (!snippet) {
+    return null;
+  }
+
+  if (language === "zh") {
+    const timeMatch = snippet.match(/(这?周[一二三四五六日天](?:上午|中午|下午|晚上)?|下周[一二三四五六日天](?:上午|中午|下午|晚上)?|明天(?:上午|中午|下午|晚上)?|后天(?:上午|中午|下午|晚上)?)/u);
+    if (timeMatch?.[1]) {
+      return `${timeMatch[1]}的沟通安排`;
+    }
+    if (/(岗位|职位|空缺|hc|机会)/iu.test(snippet)) {
+      return "这个岗位";
+    }
+    if (/(薪资|薪酬|待遇|base)/iu.test(snippet)) {
+      return "薪资和岗位情况";
+    }
+    if (/(简历|经历|背景|项目|作品|产品经理|aigc|ai)/iu.test(snippet)) {
+      return `你提到的${snippet.replace(/[。！？!?].*$/u, "").slice(0, 18)}`;
+    }
+    return `你提到的“${snippet.replace(/[。！？!?].*$/u, "").slice(0, 18)}”`;
+  }
+
+  const lower = snippet.toLowerCase();
+  if (/(aws|google cloud|cloud|credits|partnership)/iu.test(lower)) {
+    return "the cloud partnership details";
+  }
+  if (/(role|position|opening|job)/iu.test(lower)) {
+    return "the role";
+  }
+  return `your note about "${snippet.replace(/[.!?].*$/u, "").slice(0, 28)}"`;
+}
+
+function draftBossHeuristicReply({
+  summary,
+  context,
+  stylePreferences,
+  modelError
+}: {
+  summary: string;
+  context: string[];
+  stylePreferences: string[];
+  modelError: string | null;
+}): LivePackDraftResponse {
+  const replyLanguageHint = inferReplyLanguage({ summary, context });
+  const chinese =
+    replyLanguageHint === "zh"
+    || (replyLanguageHint === null && /[\u4e00-\u9fff]/u.test(`${summary} ${context.join(" ")} ${stylePreferences.join(" ")}`));
+  const wantsConcise = /(?:short|concise|brief|直接|简短|简洁)/iu.test(stylePreferences.join(" "));
+  const topic = pickBossReplyTopic(context, chinese ? "zh" : "en");
+
+  const replyText = chinese
+    ? wantsConcise
+      ? topic
+        ? `你好，收到你的消息。关于${topic}，我会尽快跟进。`
+        : "你好，已看到你的信息，我会尽快跟进。"
+      : topic
+        ? `你好，收到你的消息。关于${topic}，我会先确认一下，并尽快和你沟通后续。`
+        : "你好，我已看到你的信息，会尽快查看并和你沟通后续。"
+    : wantsConcise
+      ? topic
+        ? `Thanks for your note. I'll follow up on ${topic} shortly.`
+        : "Thanks, I saw your message and will follow up soon."
+      : topic
+        ? `Thanks for your note. I saw ${topic} and will review it before following up shortly.`
+        : "Thanks for reaching out. I reviewed your profile and will follow up shortly.";
+
+  return {
+    replyText,
+    metadata: {
+      confidence: null,
+      rationale: modelError ? `heuristic recruiting follow-up after model failure: ${modelError}` : "heuristic recruiting follow-up",
+      source: "heuristic",
+      stylePreferences,
+      ...(modelError ? { modelError } : {})
+    }
+  };
+}
+
 async function draftPackReply({
   controlPlane,
   livePack,
@@ -619,26 +797,12 @@ async function draftPackReply({
   }
 
   if (livePack === "boss-browser") {
-    const replyLanguageHint = inferReplyLanguage({ summary, context });
-    const chinese =
-      replyLanguageHint === "zh"
-      || (replyLanguageHint === null && /[\u4e00-\u9fff]/u.test(`${goal} ${summary} ${context.join(" ")} ${stylePreferences.join(" ")}`));
-    return {
-      replyText: chinese
-        ? /(?:short|concise|brief|直接|简短|简洁)/iu.test(stylePreferences.join(" "))
-          ? "你好，已看到你的信息，我会尽快跟进。"
-          : "你好，我已看到你的信息，会尽快查看并和你沟通后续。"
-        : /(?:short|concise|brief)/iu.test(stylePreferences.join(" "))
-            ? "Thanks, I saw your message and will follow up soon."
-          : "Thanks for reaching out. I reviewed your profile and will follow up shortly.",
-      metadata: {
-        confidence: null,
-        rationale: modelError ? `heuristic recruiting follow-up after model failure: ${modelError}` : "heuristic recruiting follow-up",
-        source: "heuristic",
-        stylePreferences,
-        ...(modelError ? { modelError } : {})
-      }
-    };
+    return draftBossHeuristicReply({
+      summary,
+      context,
+      stylePreferences,
+      modelError
+    });
   }
 
   const heuristic = draftHeuristicReply({
@@ -2418,6 +2582,42 @@ function resolveOutlookGroundedOpenPoint(
   return { x, y };
 }
 
+function resolveBossGroundedOpenPoint(
+  bounds: InteractionCandidate["bounds"] | null,
+  groundedTarget: WeChatVisualThreadGrounding | null,
+  fallbackOpenPoint: { x?: number; y?: number } | null
+): { x: number; y: number } | null {
+  if (bounds && groundedTarget?.targetVisible) {
+    const clickPoint = groundedTarget.clickPoint ?? null;
+    if (clickPoint) {
+      const x = Number(bounds.x ?? 0) + Number(bounds.width ?? 0) * clampUnit(clickPoint.x, 0.18);
+      const y = Number(bounds.y ?? 0) + Number(bounds.height ?? 0) * clampUnit(clickPoint.y, 0.2);
+      if (Number.isFinite(x) && Number.isFinite(y)) {
+        return { x, y };
+      }
+    }
+
+    const rowBox = groundedTarget.rowBox ?? null;
+    if (rowBox) {
+      const normalizedX = clampUnit(rowBox.x + rowBox.width * 0.22, 0.18);
+      const normalizedY = clampUnit(rowBox.y + rowBox.height * 0.5, 0.2);
+      const x = Number(bounds.x ?? 0) + Number(bounds.width ?? 0) * normalizedX;
+      const y = Number(bounds.y ?? 0) + Number(bounds.height ?? 0) * normalizedY;
+      if (Number.isFinite(x) && Number.isFinite(y)) {
+        return { x, y };
+      }
+    }
+  }
+
+  const fallbackX = Number(fallbackOpenPoint?.x ?? NaN);
+  const fallbackY = Number(fallbackOpenPoint?.y ?? NaN);
+  if (Number.isFinite(fallbackX) && Number.isFinite(fallbackY)) {
+    return { x: fallbackX, y: fallbackY };
+  }
+
+  return null;
+}
+
 function boundsCenter(bounds: InteractionCandidate["bounds"] | null | undefined): { x: number; y: number } | null {
   if (!bounds) {
     return null;
@@ -2799,6 +2999,180 @@ async function analyzeSlackDesktopVisualState({
 
     return normalizeDesktopVisualAnalysis(result, {
       normalizeName: (value) => normalizeSlackSummary(String(value ?? "")),
+      imageSize
+    });
+  } finally {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
+  }
+}
+
+async function analyzeBossBrowserVisualState({
+  modelClient,
+  worldState,
+  timeoutMs = 15000
+}: {
+  modelClient: Pick<LivePackControlPlane["modelClient"], "supportsImageJson" | "analyzeImageJson"> | null | undefined;
+  worldState: WorldState | null;
+  timeoutMs?: number;
+}): Promise<DesktopVisualAnalysis | null> {
+  if (!modelClient?.supportsImageJson?.()) {
+    return null;
+  }
+
+  const imagePath = String(worldState?.capture?.path ?? "").trim();
+  if (!imagePath) {
+    return null;
+  }
+
+  const lines = visibleLines(worldState)
+    .filter((line) => !isBossUiChrome(line) && !isBrowserUiChrome(line))
+    .slice(0, 16);
+  const imageSize = await readCaptureImageSize(imagePath);
+  const payload = [
+    "Analyze this BOSS直聘 browser screenshot and return strict JSON only.",
+    "Use one of these scenes: list, thread, foreign_view, unknown.",
+    "list means the chat list is visible and an unread candidate row can be opened.",
+    "thread means a specific candidate chat is open in the right panel, even if the composer is empty.",
+    "foreign_view means login, verification, pop-up, profile, resume, settings, or another surface that is not the main chat flow.",
+    "Return only the single first visible unread candidate row as bestUnreadThread.",
+    "First visible means the highest unread candidate row in the chat list, not a later unread row.",
+    "Only mark unread when there is clear red unread evidence such as a red badge, unread count, or red dot on that row.",
+    "Do not return browser chrome, tabs, top navigation, filters, or side navigation items as bestUnreadThread.",
+    "Use the candidate's displayed name for bestUnreadThread.name.",
+    "Use the candidate's latest visible message line for latestSnippet.",
+    "If a reply composer is visible, composer.present=true and approxBox should cover the editable reply box. entryPoint must be inside the editable message area, not on the toolbar.",
+    "All approxBox values must be normalized 0..1 relative to the screenshot.",
+    lines.length ? `Visible OCR lines:\n${lines.join("\n")}` : "",
+    "Keep evidence short and concrete."
+  ].filter(Boolean).join("\n\n");
+
+  let timeoutHandle: NodeJS.Timeout | null = null;
+  try {
+    const result = await Promise.race([
+      modelClient.analyzeImageJson<Record<string, unknown>>({
+        schemaName: "agentos_boss_browser_visual",
+        schema: {
+          type: "object",
+          properties: {
+            scene: { type: "string", enum: ["list", "thread", "foreign_view", "unknown"] },
+            sceneEvidence: { type: "string" },
+            recommendedRecoveryAction: {
+              type: "string",
+              enum: ["recover_to_list", "complete_signin", "complete_verification", "takeover", "none"]
+            },
+            recoveryControl: {
+              type: "object",
+              properties: {
+                present: { type: "boolean" },
+                evidence: { type: "string" },
+                approxBox: {
+                  type: ["object", "null"],
+                  properties: {
+                    x: { type: "number" },
+                    y: { type: "number" },
+                    width: { type: "number" },
+                    height: { type: "number" }
+                  },
+                  required: ["x", "y", "width", "height"],
+                  additionalProperties: false
+                }
+              },
+              required: ["present", "evidence", "approxBox"],
+              additionalProperties: false
+            },
+            openThread: { type: ["string", "null"] },
+            bestUnreadThread: {
+              type: "object",
+              properties: {
+                present: { type: "boolean" },
+                name: { type: "string" },
+                evidence: { type: "string" },
+                replyable: { type: "boolean" },
+                conversationKind: { type: "string", enum: ["direct", "candidate", "group", "unknown"] },
+                shouldReply: { type: "boolean" },
+                replyReason: { type: "string" },
+                subjectCue: { type: "string" },
+                latestSnippet: { type: "string" },
+                priority: { type: "string", enum: ["high", "medium", "low"] },
+                approxBox: {
+                  type: ["object", "null"],
+                  properties: {
+                    x: { type: "number" },
+                    y: { type: "number" },
+                    width: { type: "number" },
+                    height: { type: "number" }
+                  },
+                  required: ["x", "y", "width", "height"],
+                  additionalProperties: false
+                }
+              },
+              required: [
+                "present",
+                "name",
+                "evidence",
+                "replyable",
+                "conversationKind",
+                "shouldReply",
+                "replyReason",
+                "subjectCue",
+                "latestSnippet",
+                "priority",
+                "approxBox"
+              ],
+              additionalProperties: false
+            },
+            composer: {
+              type: "object",
+              properties: {
+                present: { type: "boolean" },
+                evidence: { type: "string" },
+                approxBox: {
+                  type: ["object", "null"],
+                  properties: {
+                    x: { type: "number" },
+                    y: { type: "number" },
+                    width: { type: "number" },
+                    height: { type: "number" }
+                  },
+                  required: ["x", "y", "width", "height"],
+                  additionalProperties: false
+                },
+                entryPoint: {
+                  type: ["object", "null"],
+                  properties: {
+                    x: { type: "number" },
+                    y: { type: "number" }
+                  },
+                  required: ["x", "y"],
+                  additionalProperties: false
+                },
+                hasDraftText: { type: ["boolean", "null"] },
+                draftPreview: { type: ["string", "null"] }
+              },
+              required: ["present", "evidence", "approxBox", "entryPoint", "hasDraftText", "draftPreview"],
+              additionalProperties: false
+            }
+          },
+          required: ["scene", "sceneEvidence", "recommendedRecoveryAction", "recoveryControl", "openThread", "bestUnreadThread", "composer"],
+          additionalProperties: false
+        },
+        systemPrompt:
+          "You are a strict UI grounding model for AgentOS. Analyze BOSS直聘 browser screenshots for unread candidate selection and reply-composer grounding. Return JSON only.",
+        userPrompt: payload,
+        imagePath,
+        temperature: 0
+      }),
+      new Promise<never>((_, reject) => {
+        timeoutHandle = setTimeout(() => {
+          reject(new Error(`BOSS browser vision analysis timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+      })
+    ]);
+
+    return normalizeDesktopVisualAnalysis(result, {
+      normalizeName: (value) => normalizeBossSummary(String(value ?? "")),
       imageSize
     });
   } finally {
@@ -3632,6 +4006,105 @@ async function groundOutlookTargetThreadClickPoint({
       new Promise<never>((_, reject) => {
         timeoutHandle = setTimeout(() => {
           reject(new Error(`Outlook thread grounding timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+      })
+    ]);
+
+    return normalizeWeChatGroundingWithImageSize(
+      normalizeWeChatVisualThreadGrounding((result as Record<string, unknown> | null) ?? null),
+      await readCaptureImageSize(imagePath)
+    );
+  } finally {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
+  }
+}
+
+async function groundBossTargetThreadClickPoint({
+  modelClient,
+  worldState,
+  targetThread,
+  targetSnippet = null,
+  timeoutMs = 12000
+}: {
+  modelClient: Pick<LivePackControlPlane["modelClient"], "supportsImageJson" | "analyzeImageJson"> | null | undefined;
+  worldState: WorldState | null;
+  targetThread: string;
+  targetSnippet?: string | null;
+  timeoutMs?: number;
+}): Promise<WeChatVisualThreadGrounding | null> {
+  if (!modelClient?.supportsImageJson?.()) {
+    return null;
+  }
+
+  const imagePath = String(worldState?.capture?.path ?? "").trim();
+  const target = normalizeBossSummary(String(targetThread ?? "").trim());
+  const snippet = String(targetSnippet ?? "").trim();
+  if (!imagePath || !target) {
+    return null;
+  }
+
+  const lines = visibleLines(worldState)
+    .filter((line) => !isBossUiChrome(line) && !isBrowserUiChrome(line))
+    .slice(0, 24);
+  const payload = [
+    "Analyze this BOSS直聘 browser chat screenshot and ground the exact target candidate row in the left chat list.",
+    "Return a clickPoint and rowBox that select the target row itself, not the right conversation pane, not the top filters, and not a nearby row.",
+    "The target must be in the left candidate list only.",
+    "Return clickPoint and rowBox in normalized screenshot coordinates from 0 to 1.",
+    `Target candidate name: ${target}`,
+    snippet ? `Target latest visible message snippet: ${snippet}` : "",
+    snippet ? "If multiple visible rows share similar names, use the snippet to disambiguate the correct row." : "",
+    lines.length ? `Visible OCR lines:\n${lines.join("\n")}` : "",
+    "Return strict JSON only."
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
+  let timeoutHandle: NodeJS.Timeout | null = null;
+  try {
+    const result = await Promise.race([
+      modelClient.analyzeImageJson<Record<string, unknown>>({
+        schemaName: "agentos_boss_thread_grounding",
+        schema: {
+          type: "object",
+          properties: {
+            targetVisible: { type: "boolean" },
+            evidence: { type: "string" },
+            clickPoint: {
+              type: ["object", "null"],
+              properties: {
+                x: { type: "number" },
+                y: { type: "number" }
+              },
+              required: ["x", "y"],
+              additionalProperties: false
+            },
+            rowBox: {
+              type: ["object", "null"],
+              properties: {
+                x: { type: "number" },
+                y: { type: "number" },
+                width: { type: "number" },
+                height: { type: "number" }
+              },
+              required: ["x", "y", "width", "height"],
+              additionalProperties: false
+            }
+          },
+          required: ["targetVisible", "evidence", "clickPoint", "rowBox"],
+          additionalProperties: false
+        },
+        systemPrompt:
+          "You are a strict UI grounding model for AgentOS. Find the target BOSS直聘 candidate row in the left chat list and return JSON only.",
+        userPrompt: payload,
+        imagePath,
+        temperature: 0
+      }),
+      new Promise<never>((_, reject) => {
+        timeoutHandle = setTimeout(() => {
+          reject(new Error(`BOSS thread grounding timed out after ${timeoutMs}ms`));
         }, timeoutMs);
       })
     ]);
@@ -5399,6 +5872,142 @@ async function resolveDesktopVisionFrame(
   return windowBounds;
 }
 
+async function resolveBrowserVisionFrame(worldState: WorldState | null): Promise<InteractionCandidate["bounds"] | null> {
+  const captureWindowBounds = ((worldState?.capture as { metadata?: { windowBounds?: InteractionCandidate["bounds"] } } | null)?.metadata
+    ?.windowBounds ?? null) as InteractionCandidate["bounds"] | null;
+  if (captureWindowBounds) {
+    return captureWindowBounds;
+  }
+
+  const captureSize = await readCaptureImageSize(String(worldState?.capture?.path ?? ""));
+  if (captureSize) {
+    return {
+      x: 0,
+      y: 0,
+      width: captureSize.width,
+      height: captureSize.height,
+      centerX: captureSize.width / 2,
+      centerY: captureSize.height / 2
+    };
+  }
+
+  return null;
+}
+
+async function resolveBrowserVisionCandidateBounds(
+  worldState: WorldState | null,
+  box: WeChatVisualComposerBox | null
+): Promise<InteractionCandidate["bounds"] | undefined> {
+  if (!box) {
+    return undefined;
+  }
+  const frame = await resolveBrowserVisionFrame(worldState);
+  if (!frame) {
+    return undefined;
+  }
+  const x = Number(frame.x ?? 0) + Number(frame.width ?? 0) * box.x;
+  const y = Number(frame.y ?? 0) + Number(frame.height ?? 0) * box.y;
+  const width = Number(frame.width ?? 0) * box.width;
+  const height = Number(frame.height ?? 0) * box.height;
+  return {
+    x,
+    y,
+    width,
+    height,
+    centerX: x + width / 2,
+    centerY: y + height / 2
+  };
+}
+
+function buildBrowserPointBounds(
+  worldState: WorldState | null,
+  point: { x: number; y: number } | null,
+  radius = 18
+): InteractionCandidate["bounds"] | null {
+  if (!point) {
+    return null;
+  }
+  const frame = ((worldState?.capture as { metadata?: { windowBounds?: InteractionCandidate["bounds"] } } | null)?.metadata
+    ?.windowBounds ?? null) as InteractionCandidate["bounds"] | null;
+  if (!frame) {
+    return null;
+  }
+  const centerX = Number(frame.x ?? 0) + Number(frame.width ?? 0) * Number(point.x ?? 0);
+  const centerY = Number(frame.y ?? 0) + Number(frame.height ?? 0) * Number(point.y ?? 0);
+  if (!Number.isFinite(centerX) || !Number.isFinite(centerY)) {
+    return null;
+  }
+  return {
+    x: centerX - radius,
+    y: centerY - radius,
+    width: radius * 2,
+    height: radius * 2,
+    centerX,
+    centerY
+  };
+}
+
+function hasBossThreadContent(worldState: WorldState | null): boolean {
+  const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
+  const threadSignals = candidates.filter((candidate) => {
+    const source = String(((candidate.sourceHints ?? {}) as Record<string, unknown>).source ?? "").trim().toLowerCase();
+    if (!source.startsWith("ocr-boss-thread")) {
+      return false;
+    }
+    const summary = normalizeBossSummary(candidate.text || candidateHintText(candidate));
+    return Boolean(summary) && !isLowQualityBossSummary(summary) && !isBossUiChrome(summary);
+  });
+  if (threadSignals.length >= 2) {
+    return true;
+  }
+
+  const visible = String(worldState?.visibleText ?? "");
+  return /在线沟通/u.test(visible) && /boss/iu.test(String(worldState?.appContext?.title ?? ""));
+}
+
+function deriveBossComposeFallbackPoint(worldState: WorldState | null): { x: number; y: number } | null {
+  if (!hasBossThreadContent(worldState)) {
+    return null;
+  }
+  return { x: 0.47, y: 0.87 };
+}
+
+function deriveBossComposeFallbackBounds(worldState: WorldState | null): InteractionCandidate["bounds"] | null {
+  if (!hasBossThreadContent(worldState)) {
+    return null;
+  }
+  const frame = ((worldState?.capture as { metadata?: { windowBounds?: InteractionCandidate["bounds"] } } | null)?.metadata
+    ?.windowBounds ?? null) as InteractionCandidate["bounds"] | null;
+  if (!frame) {
+    return null;
+  }
+
+  const x = Number(frame.x ?? 0);
+  const y = Number(frame.y ?? 0);
+  const width = Number(frame.width ?? 0);
+  const height = Number(frame.height ?? 0);
+  if (!(width > 0 && height > 0)) {
+    return null;
+  }
+
+  const left = x + width * 0.44;
+  const top = y + height * 0.79;
+  const right = x + width * 0.95;
+  const bottom = y + height * 0.95;
+  if (!(right > left && bottom > top)) {
+    return null;
+  }
+
+  return {
+    x: left,
+    y: top,
+    width: right - left,
+    height: bottom - top,
+    centerX: left + (right - left) / 2,
+    centerY: top + (bottom - top) / 2
+  };
+}
+
 function deriveWeChatComposerFallback(worldState: WorldState | null): { x: number; y: number } | null {
   const bounds = findDesktopWindowBounds(worldState, "WeChat");
   if (!bounds) {
@@ -5477,12 +6086,187 @@ function mailSummariesMatch(left: string | null | undefined, right: string | nul
 }
 
 function normalizeBossSummary(value: string): string {
-  return String(value ?? "")
+  const normalized = String(value ?? "")
     .replace(/^[●•]\s*/u, "")
     .replace(/^(new candidate|candidate update|candidate|新候选人|候选人|待沟通|待跟进)\s*[:：-]?\s*/iu, "")
     .replace(/^\(\d+\)\s*/u, "")
     .replace(/\s+\(\d+\)$/u, "")
     .trim();
+  if (!/\p{L}/u.test(normalized)) {
+    return "";
+  }
+  return normalized;
+}
+
+function deriveBossOpenTarget(value: string): string {
+  const normalized = normalizeBossSummary(value);
+  if (!normalized) {
+    return "";
+  }
+
+  const separatorPrefix = normalized.split(/\s*[·•｜|]\s*/u)[0]?.trim() ?? "";
+  if (separatorPrefix && separatorPrefix !== normalized) {
+    return separatorPrefix;
+  }
+
+  const cjkLead = normalized.match(/^([\u4e00-\u9fff]{2,8})\s+\S+/u);
+  if (cjkLead?.[1]) {
+    return cjkLead[1];
+  }
+
+  return normalized;
+}
+
+function scoreBossTargetNameMatch(candidateText: string, target: string): number | null {
+  const summary = normalizeBossSummary(candidateText);
+  const normalizedTarget = normalizeBossSummary(target);
+  if (!summary || !normalizedTarget) {
+    return null;
+  }
+  if (summary === normalizedTarget) {
+    return 120;
+  }
+  if (summary.startsWith(normalizedTarget) || normalizedTarget.startsWith(summary)) {
+    return 108;
+  }
+  if (summary.includes(normalizedTarget) || normalizedTarget.includes(summary)) {
+    return 96;
+  }
+  return null;
+}
+
+function findBossListCandidateByTarget(
+  worldState: WorldState | null,
+  target: string
+): InteractionCandidate | null {
+  const normalizedTarget = normalizeBossSummary(target);
+  if (!normalizedTarget) {
+    return null;
+  }
+
+  const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
+  const ranked = candidates
+    .filter((candidate) => {
+      const source = String(((candidate.sourceHints ?? {}) as Record<string, unknown>).source ?? "").trim().toLowerCase();
+      return source.startsWith("ocr-boss-list");
+    })
+    .map((candidate) => ({
+      candidate,
+      score: scoreBossTargetNameMatch(candidate.text || candidateHintText(candidate), normalizedTarget)
+    }))
+    .filter((entry): entry is { candidate: InteractionCandidate; score: number } => Number.isFinite(entry.score))
+    .sort((left, right) => {
+      const scoreDelta = right.score - left.score;
+      if (scoreDelta !== 0) {
+        return scoreDelta;
+      }
+      const leftY = Number(left.candidate.bounds?.centerY ?? Number.POSITIVE_INFINITY);
+      const rightY = Number(right.candidate.bounds?.centerY ?? Number.POSITIVE_INFINITY);
+      return leftY - rightY;
+    });
+  return ranked[0]?.candidate ?? null;
+}
+
+function isBossLikelyMidListCandidate(candidate: InteractionCandidate | null | undefined, worldState: WorldState | null): boolean {
+  if (!candidate) {
+    return false;
+  }
+  const source = String(((candidate.sourceHints ?? {}) as Record<string, unknown>).source ?? "").trim().toLowerCase();
+  if (!source.startsWith("ocr-boss-list")) {
+    return false;
+  }
+  const centerY = Number(candidate.bounds?.centerY ?? NaN);
+  const appBounds = ((worldState?.capture?.metadata ?? {}) as {
+    windowBounds?: { y?: number; height?: number };
+  }).windowBounds;
+  const threshold =
+    Number.isFinite(Number(appBounds?.y)) && Number.isFinite(Number(appBounds?.height))
+      ? Number(appBounds?.y) + Number(appBounds?.height) * 0.38
+      : Number.NaN;
+  return Number.isFinite(centerY) && Number.isFinite(threshold) && centerY > threshold;
+}
+
+function deriveBossTopVisibleRowPoint(worldState: WorldState | null): { x: number; y: number } | null {
+  const frame = ((worldState?.capture as { metadata?: { windowBounds?: InteractionCandidate["bounds"] } } | null)?.metadata
+    ?.windowBounds ?? null) as InteractionCandidate["bounds"] | null;
+  if (!frame) {
+    return null;
+  }
+  return { x: 0.31, y: 0.275 };
+}
+
+function deriveBossVisionRowPoint(
+  visionThread: DesktopVisualThreadSummary | null | undefined
+): { x: number; y: number } | null {
+  const box = visionThread?.approxBox ?? null;
+  if (!box) {
+    return null;
+  }
+  const centerY = clampUnit(box.y + box.height * 0.5, 0.275);
+  return {
+    x: 0.31,
+    y: centerY
+  };
+}
+
+function pickBossThreadName(worldState: WorldState | null, fallback: string): string {
+  const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
+  const frame = ((worldState?.capture as { metadata?: { windowBounds?: InteractionCandidate["bounds"] } } | null)?.metadata
+    ?.windowBounds ?? null) as InteractionCandidate["bounds"] | null;
+  const headerCutoff =
+    Number.isFinite(Number(frame?.y)) && Number.isFinite(Number(frame?.height))
+      ? Number(frame?.y) + Number(frame?.height) * 0.26
+      : Number.NaN;
+  const ranked = candidates
+    .filter((candidate) => {
+      const source = String(((candidate.sourceHints ?? {}) as Record<string, unknown>).source ?? "").trim().toLowerCase();
+      if (!source.startsWith("ocr-boss-thread")) {
+        return false;
+      }
+      const summary = normalizeBossSummary(candidate.text || candidateHintText(candidate));
+      if (!summary || isLowQualityBossSummary(summary) || isBossUiChrome(summary)) {
+        return false;
+      }
+      const centerY = Number(candidate.bounds?.centerY ?? NaN);
+      return !Number.isFinite(headerCutoff) || !Number.isFinite(centerY) || centerY <= headerCutoff;
+    })
+    .sort((left, right) => {
+      const leftY = Number(left.bounds?.centerY ?? Number.POSITIVE_INFINITY);
+      const rightY = Number(right.bounds?.centerY ?? Number.POSITIVE_INFINITY);
+      return leftY - rightY;
+    });
+  return normalizeBossSummary(ranked[0]?.text || candidateHintText(ranked[0])) || fallback;
+}
+
+function isLowQualityBossSummary(summary: string): boolean {
+  const normalized = normalizeBossSummary(summary);
+  if (!normalized) {
+    return true;
+  }
+  if (BOSS_TIMESTAMP_PATTERN.test(normalized)) {
+    return true;
+  }
+
+  const chars = Array.from(normalized);
+  const allowedChars = chars.filter((char) => /[\u4e00-\u9fffA-Za-z0-9\s._&@'’\-+()/]/u.test(char));
+  const suspiciousChars = chars.filter((char) => !/[\u4e00-\u9fffA-Za-z0-9\s._&@'’\-+()/]/u.test(char));
+  const alphaNumericOrCjkChars = chars.filter((char) => /[\u4e00-\u9fffA-Za-z0-9]/u.test(char));
+  const asciiWordTokens = normalized.match(/[A-Za-z]+/gu) ?? [];
+
+  if (alphaNumericOrCjkChars.length === 0) {
+    return true;
+  }
+  if (!/[\u4e00-\u9fff]/u.test(normalized) && asciiWordTokens.length > 0 && asciiWordTokens.every((token) => token.length <= 1)) {
+    return true;
+  }
+  if (allowedChars.length <= Math.floor(chars.length / 2)) {
+    return true;
+  }
+  if (suspiciousChars.length >= 2 && suspiciousChars.length >= Math.ceil(chars.length / 3)) {
+    return true;
+  }
+
+  return false;
 }
 
 function normalizeDocsSummary(value: string, prefixes: string[] = []): string {
@@ -5515,6 +6299,10 @@ function isOutlookUiChrome(text: string): boolean {
 
 function isBossUiChrome(text: string): boolean {
   return BOSS_UI_CHROME_PATTERN.test(String(text ?? "").trim());
+}
+
+function isBrowserUiChrome(text: string): boolean {
+  return BROWSER_UI_CHROME_PATTERN.test(String(text ?? "").trim());
 }
 
 function isDriveUiChrome(text: string): boolean {
@@ -5747,7 +6535,19 @@ function scoreBossCandidate({
 }): number | null {
   const hintText = candidateHintText(candidate);
   const summary = normalizeBossSummary(candidate.text || hintText);
-  if (!summary || isBossUiChrome(summary) || SEND_PATTERN.test(summary)) {
+  if (!summary || isLowQualityBossSummary(summary) || isBossUiChrome(summary) || isBrowserUiChrome(summary) || SEND_PATTERN.test(summary)) {
+    return null;
+  }
+
+  const centerX = Number(candidate.bounds?.centerX ?? NaN);
+  const appBounds = ((worldState?.capture?.metadata ?? {}) as {
+    windowBounds?: { x?: number; width?: number };
+  }).windowBounds;
+  const candidateListRightCutoff =
+    Number.isFinite(Number(appBounds?.x)) && Number.isFinite(Number(appBounds?.width))
+      ? Number(appBounds?.x) + Number(appBounds?.width) * 0.48
+      : Number.NaN;
+  if (Number.isFinite(centerX) && Number.isFinite(candidateListRightCutoff) && centerX >= candidateListRightCutoff) {
     return null;
   }
 
@@ -5779,8 +6579,33 @@ function scoreBossCandidate({
   if (/[\u4e00-\u9fff]/u.test(summary)) {
     score += 2;
   }
+  const confidence = Number(candidate.confidence ?? NaN);
+  const source = String(((candidate.sourceHints ?? {}) as Record<string, unknown>).source ?? "");
+  if (source.startsWith("ocr-boss-") && Number.isFinite(confidence) && confidence < 0.55) {
+    score -= 18;
+  }
+  if (source === "ocr-boss-list-names") {
+    score += 22;
+  }
+  if (!source.startsWith("ocr-boss-list")) {
+    score -= 12;
+  }
 
   return score;
+}
+
+function bossCandidateSourcePriority(candidate: InteractionCandidate): number {
+  const source = String(((candidate.sourceHints ?? {}) as Record<string, unknown>).source ?? "").trim().toLowerCase();
+  if (source === "ocr-boss-list-names") {
+    return 0;
+  }
+  if (source.startsWith("ocr-boss-list")) {
+    return 1;
+  }
+  if (source.startsWith("ocr-boss-thread")) {
+    return 3;
+  }
+  return 2;
 }
 
 function findBossCandidate(worldState: WorldState | null): InteractionCandidate | null {
@@ -5788,8 +6613,50 @@ function findBossCandidate(worldState: WorldState | null): InteractionCandidate 
   const ranked = candidates
     .map((candidate) => ({ candidate, score: scoreBossCandidate({ candidate, worldState }) }))
     .filter((entry): entry is { candidate: InteractionCandidate; score: number } => Number.isFinite(entry.score))
-    .sort((left, right) => right.score - left.score);
+    .sort((left, right) => {
+      const sourceDelta = bossCandidateSourcePriority(left.candidate) - bossCandidateSourcePriority(right.candidate);
+      if (sourceDelta !== 0) {
+        return sourceDelta;
+      }
+      const scoreDelta = right.score - left.score;
+      if (Math.abs(scoreDelta) >= 8) {
+        return scoreDelta;
+      }
+      const leftY = Number(left.candidate.bounds?.centerY ?? Number.POSITIVE_INFINITY);
+      const rightY = Number(right.candidate.bounds?.centerY ?? Number.POSITIVE_INFINITY);
+      if (Number.isFinite(leftY) || Number.isFinite(rightY)) {
+        return leftY - rightY;
+      }
+      return scoreDelta;
+    });
   return ranked[0]?.candidate ?? null;
+}
+
+function sanitizeBossOpenCandidate(candidate: Record<string, unknown> | InteractionCandidate | null): Record<string, unknown> | null {
+  if (!candidate || typeof candidate !== "object") {
+    return null;
+  }
+  const text = String((candidate as { text?: unknown }).text ?? "").trim();
+  if (!text) {
+    return null;
+  }
+  const sourceHints = ((candidate as { sourceHints?: unknown }).sourceHints ?? null) as Record<string, unknown> | null;
+  const source = String(sourceHints?.source ?? "").trim().toLowerCase();
+  if (source && source !== "vision") {
+    return candidate as Record<string, unknown>;
+  }
+  return {
+    id: String((candidate as { id?: unknown }).id ?? "boss-open-target").trim() || "boss-open-target",
+    surface: "browser",
+    kind: "text",
+    text,
+    role: String((candidate as { role?: unknown }).role ?? "text").trim() || "text",
+    isInteractive: true,
+    ...(((candidate as { bounds?: unknown }).bounds && typeof (candidate as { bounds?: unknown }).bounds === "object")
+      ? { bounds: (candidate as { bounds?: unknown }).bounds as Record<string, unknown> }
+      : {}),
+    ...(sourceHints ? { sourceHints } : {})
+  };
 }
 
 function pickMailComposeQuery(worldState: WorldState | null, surface: LivePackSurface): string {
@@ -6024,24 +6891,37 @@ function extractBossContext(worldState: WorldState | null, summary: string): str
   const normalizedSummary = normalizeBossSummary(summary);
   const summaryIndex = lines.findIndex((line) => normalizeBossSummary(line) === normalizedSummary);
   const pool = summaryIndex === -1 ? lines : lines.slice(Math.max(0, summaryIndex - 1), summaryIndex + 5);
-  return uniqueStrings(
-    pool.filter((line) => {
-      const normalized = normalizeBossSummary(line);
-      return normalized && normalized !== normalizedSummary && !SEND_PATTERN.test(line) && !isBossUiChrome(line);
-    })
-  ).slice(0, 5);
+  return extractBossConversationContextLines(pool, normalizedSummary).slice(0, 5);
 }
 
 function wantsBossReplyWorkflow(goal: string): boolean {
   return /(reply|respond|contact|message|chat|follow up|outreach|沟通|回复|联系|跟进|发消息)/iu.test(String(goal ?? ""));
 }
 
-function pickBossComposeQuery(worldState: WorldState | null): string {
+function findBossComposeCandidate(worldState: WorldState | null): InteractionCandidate | null {
   const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
-  const composeCandidate =
+  return (
     candidates.find((candidate) => {
       const hintText = candidateHintText(candidate);
+      const summary = normalizeBossSummary(candidate.text || hintText);
       const tag = String(((candidate.sourceHints ?? {}) as Record<string, unknown>).tag ?? "").toLowerCase();
+      const centerY = Number(candidate.bounds?.centerY ?? NaN);
+      const appBounds = ((worldState?.capture?.metadata ?? {}) as {
+        windowBounds?: { y?: number; height?: number };
+      }).windowBounds;
+      const upperChromeCutoff =
+        Number.isFinite(Number(appBounds?.y)) && Number.isFinite(Number(appBounds?.height))
+          ? Number(appBounds?.y) + Number(appBounds?.height) * 0.22
+          : Number.NaN;
+      if (
+        !summary
+        || isBossUiChrome(summary)
+        || isBrowserUiChrome(summary)
+        || /zhipin\.com\/web\/chat/iu.test(summary)
+        || (Number.isFinite(centerY) && Number.isFinite(upperChromeCutoff) && centerY <= upperChromeCutoff)
+      ) {
+        return false;
+      }
       if (candidate.role === "textbox" || ["input", "textarea"].includes(tag)) {
         return true;
       }
@@ -6052,7 +6932,12 @@ function pickBossComposeQuery(worldState: WorldState | null): string {
         /(message|reply|chat|contact|消息|回复|输入|联系)/iu.test(hintText) ||
         /(message|reply|chat|contact|消息|回复|输入|联系)/iu.test(candidate.text)
       );
-    }) ?? null;
+    }) ?? null
+  );
+}
+
+function pickBossComposeQuery(worldState: WorldState | null): string {
+  const composeCandidate = findBossComposeCandidate(worldState);
 
   if (!composeCandidate) {
     return /[\u4e00-\u9fff]/u.test(String(worldState?.visibleText ?? "")) ? "发送消息" : "Message";
@@ -6065,13 +6950,18 @@ function pickBossComposeQuery(worldState: WorldState | null): string {
   );
 }
 
-function pickBossSendQuery(worldState: WorldState | null): string {
+function findBossSendCandidate(worldState: WorldState | null): InteractionCandidate | null {
   const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
-  const sendCandidate =
+  return (
     candidates.find((candidate) => {
       const hintText = candidateHintText(candidate);
       return candidate.role === "button" && (SEND_PATTERN.test(hintText) || SEND_PATTERN.test(candidate.text));
-    }) ?? null;
+    }) ?? null
+  );
+}
+
+function pickBossSendQuery(worldState: WorldState | null): string {
+  const sendCandidate = findBossSendCandidate(worldState);
 
   if (!sendCandidate) {
     return /[\u4e00-\u9fff]/u.test(String(worldState?.visibleText ?? "")) ? "发送" : "Send";
@@ -6084,22 +6974,183 @@ function pickBossSendQuery(worldState: WorldState | null): string {
   );
 }
 
+function hasBossDuplicateLoginModal(worldState: WorldState | null): boolean {
+  const lines = visibleLines(worldState)
+    .slice(0, 60)
+    .map((line) => String(line ?? "").trim())
+    .filter(Boolean);
+  const pageText = lines.join("\n");
+  if (BOSS_DUPLICATE_LOGIN_MODAL_PATTERN.test(pageText)) {
+    return true;
+  }
+
+  const hasBossSiteAlert = lines.some((line) => /(www\.zhipin\.com says|zhipin\.com says)/iu.test(line));
+  const hasConfirm = lines.some((line) => BOSS_MODAL_CONFIRM_PATTERN.test(line));
+  return hasBossSiteAlert && hasConfirm;
+}
+
+function isBossSiteAlertConfirmModal(worldState: WorldState | null): boolean {
+  const lines = visibleLines(worldState)
+    .slice(0, 60)
+    .map((line) => String(line ?? "").trim())
+    .filter(Boolean);
+  const hasBossSiteAlert = lines.some((line) => /(www\.zhipin\.com says|zhipin\.com says)/iu.test(line));
+  const hasConfirm = lines.some((line) => BOSS_MODAL_CONFIRM_PATTERN.test(line));
+  return hasBossSiteAlert && hasConfirm;
+}
+
+function findBossDuplicateLoginConfirmCandidate(worldState: WorldState | null): InteractionCandidate | null {
+  const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
+  const ranked = candidates
+    .filter((candidate) => {
+      const text = String(candidate.text ?? "").trim();
+      const hintText = candidateHintText(candidate);
+      return (
+        BOSS_MODAL_CONFIRM_PATTERN.test(text)
+        || (candidate.role === "button" && BOSS_MODAL_CONFIRM_PATTERN.test(hintText))
+      );
+    })
+    .sort((left, right) => Number(right.confidence ?? 0) - Number(left.confidence ?? 0));
+  return ranked[0] ?? null;
+}
+
+async function dismissBossDuplicateLoginModalIfPresent({
+  rule,
+  workspace,
+  surfaceRegistry,
+  worldState
+}: {
+  rule: WatchRule;
+  workspace: WorkspaceProfile;
+  surfaceRegistry: SurfaceRegistry;
+  worldState: WorldState | null;
+}): Promise<WorldState | null> {
+  if (!hasBossDuplicateLoginModal(worldState)) {
+    return worldState;
+  }
+
+  const adapter = surfaceRegistry.get("browser");
+  if (!adapter) {
+    return worldState;
+  }
+
+  if (isBossSiteAlertConfirmModal(worldState)) {
+    try {
+      await adapter.act({
+        task: createWatchTask(rule),
+        step: {
+          id: `boss-dismiss-site-alert-${rule.id}`,
+          label: "Confirm BOSS site alert",
+          surface: "browser",
+          action: "press",
+          params: {
+            key: "enter"
+          }
+        },
+        workspace: profileAsWorkspace(rule, workspace),
+        traceId: null,
+        outputs: {}
+      });
+      await adapter
+        .act({
+          task: createWatchTask(rule),
+          step: {
+            id: `boss-dismiss-site-alert-wait-${rule.id}`,
+            label: "Wait for BOSS site alert to close",
+            surface: "browser",
+            action: "wait",
+            params: { ms: 700 }
+          },
+          workspace: profileAsWorkspace(rule, workspace),
+          traceId: null,
+          outputs: {}
+        })
+        .catch(() => null);
+      const dismissedState = await observeWatchSurface({
+        rule,
+        workspace,
+        surfaceRegistry,
+        controlPlane: {} as LivePackControlPlane,
+        surface: "browser"
+      });
+      if (!hasBossDuplicateLoginModal(dismissedState)) {
+        return dismissedState;
+      }
+    } catch {
+      // Fall back to explicit button grounding below.
+    }
+  }
+
+  const confirmCandidate = findBossDuplicateLoginConfirmCandidate(worldState);
+  const confirmQueries = uniqueStrings([
+    String(confirmCandidate?.text ?? "").trim(),
+    "OK",
+    "确定"
+  ]);
+
+  let dismissed = false;
+  for (const query of confirmQueries) {
+    try {
+      await adapter.act({
+        task: createWatchTask(rule),
+        step: {
+          id: `boss-dismiss-duplicate-login-${rule.id}`,
+          label: "Dismiss BOSS duplicate-login modal",
+          surface: "browser",
+          action: "clickTarget",
+          params: {
+            targetQuery: query,
+            ...(confirmCandidate ? { target: confirmCandidate } : {})
+          }
+        },
+        workspace: profileAsWorkspace(rule, workspace),
+        traceId: null,
+        outputs: {}
+      });
+      dismissed = true;
+      break;
+    } catch {
+      continue;
+    }
+  }
+
+  if (!dismissed) {
+    return worldState;
+  }
+
+  await adapter
+    .act({
+      task: createWatchTask(rule),
+      step: {
+        id: `boss-dismiss-duplicate-login-wait-${rule.id}`,
+        label: "Wait for BOSS duplicate-login modal to close",
+        surface: "browser",
+        action: "wait",
+        params: { ms: 500 }
+      },
+      workspace: profileAsWorkspace(rule, workspace),
+      traceId: null,
+      outputs: {}
+    })
+    .catch(() => null);
+
+  return observeWatchSurface({
+    rule,
+    workspace,
+    surfaceRegistry,
+    controlPlane: {} as LivePackControlPlane,
+    surface: "browser"
+  });
+}
+
 function extractBossThreadContext(worldState: WorldState | null, summary: string): string[] {
   const lines = visibleLines(worldState).filter((line) => !isBossUiChrome(line));
   const normalizedSummary = normalizeBossSummary(summary);
   const summaryIndex = lines.findIndex((line) => normalizeBossSummary(line) === normalizedSummary);
   const pool = summaryIndex === -1 ? lines : lines.slice(Math.max(0, summaryIndex - 1), summaryIndex + 8);
-  return uniqueStrings(
-    pool.filter((line) => {
-      const normalized = normalizeBossSummary(line);
-      return (
-        normalized &&
-        normalized !== normalizedSummary &&
-        !SEND_PATTERN.test(line) &&
-        !isBossUiChrome(line) &&
-        !/^(发送消息|message|reply|chat|contact|沟通|回复|输入|联系)/iu.test(line.trim())
-      );
-    })
+  return extractBossConversationContextLines(
+    pool.filter((line) => !/^(发送消息|message|reply|chat|contact|沟通|回复|输入|联系)/iu.test(line.trim())),
+    normalizedSummary
   ).slice(0, 6);
 }
 
@@ -6371,37 +7422,61 @@ function buildSlackReplySteps(surface: LivePackSurface): RuntimeStep[] {
   ];
 }
 
-function buildBossReplySteps(): RuntimeStep[] {
-  return [
-    {
+function buildBossReplySteps({
+  includeOpenStep = true,
+  composeReady = false
+}: {
+  includeOpenStep?: boolean;
+  composeReady?: boolean;
+} = {}): RuntimeStep[] {
+  const steps: RuntimeStep[] = [];
+  if (includeOpenStep) {
+    steps.push({
       label: "Open BOSS candidate detail",
       surface: "browser",
       action: "clickTarget",
-      params: { targetQuery: "{{openTarget}}" },
+      params: { target: "{{openCandidate}}", targetQuery: "{{openTarget}}" },
       checkpoint: false
-    },
-    {
-      label: "Wait for BOSS candidate thread",
-      surface: "browser",
-      action: "waitForTarget",
-      params: { targetQuery: "{{typeTarget}}", timeoutMs: 5000 },
-      checkpoint: false
-    },
+    });
+  }
+
+  steps.push(
+    composeReady
+      ? {
+          label: "Wait for BOSS thread selection to settle",
+          surface: "browser",
+          action: "wait",
+          params: { ms: 500 },
+          checkpoint: false
+        }
+      : {
+          label: "Wait for BOSS candidate thread",
+          surface: "browser",
+          action: "waitForTarget",
+          params: { target: "{{composeTarget}}", targetQuery: "{{typeTarget}}", timeoutMs: 5000 },
+          checkpoint: false
+        },
     {
       label: "Type BOSS reply",
       surface: "browser",
       action: "typeIntoTarget",
-      params: { targetQuery: "{{typeTarget}}", text: "{{typeText}}", clear: false },
+      params: { target: "{{composeTarget}}", targetQuery: "{{typeTarget}}", text: "{{typeText}}", clear: true },
+      expect: {
+        textVisible: "{{typeTextPreview}}",
+        draftThreadVisible: "{{watchItemText}}"
+      },
       checkpoint: false
     },
     {
       label: "Send BOSS reply",
       surface: "browser",
       action: "clickTarget",
-      params: { targetQuery: "{{sendTarget}}" },
+      params: { target: "{{sendTargetCandidate}}", targetQuery: "{{sendTarget}}" },
       checkpoint: false
     }
-  ];
+  );
+
+  return steps;
 }
 
 export function analyzeConversationPack(
@@ -8594,30 +9669,157 @@ async function openBossCandidateForContext({
   rule,
   workspace,
   surfaceRegistry,
-  detection
-}: LivePackExtractContextArgs): Promise<WorldState | null> {
+  controlPlane,
+  detection,
+  worldState
+}: LivePackExtractContextArgs): Promise<{
+  worldState: WorldState | null;
+  openCandidate: Record<string, unknown> | null;
+}> {
   const adapter = surfaceRegistry.get("browser");
   if (!adapter) {
-    return null;
+    return { worldState: null, openCandidate: null };
   }
 
   const openTarget = String(detection.inputs?.openTarget ?? detection.summary ?? "").trim();
   if (!openTarget) {
-    return null;
+    return { worldState: null, openCandidate: null };
   }
 
+  let effectiveWorldState =
+    (await dismissBossDuplicateLoginModalIfPresent({
+      rule,
+      workspace,
+      surfaceRegistry,
+      worldState
+    }).catch(() => worldState)) ?? worldState;
+
   const openCandidate = (detection.metadata?.openCandidate ?? null) as Record<string, unknown> | null;
+  const matchedListCandidate = findBossListCandidateByTarget(effectiveWorldState, openTarget);
+  const preferTopVisibleRow = Boolean(detection.metadata?.preferTopVisibleRow);
+  const visualThread = (detection.metadata?.visualThread ?? null) as DesktopVisualThreadSummary | null;
+  const targetSnippet = String(
+    ((visualThread as { latestSnippet?: unknown; subjectCue?: unknown } | null)?.latestSnippet
+      ?? (visualThread as { latestSnippet?: unknown; subjectCue?: unknown } | null)?.subjectCue
+      ?? detection.context?.[0]
+      ?? "")
+  ).trim() || null;
+  const groundedTarget = preferTopVisibleRow
+    ? null
+    : await groundBossTargetThreadClickPoint({
+        modelClient: controlPlane.modelClient,
+        worldState: effectiveWorldState,
+        targetThread: openTarget,
+        targetSnippet
+      }).catch(() => null);
+  const browserFrame = await resolveBrowserVisionFrame(effectiveWorldState);
+  const groundedRowBounds = await resolveBrowserVisionCandidateBounds(
+    effectiveWorldState,
+    groundedTarget?.targetVisible && groundedTarget.rowBox ? groundedTarget.rowBox : null
+  );
+  const topVisibleRowBounds = preferTopVisibleRow
+    ? buildBrowserPointBounds(effectiveWorldState, deriveBossTopVisibleRowPoint(effectiveWorldState), 24)
+    : null;
+  const visionRowBounds =
+    !matchedListCandidate?.bounds
+      ? buildBrowserPointBounds(effectiveWorldState, deriveBossVisionRowPoint(visualThread), 24)
+      : null;
+  const fallbackOpenPoint = preferTopVisibleRow
+    ? boundsCenter(topVisibleRowBounds)
+    : matchedListCandidate?.bounds
+      ? boundsCenter(matchedListCandidate.bounds)
+      : visionRowBounds
+        ? boundsCenter(visionRowBounds)
+        : boundsCenter(
+            ((sanitizeBossOpenCandidate(openCandidate)?.bounds ?? null) as InteractionCandidate["bounds"] | null) ?? null
+          );
+  const openPoint = resolveBossGroundedOpenPoint(browserFrame, groundedTarget, fallbackOpenPoint);
+  const resolvedOpenCandidate =
+    groundedRowBounds
+      ? {
+          ...(sanitizeBossOpenCandidate(openCandidate) ?? {
+            id: "boss-open-target",
+            surface: "browser",
+            kind: "text",
+            text: openTarget,
+            role: "text",
+            isInteractive: true
+          }),
+          bounds: groundedRowBounds
+        }
+      : matchedListCandidate?.bounds
+        ? {
+            ...(sanitizeBossOpenCandidate(openCandidate) ?? {
+              id: "boss-open-target",
+              surface: "browser",
+              kind: "text",
+              text: openTarget,
+              role: "text",
+              isInteractive: true
+            }),
+            bounds: matchedListCandidate.bounds,
+            sourceHints: {
+              ...(((sanitizeBossOpenCandidate(openCandidate)?.sourceHints ?? null) as Record<string, unknown> | null) ?? {}),
+              ...(((matchedListCandidate.sourceHints ?? null) as Record<string, unknown> | null) ?? {})
+            }
+          }
+        : visionRowBounds
+          ? {
+              ...(sanitizeBossOpenCandidate(openCandidate) ?? {
+                id: "boss-open-target",
+                surface: "browser",
+                kind: "text",
+                text: openTarget,
+                role: "text",
+                isInteractive: true
+              }),
+              bounds: visionRowBounds
+            }
+          : (topVisibleRowBounds
+              ? {
+                  ...(sanitizeBossOpenCandidate(openCandidate) ?? {
+                    id: "boss-open-target",
+                    surface: "browser",
+                    kind: "text",
+                    text: openTarget,
+                    role: "text",
+                    isInteractive: true
+                  }),
+                  bounds: topVisibleRowBounds
+                }
+              : sanitizeBossOpenCandidate(openCandidate));
   await adapter.act({
     task: createWatchTask(rule),
     step: {
       id: `boss-open-${rule.id}`,
       label: "Open BOSS candidate detail",
       surface: "browser",
-      action: "clickTarget",
-      params: {
-        targetQuery: openTarget,
-        ...(openCandidate ? { target: openCandidate } : {})
-      }
+      action: openPoint ? "clickAt" : "clickTarget",
+      params: openPoint
+        ? {
+            x: openPoint.x,
+            y: openPoint.y,
+            targetQuery: openTarget,
+            ...(resolvedOpenCandidate ? { target: resolvedOpenCandidate } : {})
+          }
+        : {
+            targetQuery: openTarget,
+            ...(resolvedOpenCandidate ? { target: resolvedOpenCandidate } : {})
+          }
+    },
+    workspace: profileAsWorkspace(rule, workspace),
+    traceId: null,
+    outputs: {}
+  });
+
+  await adapter.act({
+    task: createWatchTask(rule),
+    step: {
+      id: `boss-open-settle-${rule.id}`,
+      label: "Wait for BOSS thread selection to settle",
+      surface: "browser",
+      action: "wait",
+      params: { ms: 500 }
     },
     workspace: profileAsWorkspace(rule, workspace),
     traceId: null,
@@ -8635,36 +9837,34 @@ async function openBossCandidateForContext({
         action: "waitFor",
         params: {
           text: detailReadyTarget,
-          timeoutMs: 5000
+          timeoutMs: 3000
         }
       },
       workspace: profileAsWorkspace(rule, workspace),
       traceId: null,
       outputs: {}
-    });
-  } else {
-    await adapter.act({
-      task: createWatchTask(rule),
-      step: {
-        id: `boss-open-delay-${rule.id}`,
-        label: "Wait for BOSS candidate detail",
-        surface: "browser",
-        action: "wait",
-        params: { ms: 100 }
-      },
-      workspace: profileAsWorkspace(rule, workspace),
-      traceId: null,
-      outputs: {}
-    });
+    }).catch(() => null);
   }
 
-  return observeWatchSurface({
+  effectiveWorldState = await observeWatchSurface({
     rule,
     workspace,
     surfaceRegistry,
     controlPlane: {} as LivePackControlPlane,
     surface: "browser"
   });
+  effectiveWorldState =
+    (await dismissBossDuplicateLoginModalIfPresent({
+      rule,
+      workspace,
+      surfaceRegistry,
+      worldState: effectiveWorldState
+    }).catch(() => effectiveWorldState)) ?? effectiveWorldState;
+
+  return {
+    worldState: effectiveWorldState,
+    openCandidate: resolvedOpenCandidate ?? null
+  };
 }
 
 function createMailPack({
@@ -9535,10 +10735,17 @@ function createBossPack(): LivePack {
     async observeInbox(args) {
       return observeWatchSurface({ ...args, surface: "browser" });
     },
-    async detectNewItems({ rule, worldState, dedupeState = {} }) {
+    async detectNewItems({ rule, worldState, dedupeState = {}, controlPlane, workspace, surfaceRegistry }) {
+      const effectiveWorldState =
+        (await dismissBossDuplicateLoginModalIfPresent({
+          rule,
+          workspace,
+          surfaceRegistry,
+          worldState
+        }).catch(() => worldState)) ?? worldState;
       const manualIntervention = detectBrowserManualIntervention({
         packName: "boss-browser",
-        worldState,
+        worldState: effectiveWorldState,
         rule,
         dedupeState
       });
@@ -9546,7 +10753,58 @@ function createBossPack(): LivePack {
         return manualIntervention;
       }
 
-      const candidate = findBossCandidate(worldState);
+      let candidate = findBossCandidate(effectiveWorldState);
+      let vision: DesktopVisualAnalysis | null = null;
+      let visualThread: DesktopVisualThreadSummary | null = null;
+      const ocrSummary = normalizeBossSummary(candidate?.text || candidateHintText(candidate));
+      const supportsBossVision = Boolean(controlPlane.modelClient?.supportsImageJson?.());
+      const needsVisionFallback =
+        !candidate
+        || !ocrSummary
+        || isLowQualityBossSummary(ocrSummary)
+        || isBossUiChrome(ocrSummary)
+        || /(zhipin\.com|boss直聘注册登录|web\/chat\/index)/iu.test(String(candidate?.text ?? ""));
+      if (supportsBossVision || needsVisionFallback) {
+        vision = await analyzeBossBrowserVisualState({
+          modelClient: controlPlane.modelClient,
+          worldState: effectiveWorldState
+        }).catch(() => null);
+        visualThread = pickDesktopVisualUnreadThread(vision);
+        const matchedListCandidate = visualThread
+          ? findBossListCandidateByTarget(
+              effectiveWorldState,
+              deriveBossOpenTarget(visualThread.name) || visualThread.name
+            )
+          : null;
+        const visualOpenBounds = await resolveBrowserVisionCandidateBounds(effectiveWorldState, visualThread?.approxBox ?? null);
+        if (visualThread && matchedListCandidate?.bounds) {
+          candidate = {
+            ...matchedListCandidate,
+            text: visualThread.name,
+            confidence: Math.max(Number(matchedListCandidate.confidence ?? 0.75), 0.82),
+            sourceHints: {
+              ...((matchedListCandidate.sourceHints ?? {}) as Record<string, unknown>),
+              source: "vision+ocr",
+              latestSnippet: visualThread.latestSnippet
+            }
+          } satisfies InteractionCandidate;
+        } else if (visualThread && visualOpenBounds) {
+          candidate = {
+            id: "boss-vision-unread",
+            surface: "browser",
+            kind: "text",
+            text: visualThread.name,
+            role: "text",
+            bounds: visualOpenBounds,
+            confidence: 0.8,
+            sourceHints: {
+              source: "vision",
+              latestSnippet: visualThread.latestSnippet
+            },
+            isInteractive: true
+          } satisfies InteractionCandidate;
+        }
+      }
       if (!candidate) {
         return null;
       }
@@ -9556,7 +10814,11 @@ function createBossPack(): LivePack {
         return null;
       }
 
-      const context = extractBossContext(worldState, candidate.text || summary);
+      const context = uniqueStrings([
+        String(visualThread?.latestSnippet ?? "").trim(),
+        String(visualThread?.replyReason ?? "").trim(),
+        ...extractBossContext(effectiveWorldState, candidate.text || summary)
+      ]).slice(0, 5);
       const itemFingerprint = fingerprint(
         `boss-browser:${rule.workspaceName ?? "default"}:${summary}:${context.join("|")}`
       );
@@ -9564,7 +10826,7 @@ function createBossPack(): LivePack {
         return null;
       }
 
-      const startUrl = String(rule.taskInputs?.startUrl ?? rule.taskInputs?.url ?? inferBrowserPageUrl(worldState) ?? "").trim();
+      const startUrl = String(rule.taskInputs?.startUrl ?? rule.taskInputs?.url ?? inferBrowserPageUrl(effectiveWorldState) ?? "").trim();
       return {
         fingerprint: itemFingerprint,
         summary,
@@ -9576,7 +10838,7 @@ function createBossPack(): LivePack {
           watchSummary: summary,
           watchContext: context.join("\n"),
           startUrl,
-          openTarget: String(candidate.text ?? summary).trim() || summary,
+          openTarget: deriveBossOpenTarget(String(candidate.text ?? summary)) || summary,
           detailReadyTarget: String(rule.taskInputs?.detailReadyTarget ?? "在线沟通")
         },
         taskSpec: {
@@ -9585,12 +10847,20 @@ function createBossPack(): LivePack {
           executionMode: "planned"
         },
         metadata: {
+          ...(
+            String(((candidate.sourceHints ?? {}) as Record<string, unknown>).source ?? "").trim().toLowerCase() === "vision"
+            || isBossLikelyMidListCandidate(candidate, effectiveWorldState)
+              ? { preferTopVisibleRow: true }
+              : {}
+          ),
+          ...(vision ? { visualAnalysis: vision } : {}),
+          ...(visualThread ? { visualThread } : {}),
           ...buildConversationMetadata({
             packName: "boss-browser",
             surface: "browser",
             summary,
             context,
-            openTarget: String(candidate.text ?? summary).trim() || summary,
+            openTarget: deriveBossOpenTarget(String(candidate.text ?? summary)) || summary,
             candidate
           }),
           skillName: "boss-open-candidate"
@@ -9598,11 +10868,91 @@ function createBossPack(): LivePack {
       };
     },
     async extractContext(args) {
-      const threadState = await openBossCandidateForContext(args);
-      const summary = String(args.detection.summary ?? "").trim();
-      const context = extractBossThreadContext(threadState, summary);
+      const { worldState: threadState, openCandidate: resolvedOpenCandidate } = await openBossCandidateForContext(args);
+      const visibleThreadSummary = pickBossThreadName(threadState, "");
+      const summary = visibleThreadSummary || String(args.detection.summary ?? "").trim();
+      const existingComposeCandidate = findBossComposeCandidate(threadState);
+      const existingSendCandidate = findBossSendCandidate(threadState);
+      const existingComposeSource = String(
+        ((existingComposeCandidate?.sourceHints ?? {}) as Record<string, unknown>).source ?? ""
+      ).toLowerCase();
+      const needsVisionComposerGrounding =
+        !existingComposeCandidate
+        || existingComposeSource.startsWith("ocr");
+      const vision = needsVisionComposerGrounding
+        ? await analyzeBossBrowserVisualState({
+            modelClient: args.controlPlane.modelClient,
+            worldState: threadState
+          }).catch(() => null)
+        : null;
+      const context = uniqueStrings([
+        String(pickDesktopVisualUnreadThread(vision)?.latestSnippet ?? "").trim(),
+        ...extractBossThreadContext(threadState, summary)
+      ]).slice(0, 6);
       const replyWorkflow = wantsBossReplyWorkflow(args.rule.goal);
-      const openTarget = String(args.detection.inputs?.openTarget ?? summary).trim() || summary;
+      const detectedOpenTarget = String(args.detection.inputs?.openTarget ?? summary).trim() || summary;
+      const resolvedThreadNameIsUsable =
+        Boolean(visibleThreadSummary)
+        && !isLowQualityBossSummary(visibleThreadSummary)
+        && !isBossUiChrome(visibleThreadSummary);
+      const openTarget =
+        args.detection.metadata?.preferTopVisibleRow && resolvedThreadNameIsUsable
+          ? visibleThreadSummary
+          : detectedOpenTarget;
+      const composeQuery = pickBossComposeQuery(threadState);
+      const sendQuery = pickBossSendQuery(threadState);
+      const composeBounds = await resolveBrowserVisionCandidateBounds(threadState, vision?.composer.approxBox ?? null);
+      const composeRegionFallbackBounds = deriveBossComposeFallbackBounds(threadState);
+      const composeFallbackBounds =
+        composeBounds
+        ?? composeRegionFallbackBounds
+        ?? buildBrowserPointBounds(threadState, deriveBossComposeFallbackPoint(threadState), 22);
+      const openCandidate =
+        resolvedOpenCandidate
+        ?? sanitizeBossOpenCandidate((args.detection.metadata?.openCandidate ?? null) as Record<string, unknown> | null);
+      const composeTarget =
+        composeFallbackBounds
+          ? {
+              id: "boss-compose-vision",
+              text: String(vision?.composer.evidence ?? "发送消息").trim() || "发送消息",
+              role: "textbox",
+              bounds: composeFallbackBounds,
+              sourceHints: {
+                source:
+                  composeBounds
+                    ? "vision"
+                    : (composeRegionFallbackBounds ? "boss-compose-region-fallback" : "boss-compose-fallback")
+              }
+            }
+          : (existingComposeCandidate
+            ? { ...existingComposeCandidate }
+            : {
+                id: "boss-compose-fallback",
+                text: composeQuery,
+                role: "textbox",
+                sourceHints: {
+                  source: "fallback",
+                  placeholder: composeQuery
+                }
+              });
+      const sendTargetCandidate =
+        (existingSendCandidate
+          ? { ...existingSendCandidate }
+          : {
+              id: "boss-send-fallback",
+              text: sendQuery,
+              role: "button",
+              sourceHints: {
+                source: "fallback",
+                ariaLabel: sendQuery
+              }
+            });
+      const threadReadyForReply = Boolean(
+        threadState
+        && resolvedThreadNameIsUsable
+        && scoreBossTargetNameMatch(visibleThreadSummary, openTarget) != null
+        && (existingComposeCandidate || composeFallbackBounds)
+      );
 
       return {
         summary,
@@ -9611,11 +10961,14 @@ function createBossPack(): LivePack {
           ...(args.detection.inputs ?? {}),
           watchContext: context.join("\n"),
           openTarget,
+          openCandidate,
           detailReadyTarget: String(args.detection.inputs?.detailReadyTarget ?? "在线沟通"),
           ...(replyWorkflow
             ? {
-                typeTarget: pickBossComposeQuery(threadState),
-                sendTarget: pickBossSendQuery(threadState)
+                composeTarget,
+                typeTarget: composeTarget?.bounds ? "" : (String(composeTarget?.text ?? "").trim() || composeQuery),
+                sendTarget: sendQuery,
+                sendTargetCandidate
               }
             : {})
         },
@@ -9636,7 +10989,10 @@ function createBossPack(): LivePack {
               taskSpec: {
                 preferredSurface: "browser",
                 skillName: null,
-                steps: buildBossReplySteps()
+                steps: buildBossReplySteps({
+                  includeOpenStep: !threadReadyForReply,
+                  composeReady: threadReadyForReply
+                })
               }
             }
           : {})

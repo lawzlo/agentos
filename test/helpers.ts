@@ -805,6 +805,7 @@ export async function startAgentServer({ dataDir, ...overrides }) {
     port: 0,
     dataDir,
     headless: true,
+    browserMode: "managed_profile",
     ...(overrides.model
       ? {}
       : {

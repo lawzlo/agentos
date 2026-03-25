@@ -184,6 +184,31 @@ function classifyClaudeCodeCliError(detail: string): ClaudeCodeCliErrorKind {
   return "failed";
 }
 
+function extractClaudeCodeCliErrorDetail(stdout: string, stderr: string, signal: NodeJS.Signals | null): string {
+  const trimmedStdout = String(stdout ?? "").trim();
+  if (trimmedStdout) {
+    try {
+      const payload = JSON.parse(trimmedStdout) as {
+        result?: unknown;
+        is_error?: unknown;
+        subtype?: unknown;
+      };
+      const resultText = String(payload.result ?? "").trim();
+      if (payload.is_error === true && resultText) {
+        return resultText;
+      }
+    } catch {
+      // Ignore malformed CLI stdout and fall back to stderr below.
+    }
+  }
+
+  const trimmedStderr = String(stderr ?? "").trim();
+  if (trimmedStderr) {
+    return trimmedStderr;
+  }
+  return signal ? `signal: ${signal}` : "";
+}
+
 async function runClaudeCodeCommand(args: string[], timeoutMs: number): Promise<{ stdout: string; stderr: string }> {
   return await new Promise((resolve, reject) => {
     const child = spawn(claudeCodeCommand(), args, {
@@ -237,10 +262,10 @@ async function runClaudeCodeCommand(args: string[], timeoutMs: number): Promise<
         resolve({ stdout, stderr });
         return;
       }
-      const trimmedStderr = stderr.trim();
-      const suffix = trimmedStderr ? `: ${trimmedStderr.slice(0, 400)}` : signal ? ` (signal: ${signal})` : "";
+      const detail = extractClaudeCodeCliErrorDetail(stdout, stderr, signal);
+      const suffix = detail ? `: ${detail.slice(0, 400)}` : "";
       const message = `Claude Code CLI exited with code ${code ?? "unknown"}${suffix}`;
-      reject(new ClaudeCodeCliError(classifyClaudeCodeCliError(trimmedStderr || message), message, trimmedStderr));
+      reject(new ClaudeCodeCliError(classifyClaudeCodeCliError(detail || message), message, detail));
     });
   });
 }

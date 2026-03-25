@@ -51,6 +51,7 @@ export interface AgentOsConfig {
   masterKeyPath: string;
   inboxDir: string;
   headless: boolean;
+  browserMode: "managed_profile" | "main_chrome";
   browserExecutable?: string;
   livePacks: Record<string, LivePack> | null;
   model: AgentModelConfig;
@@ -63,6 +64,7 @@ export interface ConfigOverrides {
   port?: number | string;
   dataDir?: string;
   headless?: boolean;
+  browserMode?: "managed_profile" | "main_chrome";
   browserExecutable?: string;
   livePacks?: Record<string, LivePack> | null;
   model?: Partial<AgentModelConfig>;
@@ -350,6 +352,9 @@ export function resolveConfig(overrides: ConfigOverrides = {}): AgentOsConfig {
     masterKeyPath: path.join(dataDir, "master.key"),
     inboxDir: path.join(dataDir, "inbox"),
     headless: overrides.headless ?? process.env.AGENTOS_HEADLESS !== "false",
+    browserMode:
+      overrides.browserMode ??
+      (String(process.env.AGENTOS_BROWSER_MODE ?? "").trim().toLowerCase() === "managed_profile" ? "managed_profile" : "main_chrome"),
     browserExecutable: overrides.browserExecutable ?? detectBrowserExecutable(),
     livePacks: overrides.livePacks ?? null,
     model: {

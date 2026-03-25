@@ -191,6 +191,57 @@ test("collectSurfaceState uses pack defaults to open browser workspaces and clas
   assert.equal(report.manualIntervention?.kind, "login");
 });
 
+test("collectSurfaceState opens boss chat by default and treats expired sessions as blocked sign-in", async () => {
+  const request: SurfaceStateRequest = {
+    surface: "browser",
+    appName: null,
+    packName: "boss-browser",
+    workspaceName: "state-boss-browser-default-url",
+    sampleLimit: 5,
+    timeoutMs: 1500,
+    requireAccessibility: false,
+    waitReady: false,
+    url: null,
+    browserProfilePath: null
+  };
+
+  let openedUrl: string | null = null;
+  const report = await collectSurfaceState(request, {
+    browserAdapter: {
+      async act({ step }) {
+        openedUrl = String(step.params?.url ?? "");
+        return { ok: true };
+      },
+      async observe() {
+        return {
+          version: 1,
+          surface: "browser",
+          workspaceId: "workspace-state-browser",
+          appContext: {
+            title: "BOSS直聘",
+            url: "https://www.zhipin.com/web/geek/chat"
+          },
+          capture: null,
+          ocrBlocks: [],
+          interactionCandidates: [],
+          visibleText: "全部\n未读\n当前暂无消息\n当前登录状态已失效",
+          recentActions: [],
+          summary: "BOSS直聘",
+          timestamp: new Date().toISOString()
+        };
+      },
+      async shutdown() {}
+    }
+  });
+
+  assert.equal(openedUrl, "https://www.zhipin.com/web/geek/chat");
+  assert.equal(report.readinessState, "blocked_signin");
+  assert.equal(report.scene, "signin");
+  assert.equal(report.manualIntervention?.kind, "session_expired");
+  assert.deepEqual(report.skipReasons, ["blocked_signin"]);
+  assert.equal(report.recoverySuggested, "complete_signin");
+});
+
 test("collectSurfaceState treats empty browser shells as needs_takeover instead of no_visible_thread", async () => {
   const request: SurfaceStateRequest = {
     surface: "browser",

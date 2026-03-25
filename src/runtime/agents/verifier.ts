@@ -1,5 +1,5 @@
 import { VerificationError } from "../errors.js";
-import type { SurfaceRegistry } from "../surface-registry.js";
+import type { SurfaceCoordinator } from "../surface-coordinator.js";
 import type { TraceStore } from "../trace-store.js";
 import type {
   ExecutionSummary,
@@ -22,15 +22,15 @@ interface VerifierSurface {
 }
 
 interface VerifierAgentOptions {
-  surfaceRegistry: SurfaceRegistry;
+  surfaceCoordinator: SurfaceCoordinator;
   traceStore: TraceStore;
 }
 
 export class VerifierAgent {
-  surfaceRegistry: SurfaceRegistry;
+  surfaceCoordinator: SurfaceCoordinator;
   traceStore: TraceStore;
-  constructor({ surfaceRegistry, traceStore }: VerifierAgentOptions) {
-    this.surfaceRegistry = surfaceRegistry;
+  constructor({ surfaceCoordinator, traceStore }: VerifierAgentOptions) {
+    this.surfaceCoordinator = surfaceCoordinator;
     this.traceStore = traceStore;
   }
 
@@ -75,17 +75,26 @@ export class VerifierAgent {
         continue;
       }
 
-      const surface = this.surfaceRegistry.get<VerifierSurface>(step.surface);
-      if (!surface) {
+      if (!step.surface) {
         throw new VerificationError(`Unknown verifier surface: ${step.surface}`, { stepId: step.id });
       }
-      const outcome = await surface.verify({
-        task,
-        step,
-        workspace,
-        traceId,
-        expectation: step.expect
-      });
+      const outcome = await this.surfaceCoordinator.withTaskStepSurface(
+        {
+          surface: step.surface,
+          workspaceKey: workspace.id,
+          holderId: `task:${task.id}:verify:${step.id}`,
+          taskId: task.id,
+          reason: `verify ${step.label ?? step.action}`
+        },
+        async ({ adapter }) =>
+          (adapter as VerifierSurface).verify({
+            task,
+            step,
+            workspace,
+            traceId,
+            expectation: step.expect
+          })
+      );
 
       checks.push({ stepId: step.id, ok: outcome.ok, details: outcome.details });
 

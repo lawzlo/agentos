@@ -98,7 +98,7 @@ const DESKTOP_VLM_MODEL_MAX_REQUESTS = 6;
 const DESKTOP_SURFACE_COOLDOWN_MS = 5 * 60_000;
 const REPEATED_NO_TRIGGER_COOLDOWN_THRESHOLD = 2;
 const STORAGE_GUARD_BACKOFF_MS = 30 * 60_000;
-const DEFAULT_STORAGE_GUARD_MAX_USED_PERCENT = 85;
+const DEFAULT_STORAGE_GUARD_MAX_USED_PERCENT = 90;
 
 function storageGuardMaximumUsedPercent(): number {
   const override = Number(process.env.AGENTOS_STORAGE_GUARD_MAX_USED_PERCENT ?? "");
@@ -344,6 +344,7 @@ interface WatchExecutionServiceOptions {
     | "workspaceManager"
     | "watchService"
     | "draftService"
+    | "surfaceCoordinator"
     | "surfaceRegistry"
     | "policyEngine"
     | "listReplyStylePreferences"
@@ -389,6 +390,14 @@ const OUTLOOK_SCAN_STAGE_TIMEOUT_MS: Partial<Record<WatchScanStage, number>> = {
   observe_inbox: 12000,
   detect_items: 90000,
   extract_context: 20000,
+  draft_reply: 20000
+};
+
+const BOSS_BROWSER_SCAN_STAGE_TIMEOUT_MS: Partial<Record<WatchScanStage, number>> = {
+  activate_pack: 20000,
+  observe_inbox: 12000,
+  detect_items: 20000,
+  extract_context: 40000,
   draft_reply: 20000
 };
 
@@ -647,6 +656,9 @@ export class WatchExecutionService {
     }
     if (rule.livePack === "outlook-desktop") {
       return Math.max(OUTLOOK_SCAN_STAGE_TIMEOUT_MS[stage] ?? this.scanStageTimeoutMs[stage], draftReplyFloorMs);
+    }
+    if (rule.livePack === "boss-browser") {
+      return Math.max(BOSS_BROWSER_SCAN_STAGE_TIMEOUT_MS[stage] ?? this.scanStageTimeoutMs[stage], draftReplyFloorMs);
     }
     return Math.max(this.scanStageTimeoutMs[stage], draftReplyFloorMs);
   }
@@ -1075,89 +1087,141 @@ export class WatchExecutionService {
         return;
       }
 
-      currentScanStage = "activate_pack";
-      [activeRule] = await this.runScanStage(activeRule, currentScanStage, async () => {
-        await pack.activate?.({
-          rule: activeRule,
-          workspace,
-          surfaceRegistry: this.controlPlane.surfaceRegistry,
-          controlPlane: this.controlPlane
-        });
-        return true;
-      });
+      const scanSession = await this.controlPlane.surfaceCoordinator.withWatchScanSession(
+        {
+          surface: activeRule.preferredSurface,
+          workspaceKey: workspace.name,
+          holderId: `watch:${activeRule.id}:scan`,
+          watchId: activeRule.id,
+          reason: `${activeRule.livePack} scan`
+        },
+        async ({ surfaceRegistry }) => {
+          activeRule = {
+            ...activeRule,
+            dedupeState: recordSurfaceHealth(activeRule.dedupeState ?? {}, {
+              state: "healthy"
+            })
+          };
 
-      let worldState: WorldState | null = null;
-      if (pack.observeInbox) {
-        currentScanStage = "observe_inbox";
-        [activeRule, worldState] = await this.runScanStage(activeRule, currentScanStage, async () =>
-          pack.observeInbox?.({
-            rule: activeRule,
-            workspace,
-            surfaceRegistry: this.controlPlane.surfaceRegistry,
-            controlPlane: this.controlPlane
-          }) ?? null
-        );
-      }
-
-      currentScanStage = "detect_items";
-      let detection: WatchDetection | null;
-      [activeRule, detection] = await this.runScanStage(activeRule, currentScanStage, async () =>
-        this.runWithModelBudget(modelBudget, async () =>
-          pack.detectNewItems?.({
-            rule: activeRule,
-            worldState,
-            dedupeState: activeRule.dedupeState ?? {},
-            workspace,
-            surfaceRegistry: this.controlPlane.surfaceRegistry,
-            controlPlane: this.controlPlane
-          }) ?? null
-        )
-      );
-      if (!detection) {
-        noTriggerReason = "no_detection";
-      }
-
-      if (detection && pack.extractContext) {
-        currentScanStage = "extract_context";
-        let context: Awaited<ReturnType<NonNullable<typeof pack.extractContext>>>;
-        [activeRule, context] = await this.runScanStage(activeRule, currentScanStage, async () =>
-          this.runWithModelBudget(modelBudget, async () =>
-            pack.extractContext?.({
+          currentScanStage = "activate_pack";
+          [activeRule] = await this.runScanStage(activeRule, currentScanStage, async () => {
+            await pack.activate?.({
               rule: activeRule,
-              detection,
-              worldState,
               workspace,
-              controlPlane: this.controlPlane,
-              surfaceRegistry: this.controlPlane.surfaceRegistry
-            }) ?? null
-          )
-        );
-        if (!context) {
-          noTriggerReason = "extract_context_empty";
-          detection = null;
-        } else {
-          const mergedTaskSpec =
-            detection.taskSpec || context?.taskSpec
-              ? {
-                  ...(detection.taskSpec ?? {}),
-                  ...(context?.taskSpec ?? {})
-                }
-              : undefined;
-          detection = {
-            ...detection,
-            ...context,
-            inputs: {
-              ...(detection.inputs ?? {}),
-              ...(context?.inputs ?? {})
-            },
-            metadata: {
-              ...(detection.metadata ?? {}),
-              ...(context?.metadata ?? {})
-            },
-            ...(mergedTaskSpec ? { taskSpec: mergedTaskSpec } : {})
+              surfaceRegistry,
+              controlPlane: this.controlPlane
+            });
+            return true;
+          });
+
+          let worldState: WorldState | null = null;
+          if (pack.observeInbox) {
+            currentScanStage = "observe_inbox";
+            [activeRule, worldState] = await this.runScanStage(activeRule, currentScanStage, async () =>
+              pack.observeInbox?.({
+                rule: activeRule,
+                workspace,
+                surfaceRegistry,
+                controlPlane: this.controlPlane
+              }) ?? null
+            );
+          }
+
+          currentScanStage = "detect_items";
+          let detection: WatchDetection | null;
+          [activeRule, detection] = await this.runScanStage(activeRule, currentScanStage, async () =>
+            this.runWithModelBudget(modelBudget, async () =>
+              pack.detectNewItems?.({
+                rule: activeRule,
+                worldState,
+                dedupeState: activeRule.dedupeState ?? {},
+                workspace,
+                surfaceRegistry,
+                controlPlane: this.controlPlane
+              }) ?? null
+            )
+          );
+          if (!detection) {
+            noTriggerReason = "no_detection";
+          }
+
+          if (detection && pack.extractContext) {
+            currentScanStage = "extract_context";
+            let context: Awaited<ReturnType<NonNullable<typeof pack.extractContext>>>;
+            [activeRule, context] = await this.runScanStage(activeRule, currentScanStage, async () =>
+              this.runWithModelBudget(modelBudget, async () =>
+                pack.extractContext?.({
+                  rule: activeRule,
+                  detection,
+                  worldState,
+                  workspace,
+                  controlPlane: this.controlPlane,
+                  surfaceRegistry
+                }) ?? null
+              )
+            );
+            if (!context) {
+              noTriggerReason = "extract_context_empty";
+              detection = null;
+            } else {
+              const mergedTaskSpec =
+                detection.taskSpec || context?.taskSpec
+                  ? {
+                      ...(detection.taskSpec ?? {}),
+                      ...(context?.taskSpec ?? {})
+                    }
+                  : undefined;
+              detection = {
+                ...detection,
+                ...context,
+                inputs: {
+                  ...(detection.inputs ?? {}),
+                  ...(context?.inputs ?? {})
+                },
+                metadata: {
+                  ...(detection.metadata ?? {}),
+                  ...(context?.metadata ?? {})
+                },
+                ...(mergedTaskSpec ? { taskSpec: mergedTaskSpec } : {})
+              };
+            }
+          }
+
+          return {
+            worldState,
+            detection
           };
         }
+      );
+
+      if (!scanSession) {
+        const artifactUsage = await collectArtifactUsage();
+        const updated = this.store.putWatchRule({
+          ...activeRule,
+          lastObservedAt: nowIso(),
+          lastError: null,
+          status: "watching",
+          dedupeState: this.finishScanState(
+            activeRule,
+            recordUsageMetadata(
+              recordSurfaceHealth(
+                {
+                  ...(activeRule.dedupeState ?? {})
+                },
+                {
+                  state: "busy"
+                }
+              ),
+              modelBudget,
+              artifactUsage
+            )
+          )
+        });
+        this.eventBus.broadcast("watch.updated", this.controlPlane.watchService.decorate(updated));
+        return;
       }
+
+      let { worldState, detection } = scanSession;
 
       if (!detection) {
         const noTriggerDebug = await this.runWithModelBudget(modelBudget, async () =>

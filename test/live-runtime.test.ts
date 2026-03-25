@@ -197,7 +197,7 @@ test("watch rules trigger deduped tasks and can be enabled or disabled", async (
     assert.equal(watch.livePack, "fake-live");
     assert.equal(watch.enabled, true);
 
-    const triggeredTask = await waitForWatchTask(server.baseUrl, watch.id);
+    const triggeredTask = await waitForWatchTask(server.baseUrl, watch.id, 20000);
     const completed = await waitForTask(server.baseUrl, triggeredTask.id, (task) => task.status === "completed");
     assert.equal(completed.status, "completed");
 
@@ -332,7 +332,7 @@ test("completed tasks can be taught into watch profiles and replayed by a live r
     assert.equal(watch.watchProfile.actionTemplate[0].action, "wait");
     assert.ok(watch.watchProfile.triggerTexts.includes("Inbox item"));
 
-    const triggeredTask = await waitForWatchTask(server.baseUrl, watch.id);
+    const triggeredTask = await waitForWatchTask(server.baseUrl, watch.id, 20000);
     const completedTriggeredTask = await waitForTask(server.baseUrl, triggeredTask.id, (task) => task.status === "completed");
     assert.equal(completedTriggeredTask.status, "completed");
     assert.equal(completedTriggeredTask.plan[0].action, "wait");
@@ -409,7 +409,7 @@ test("watch packs can enrich detected items with context before creating a task"
     });
     const { watch } = await createResponse.json();
 
-    const triggeredTask = await waitForWatchTask(server.baseUrl, watch.id);
+    const triggeredTask = await waitForWatchTask(server.baseUrl, watch.id, 20000);
     const completed = await waitForTask(server.baseUrl, triggeredTask.id, (task) => task.status === "completed");
     assert.equal(completed.taskSpec.inputs.watchItemText, "Thread A");
     assert.equal(completed.taskSpec.inputs.watchContext, "Customer asked about pricing");
@@ -1486,7 +1486,7 @@ test("slack desktop pack can detect unread threads and build reply steps from a 
       return opened ? threadWorldState : initialWorldState;
     },
     async act({ step }) {
-      if (step.action === "clickTarget") {
+      if (step.action === "clickTarget" || step.action === "clickAt") {
         opened = true;
       }
       return { ok: true };
@@ -1551,7 +1551,13 @@ test("slack desktop pack can detect unread threads and build reply steps from a 
     workspace,
     surfaceRegistry: registry.surfaceRegistry as never,
     controlPlane: {
-      modelClient: { isConfigured: () => false }
+      modelClient: {
+        isConfigured: () => false,
+        supportsImageJson: () => true,
+        analyzeImageJson: async () => {
+          throw new Error("vision should be skipped when browser compose is already grounded");
+        }
+      }
     } as never
   });
   assert.equal(context?.inputs?.typeTarget, "Message");
@@ -1863,7 +1869,7 @@ test("slack desktop pack skips reply context extraction when composer is missing
       return opened ? threadWorldState : initialWorldState;
     },
     async act({ step }) {
-      if (step.action === "clickTarget") {
+      if (step.action === "clickTarget" || step.action === "clickAt") {
         opened = true;
       }
       return { ok: true };
@@ -4948,7 +4954,7 @@ test("outlook desktop pack can detect unread mail and build reply steps from a d
       return opened ? threadWorldState : initialWorldState;
     },
     async act({ step }) {
-      if (step.action === "clickTarget") {
+      if (step.action === "clickTarget" || step.action === "clickAt") {
         opened = true;
       }
       return { ok: true };
@@ -5550,7 +5556,7 @@ test("outlook desktop pack skips reply context extraction when composer is missi
       return opened ? threadWorldState : initialWorldState;
     },
     async act({ step }) {
-      if (step.action === "clickTarget") {
+      if (step.action === "clickTarget" || step.action === "clickAt") {
         opened = true;
       }
       return { ok: true };
@@ -12017,7 +12023,19 @@ test("boss browser pack can extract candidate thread context and build approval-
       title: "BOSS直聘",
       url: "http://boss.local/boss"
     },
-    capture: null,
+    capture: {
+      path: "/tmp/boss-browser-main.png",
+      metadata: {
+        windowBounds: {
+          x: 0,
+          y: 0,
+          width: 1440,
+          height: 960,
+          centerX: 720,
+          centerY: 480
+        }
+      }
+    },
     ocrBlocks: [],
     interactionCandidates: [
       {
@@ -12044,6 +12062,17 @@ test("boss browser pack can extract candidate thread context and build approval-
       url: "http://boss.local/boss/candidate?id=li-lei"
     },
     interactionCandidates: [
+      {
+        id: "browser-url",
+        surface: "browser",
+        kind: "text",
+        text: "zhipin.com/web/chat/index",
+        role: "textbox",
+        bounds: { x: 20, y: 18, width: 320, height: 28, centerX: 180, centerY: 32 },
+        confidence: 0.95,
+        sourceHints: { source: "ocr" },
+        isInteractive: true
+      },
       {
         id: "reply-box",
         surface: "browser",
@@ -12074,7 +12103,7 @@ test("boss browser pack can extract candidate thread context and build approval-
       return opened ? threadWorldState : initialWorldState;
     },
     async act({ step }) {
-      if (step.action === "clickTarget") {
+      if (step.action === "clickTarget" || step.action === "clickAt") {
         opened = true;
       }
       return { ok: true };
@@ -12130,6 +12159,7 @@ test("boss browser pack can extract candidate thread context and build approval-
     controlPlane: {} as never
   });
   assert.equal(detection?.summary, "李雷 · 产品经理");
+  assert.equal(detection?.inputs?.openTarget, "李雷");
   assert.equal(detection?.metadata?.threadKey, "李雷 · 产品经理");
   assert.equal(detection?.metadata?.sender, "候选人");
   assert.equal(detection?.metadata?.direction, "inbound");
@@ -12144,15 +12174,1237 @@ test("boss browser pack can extract candidate thread context and build approval-
       modelClient: { isConfigured: () => false }
     } as never
   });
-  assert.equal(context?.inputs?.typeTarget, "发送消息给李雷");
+  const openCandidate = (context?.inputs?.openCandidate ?? null) as Record<string, unknown> | null;
+  assert.equal(context?.inputs?.typeTarget, "");
+  assert.equal(typeof openCandidate?.text, "string");
+  assert.equal(openCandidate ? "bounds" in openCandidate : false, true);
   assert.equal(context?.inputs?.sendTarget, "发送");
   assert.equal(context?.metadata?.threadKey, "李雷 · 产品经理");
   assert.equal(context?.metadata?.sender, "候选人");
   assert.equal(context?.taskSpec?.skillName, null);
   assert.equal(Array.isArray(context?.taskSpec?.steps), true);
-  assert.equal(context?.taskSpec?.steps?.[0]?.action, "clickTarget");
-  assert.equal(context?.taskSpec?.steps?.[2]?.params?.text, "{{typeText}}");
+  const typeStep = context?.taskSpec?.steps?.find((step) => step.action === "typeIntoTarget") ?? null;
+  assert.equal(context?.taskSpec?.steps?.some((step) => step.action === "clickTarget"), true);
+  assert.equal(typeStep?.params?.text, "{{typeText}}");
+  assert.deepEqual(typeStep?.expect, {
+    textVisible: "{{typeTextPreview}}",
+    draftThreadVisible: "{{watchItemText}}"
+  });
   assert.equal(context?.context?.some((line) => line.includes("候选人: 方便聊下这个岗位吗？")), true);
+});
+
+test("boss browser extractContext skips placeholder waits when vision grounds the compose box", async () => {
+  let opened = false;
+  const initialWorldState = {
+    version: 1,
+    surface: "browser",
+    workspaceId: "workspace-boss-vision",
+    appContext: {
+      title: "BOSS直聘",
+      url: "http://boss.local/boss"
+    },
+    capture: {
+      path: "/tmp/boss-browser-main-vision.png",
+      metadata: {
+        windowBounds: {
+          x: 0,
+          y: 0,
+          width: 1440,
+          height: 960,
+          centerX: 720,
+          centerY: 480
+        }
+      }
+    },
+    ocrBlocks: [],
+    interactionCandidates: [
+      {
+        id: "boss-candidate",
+        surface: "browser",
+        kind: "link",
+        text: "杨安娜",
+        role: "link",
+        bounds: { x: 10, y: 10, width: 220, height: 28, centerX: 120, centerY: 24 },
+        confidence: 0.88,
+        sourceHints: { source: "browser", ariaLabel: "杨安娜", href: "/boss/candidate?id=yang" },
+        isInteractive: true
+      }
+    ],
+    visibleText: "BOSS直聘\n杨安娜\n候选人: 你好，我对岗位很感兴趣。",
+    recentActions: [],
+    summary: "BOSS candidate list",
+    timestamp: new Date().toISOString()
+  };
+  const threadWorldState = {
+    ...initialWorldState,
+    appContext: {
+      title: "杨安娜 - BOSS直聘",
+      url: "http://boss.local/boss/candidate?id=yang"
+    },
+    visibleText: "BOSS直聘\n杨安娜\n候选人: 你好，我对岗位很感兴趣。\n在线沟通",
+    interactionCandidates: []
+  };
+  const fakeSurface = {
+    async observe() {
+      return opened ? threadWorldState : initialWorldState;
+    },
+    async act({ step }) {
+      if (step.action === "clickTarget") {
+        opened = true;
+      }
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      browser: fakeSurface as never
+    })
+  });
+  const pack = registry.get("boss-browser");
+  const rule: WatchRule = {
+    id: "watch-boss-browser-vision",
+    goal: "Always watch BOSS直聘 and reply to candidate messages",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "browser",
+    workspaceName: "boss-browser-main",
+    skillName: null,
+    appTarget: null,
+    livePack: "boss-browser",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {
+      startUrl: "http://boss.local/boss"
+    },
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-boss-vision",
+    name: "boss-browser-main",
+    rootPath: "/tmp/boss-browser-main",
+    profilePath: "/tmp/boss-browser-main/profile",
+    downloadsPath: "/tmp/boss-browser-main/downloads",
+    artifactsPath: "/tmp/boss-browser-main/artifacts",
+    scratchPath: "/tmp/boss-browser-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: initialWorldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {} as never
+  });
+
+  const context = await pack?.extractContext?.({
+    rule,
+    worldState: initialWorldState as never,
+    detection: detection as never,
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        isConfigured: () => false,
+        supportsImageJson: () => true,
+        analyzeImageJson: async () => ({
+          scene: "thread",
+          sceneEvidence: "candidate thread is open",
+          recommendedRecoveryAction: "none",
+          recoveryControl: { present: false, evidence: "", approxBox: null },
+          openThread: "杨安娜",
+          bestUnreadThread: {
+            present: false,
+            name: "",
+            evidence: "",
+            replyable: false,
+            conversationKind: "candidate",
+            shouldReply: false,
+            replyReason: "",
+            subjectCue: "",
+            latestSnippet: "",
+            priority: "low",
+            approxBox: null
+          },
+          composer: {
+            present: true,
+            evidence: "reply input visible",
+            approxBox: { x: 0.45, y: 0.72, width: 0.42, height: 0.18 },
+            entryPoint: { x: 0.49, y: 0.79 },
+            hasDraftText: false,
+            draftPreview: null
+          }
+        })
+      }
+    } as never
+  });
+
+  const composeTarget = (context?.inputs?.composeTarget ?? null) as Record<string, unknown> | null;
+  const openCandidate = (context?.inputs?.openCandidate ?? null) as Record<string, unknown> | null;
+  assert.equal(context?.inputs?.typeTarget, "");
+  assert.equal(typeof (composeTarget?.bounds as { centerX?: unknown } | undefined)?.centerX, "number");
+  assert.equal(openCandidate ? "bounds" in openCandidate : false, true);
+  assert.equal(context?.taskSpec?.steps?.some((step) => step.action === "clickTarget"), true);
+  assert.equal(context?.taskSpec?.steps?.some((step) => step.action === "typeIntoTarget"), true);
+});
+
+test("boss browser extractContext derives compose fallback bounds from a visible threaded chat", async () => {
+  let opened = false;
+  const initialWorldState = {
+    version: 1,
+    surface: "browser",
+    workspaceId: "workspace-boss-compose-fallback",
+    appContext: {
+      title: "BOSS直聘",
+      url: "http://boss.local/boss"
+    },
+    capture: {
+      path: "/tmp/boss-browser-main-compose-fallback.png",
+      metadata: {
+        windowBounds: {
+          x: 100,
+          y: 50,
+          width: 1440,
+          height: 960,
+          centerX: 820,
+          centerY: 530
+        }
+      }
+    },
+    ocrBlocks: [],
+    interactionCandidates: [
+      {
+        id: "boss-candidate",
+        surface: "browser",
+        kind: "text",
+        text: "王蕊",
+        role: "text",
+        bounds: { x: 210, y: 200, width: 120, height: 32, centerX: 270, centerY: 216 },
+        confidence: 0.9,
+        sourceHints: { source: "ocr-boss-list-names" },
+        isInteractive: true
+      }
+    ],
+    visibleText: "BOSS直聘\n王蕊\n候选人: 您好，我想进一步了解岗位。",
+    recentActions: [],
+    summary: "BOSS candidate list",
+    timestamp: new Date().toISOString()
+  };
+  const threadWorldState = {
+    ...initialWorldState,
+    appContext: {
+      title: "王蕊 - BOSS直聘",
+      url: "http://boss.local/boss/candidate?id=wang-rui"
+    },
+    interactionCandidates: [
+      {
+        id: "thread-name",
+        surface: "browser",
+        kind: "text",
+        text: "王蕊",
+        role: "text",
+        bounds: { x: 760, y: 140, width: 60, height: 24, centerX: 790, centerY: 152 },
+        confidence: 0.95,
+        sourceHints: { source: "ocr-boss-thread" },
+        isInteractive: true
+      },
+      {
+        id: "thread-snippet",
+        surface: "browser",
+        kind: "text",
+        text: "您好，我想进一步了解岗位。",
+        role: "text",
+        bounds: { x: 780, y: 520, width: 260, height: 32, centerX: 910, centerY: 536 },
+        confidence: 0.94,
+        sourceHints: { source: "ocr-boss-thread" },
+        isInteractive: true
+      }
+    ],
+    visibleText: "BOSS直聘\n王蕊\n在线沟通\n您好，我想进一步了解岗位。"
+  };
+  const fakeSurface = {
+    async observe() {
+      return opened ? threadWorldState : initialWorldState;
+    },
+    async act({ step }: { step: { action: string } }) {
+      if (step.action === "clickTarget" || step.action === "clickAt") {
+        opened = true;
+      }
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      browser: fakeSurface as never
+    })
+  });
+  const pack = registry.get("boss-browser");
+  const rule: WatchRule = {
+    id: "watch-boss-browser-compose-fallback",
+    goal: "Always watch BOSS直聘 and reply to candidate messages",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "browser",
+    workspaceName: "boss-browser-main",
+    skillName: null,
+    appTarget: null,
+    livePack: "boss-browser",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {
+      startUrl: "http://boss.local/boss"
+    },
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-boss-compose-fallback",
+    name: "boss-browser-main",
+    rootPath: "/tmp/boss-browser-main",
+    profilePath: "/tmp/boss-browser-main/profile",
+    downloadsPath: "/tmp/boss-browser-main/downloads",
+    artifactsPath: "/tmp/boss-browser-main/artifacts",
+    scratchPath: "/tmp/boss-browser-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: initialWorldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {} as never
+  });
+
+  const context = await pack?.extractContext?.({
+    rule,
+    worldState: initialWorldState as never,
+    detection: detection as never,
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: { isConfigured: () => false }
+    } as never
+  });
+
+  const composeTarget = (context?.inputs?.composeTarget ?? null) as {
+    bounds?: { centerX?: number; centerY?: number; width?: number; height?: number };
+    sourceHints?: { source?: string };
+  } | null;
+  assert.equal(context?.inputs?.typeTarget, "");
+  assert.ok(Number(composeTarget?.bounds?.centerX ?? 0) > 700);
+  assert.ok(Number(composeTarget?.bounds?.centerY ?? 0) > 800);
+  assert.ok(Number(composeTarget?.bounds?.width ?? 0) > 500);
+  assert.ok(Number(composeTarget?.bounds?.height ?? 0) > 100);
+  assert.equal(composeTarget?.sourceHints?.source, "boss-compose-region-fallback");
+  assert.equal(context?.taskSpec?.steps?.[0]?.action, "wait");
+});
+
+test("boss browser extractContext keeps the open step when the visible thread does not match the detected target", async () => {
+  let opened = false;
+  const initialWorldState = {
+    version: 1,
+    surface: "browser",
+    workspaceId: "workspace-boss-thread-mismatch",
+    appContext: {
+      title: "BOSS直聘",
+      url: "http://boss.local/boss"
+    },
+    capture: {
+      path: "/tmp/boss-browser-main-thread-mismatch.png",
+      metadata: {
+        windowBounds: {
+          x: 100,
+          y: 50,
+          width: 1440,
+          height: 960,
+          centerX: 820,
+          centerY: 530
+        }
+      }
+    },
+    ocrBlocks: [],
+    interactionCandidates: [
+      {
+        id: "boss-candidate-yang",
+        surface: "browser",
+        kind: "text",
+        text: "杨安娜",
+        role: "text",
+        bounds: { x: 210, y: 200, width: 120, height: 32, centerX: 270, centerY: 216 },
+        confidence: 0.9,
+        sourceHints: { source: "ocr-boss-list-names" },
+        isInteractive: true
+      }
+    ],
+    visibleText: "BOSS直聘\n杨安娜\n候选人: 您好，我看到您的简历，觉得很不错，想和您聊聊。",
+    recentActions: [],
+    summary: "BOSS candidate list",
+    timestamp: new Date().toISOString()
+  };
+  const threadWorldState = {
+    ...initialWorldState,
+    appContext: {
+      title: "王蕊 - BOSS直聘",
+      url: "http://boss.local/boss/candidate?id=wang-rui"
+    },
+    interactionCandidates: [
+      {
+        id: "thread-name",
+        surface: "browser",
+        kind: "text",
+        text: "王蕊",
+        role: "text",
+        bounds: { x: 760, y: 140, width: 60, height: 24, centerX: 790, centerY: 152 },
+        confidence: 0.95,
+        sourceHints: { source: "ocr-boss-thread" },
+        isInteractive: true
+      }
+    ],
+    visibleText: "BOSS直聘\n王蕊\n在线沟通\n您好，我是王蕊，想聊一下岗位。",
+  };
+  const fakeSurface = {
+    async observe() {
+      return opened ? threadWorldState : initialWorldState;
+    },
+    async act({ step }: { step: { action: string } }) {
+      if (step.action === "clickTarget" || step.action === "clickAt") {
+        opened = true;
+      }
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      browser: fakeSurface as never
+    })
+  });
+  const pack = registry.get("boss-browser");
+  const rule: WatchRule = {
+    id: "watch-boss-thread-mismatch",
+    goal: "Always watch BOSS直聘 and reply to candidate messages",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "browser",
+    workspaceName: "boss-browser-main",
+    skillName: null,
+    appTarget: null,
+    livePack: "boss-browser",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {
+      startUrl: "http://boss.local/boss"
+    },
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-boss-thread-mismatch",
+    name: "boss-browser-main",
+    rootPath: "/tmp/boss-browser-main",
+    profilePath: "/tmp/boss-browser-main/profile",
+    downloadsPath: "/tmp/boss-browser-main/downloads",
+    artifactsPath: "/tmp/boss-browser-main/artifacts",
+    scratchPath: "/tmp/boss-browser-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: initialWorldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {} as never
+  });
+
+  const context = await pack?.extractContext?.({
+    rule,
+    worldState: initialWorldState as never,
+    detection: detection as never,
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: { isConfigured: () => false }
+    } as never
+  });
+
+  assert.equal(context?.taskSpec?.steps?.[0]?.action, "clickTarget");
+  assert.equal(context?.taskSpec?.steps?.[1]?.action, "waitForTarget");
+});
+
+test("boss browser extractContext keeps the open step when thread OCR is low quality", async () => {
+  const initialWorldState = {
+    version: 1,
+    surface: "browser",
+    workspaceId: "workspace-boss-thread-low-quality",
+    appContext: {
+      title: "BOSS直聘",
+      url: "http://boss.local/boss"
+    },
+    capture: {
+      path: "/tmp/boss-browser-main-thread-low-quality.png",
+      metadata: {
+        windowBounds: {
+          x: 100,
+          y: 50,
+          width: 1440,
+          height: 960,
+          centerX: 820,
+          centerY: 530
+        }
+      }
+    },
+    ocrBlocks: [],
+    interactionCandidates: [
+      {
+        id: "boss-candidate-zhuang",
+        surface: "browser",
+        kind: "text",
+        text: "庄瑞莹 ai产品经理",
+        role: "text",
+        bounds: { x: 210, y: 200, width: 180, height: 32, centerX: 300, centerY: 216 },
+        confidence: 0.9,
+        sourceHints: { source: "ocr-boss-list-names" },
+        isInteractive: true
+      }
+    ],
+    visibleText: "BOSS直聘\n庄瑞莹 ai产品经理\n请问贵公司的ai产品经理还有空缺么？",
+    recentActions: [],
+    summary: "BOSS candidate list",
+    timestamp: new Date().toISOString()
+  };
+  const threadWorldState = {
+    ...initialWorldState,
+    appContext: {
+      title: "BOSS直聘",
+      url: "http://boss.local/boss/candidate?id=zhuang"
+    },
+    interactionCandidates: [
+      {
+        id: "thread-name-low-quality",
+        surface: "browser",
+        kind: "text",
+        text: "i O",
+        role: "text",
+        bounds: { x: 760, y: 140, width: 60, height: 24, centerX: 790, centerY: 152 },
+        confidence: 0.95,
+        sourceHints: { source: "ocr-boss-thread" },
+        isInteractive: true
+      },
+      {
+        id: "reply-box",
+        surface: "browser",
+        kind: "textarea",
+        text: "",
+        role: "textbox",
+        bounds: { x: 610, y: 740, width: 430, height: 80, centerX: 825, centerY: 780 },
+        confidence: 0.86,
+        sourceHints: { source: "browser", placeholder: "发送消息给庄瑞莹", tag: "textarea" },
+        isInteractive: true
+      }
+    ],
+    visibleText: "BOSS直聘\ni O\n在线沟通\n发送消息给庄瑞莹"
+  };
+  let opened = false;
+  const fakeSurface = {
+    async observe() {
+      return opened ? threadWorldState : initialWorldState;
+    },
+    async act({ step }: { step: { action: string } }) {
+      if (step.action === "clickTarget" || step.action === "clickAt") {
+        opened = true;
+      }
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      browser: fakeSurface as never
+    })
+  });
+  const pack = registry.get("boss-browser");
+  const rule: WatchRule = {
+    id: "watch-boss-thread-low-quality",
+    goal: "Always watch BOSS直聘 and reply to candidate messages",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "browser",
+    workspaceName: "boss-browser-main",
+    skillName: null,
+    appTarget: null,
+    livePack: "boss-browser",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {
+      startUrl: "http://boss.local/boss"
+    },
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-boss-thread-low-quality",
+    name: "boss-browser-main",
+    rootPath: "/tmp/boss-browser-main",
+    profilePath: "/tmp/boss-browser-main/profile",
+    downloadsPath: "/tmp/boss-browser-main/downloads",
+    artifactsPath: "/tmp/boss-browser-main/artifacts",
+    scratchPath: "/tmp/boss-browser-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: initialWorldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {} as never
+  });
+
+  const context = await pack?.extractContext?.({
+    rule,
+    worldState: initialWorldState as never,
+    detection: detection as never,
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: { isConfigured: () => false }
+    } as never
+  });
+
+  assert.equal(context?.inputs?.watchSummary, "庄瑞莹 ai产品经理");
+  assert.equal(context?.inputs?.openTarget, "庄瑞莹");
+  assert.equal(context?.taskSpec?.steps?.[0]?.action, "clickTarget");
+  assert.equal(context?.taskSpec?.steps?.[1]?.action, "waitForTarget");
+  assert.equal(context?.taskSpec?.steps?.[2]?.expect?.draftThreadVisible, "{{watchItemText}}");
+});
+
+test("boss browser extractContext preserves vision openCandidate bounds for query-first fallback", async () => {
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      browser: {
+        async act() {
+          return { ok: true };
+        },
+        async observe() {
+          return {
+            version: 1,
+            surface: "browser",
+            workspaceId: "workspace-boss-vision-open",
+            appContext: {
+              title: "杨安娜 - BOSS直聘",
+              url: "http://boss.local/boss/candidate?id=yang"
+            },
+            capture: {
+              path: "/tmp/boss-browser-main-open.png",
+              metadata: {
+                windowBounds: {
+                  x: 0,
+                  y: 0,
+                  width: 1440,
+                  height: 960,
+                  centerX: 720,
+                  centerY: 480
+                }
+              }
+            },
+            ocrBlocks: [],
+            interactionCandidates: [],
+            visibleText: "BOSS直聘\n杨安娜\n候选人: 你好，我对岗位很感兴趣。\n在线沟通",
+            recentActions: [],
+            summary: "BOSS candidate thread",
+            timestamp: new Date().toISOString()
+          };
+        }
+      } as never
+    })
+  });
+  const pack = registry.get("boss-browser");
+  const rule: WatchRule = {
+    id: "watch-boss-browser-vision-open",
+    goal: "Always watch BOSS直聘 and reply to candidate messages",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "browser",
+    workspaceName: "boss-browser-main",
+    skillName: null,
+    appTarget: null,
+    livePack: "boss-browser",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {
+      startUrl: "http://boss.local/boss"
+    },
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-boss-vision-open",
+    name: "boss-browser-main",
+    rootPath: "/tmp/boss-browser-main",
+    profilePath: "/tmp/boss-browser-main/profile",
+    downloadsPath: "/tmp/boss-browser-main/downloads",
+    artifactsPath: "/tmp/boss-browser-main/artifacts",
+    scratchPath: "/tmp/boss-browser-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const detection = {
+    summary: "杨安娜",
+    inputs: {
+      openTarget: "杨安娜",
+      detailReadyTarget: "在线沟通"
+    },
+    metadata: {
+      openCandidate: {
+        id: "boss-vision-unread",
+        surface: "browser",
+        kind: "text",
+        text: "杨安娜",
+        role: "text",
+        bounds: { x: 120, y: 220, width: 220, height: 64, centerX: 230, centerY: 252 },
+        confidence: 0.8,
+        sourceHints: { source: "vision", latestSnippet: "方便聊一下岗位吗？" },
+        isInteractive: true
+      }
+    }
+  };
+
+  const context = await pack?.extractContext?.({
+    rule,
+    worldState: null as never,
+    detection: detection as never,
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: { isConfigured: () => false }
+    } as never
+  });
+
+  const openCandidate = (context?.inputs?.openCandidate ?? null) as Record<string, unknown> | null;
+  assert.equal(typeof (openCandidate?.bounds as { centerX?: unknown } | undefined)?.centerX, "number");
+});
+
+test("boss browser detectNewItems prefers OCR list bounds when vision finds the unread candidate name", async () => {
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      browser: {
+        async act() {
+          return { ok: true };
+        },
+        async observe() {
+          throw new Error("not used");
+        }
+      } as never
+    })
+  });
+  const pack = registry.get("boss-browser");
+  const rule: WatchRule = {
+    id: "watch-boss-browser-vision-ocr-open",
+    goal: "Always watch BOSS直聘 and reply to candidate messages",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "browser",
+    workspaceName: "boss-browser-main",
+    skillName: null,
+    appTarget: null,
+    livePack: "boss-browser",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {
+      startUrl: "http://boss.local/boss"
+    },
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-boss-vision-ocr-open",
+    name: "boss-browser-main",
+    rootPath: "/tmp/boss-browser-main",
+    profilePath: "/tmp/boss-browser-main/profile",
+    downloadsPath: "/tmp/boss-browser-main/downloads",
+    artifactsPath: "/tmp/boss-browser-main/artifacts",
+    scratchPath: "/tmp/boss-browser-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const worldState = {
+    version: 1,
+    surface: "browser",
+    workspaceId: "workspace-boss-vision-ocr-open",
+    appContext: {
+      title: "BOSS直聘",
+      url: "https://www.zhipin.com/web/chat/index"
+    },
+    capture: {
+      path: "/tmp/boss-browser-main-vision-ocr-open.png",
+      metadata: {
+        windowBounds: {
+          x: 0,
+          y: 0,
+          width: 1440,
+          height: 960,
+          centerX: 720,
+          centerY: 480
+        }
+      }
+    },
+    ocrBlocks: [],
+    interactionCandidates: [
+      {
+        id: "boss-list-target",
+        surface: "browser",
+        kind: "text",
+        text: "王蕊 ai产品经理",
+        role: "text",
+        bounds: { x: 220, y: 212, width: 180, height: 42, centerX: 310, centerY: 233 },
+        confidence: 0.91,
+        sourceHints: { source: "ocr-boss-list-names" },
+        isInteractive: true
+      },
+      {
+        id: "boss-list-other",
+        surface: "browser",
+        kind: "text",
+        text: "Leon ai产品经理",
+        role: "text",
+        bounds: { x: 220, y: 308, width: 180, height: 42, centerX: 310, centerY: 329 },
+        confidence: 0.91,
+        sourceHints: { source: "ocr-boss-list-names" },
+        isInteractive: true
+      }
+    ],
+    visibleText: "BOSS直聘\n王蕊 ai产品经理\n您好，我想进一步了解岗位。\nLeon ai产品经理",
+    recentActions: [],
+    summary: "BOSS candidate list",
+    timestamp: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: worldState as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        analyzeImageJson: async () => ({
+          scene: "list",
+          sceneEvidence: "unread candidate row is visible at the top",
+          recommendedRecoveryAction: "none",
+          recoveryControl: { present: false, evidence: "", approxBox: null },
+          openThread: null,
+          bestUnreadThread: {
+            present: true,
+            name: "王蕊 ai产品经理",
+            evidence: "top unread row with red badge",
+            replyable: true,
+            conversationKind: "candidate",
+            shouldReply: true,
+            replyReason: "candidate asked a question",
+            subjectCue: "",
+            latestSnippet: "您好，我想进一步了解岗位。",
+            priority: "high",
+            approxBox: { x: 0.01, y: 0.22, width: 0.22, height: 0.1 }
+          },
+          composer: {
+            present: false,
+            evidence: "",
+            approxBox: null,
+            entryPoint: null,
+            hasDraftText: null,
+            draftPreview: null
+          }
+        })
+      }
+    } as never
+  });
+
+  const openCandidate = (detection?.metadata?.openCandidate ?? null) as { bounds?: { centerX?: number; centerY?: number }; sourceHints?: { source?: string } } | null;
+  assert.equal(detection?.summary, "王蕊 ai产品经理");
+  assert.equal(Math.round(Number(openCandidate?.bounds?.centerX ?? 0)), 310);
+  assert.equal(Math.round(Number(openCandidate?.bounds?.centerY ?? 0)), 233);
+  assert.equal(String(openCandidate?.sourceHints?.source ?? ""), "vision+ocr");
+});
+
+test("boss browser extractContext re-grounds the target row and opens it via clickAt in the main browser session", async () => {
+  const actions: Array<{ action: string; params: Record<string, unknown> | undefined }> = [];
+  const initialWorldState = {
+    version: 1,
+    surface: "browser",
+    workspaceId: "workspace-boss-grounded-open",
+    appContext: {
+      title: "BOSS直聘",
+      url: "http://boss.local/boss"
+    },
+    capture: {
+      path: "/tmp/boss-browser-main-open.png",
+      metadata: {
+        windowBounds: {
+          x: 0,
+          y: 0,
+          width: 1440,
+          height: 960,
+          centerX: 720,
+          centerY: 480
+        }
+      }
+    },
+    ocrBlocks: [],
+    interactionCandidates: [],
+    visibleText: "BOSS直聘\n杨安娜\n候选人: 你好，我对岗位很感兴趣。\nLeon\n候选人: 可以聊聊薪资吗？",
+    recentActions: [],
+    summary: "BOSS candidate list",
+    timestamp: new Date().toISOString()
+  };
+  const threadWorldState = {
+    ...initialWorldState,
+    appContext: {
+      title: "杨安娜 - BOSS直聘",
+      url: "http://boss.local/boss/candidate?id=yang"
+    },
+    interactionCandidates: [
+      {
+        id: "reply-box",
+        surface: "browser",
+        kind: "textarea",
+        text: "",
+        role: "textbox",
+        bounds: { x: 610, y: 740, width: 430, height: 80, centerX: 825, centerY: 780 },
+        confidence: 0.86,
+        sourceHints: { source: "browser", placeholder: "发送消息给杨安娜", tag: "textarea" },
+        isInteractive: true
+      },
+      {
+        id: "send",
+        surface: "browser",
+        kind: "button",
+        text: "发送",
+        role: "button",
+        bounds: { x: 1060, y: 740, width: 64, height: 32, centerX: 1092, centerY: 756 },
+        confidence: 0.86,
+        sourceHints: { source: "browser", ariaLabel: "发送消息", tag: "button" },
+        isInteractive: true
+      }
+    ],
+    visibleText: "BOSS直聘\n杨安娜\n候选人: 你好，我对岗位很感兴趣。\n在线沟通\n发送消息给杨安娜\n发送"
+  };
+  const fakeSurface = {
+    async observe() {
+      return threadWorldState;
+    },
+    async act({ step }: { step: { action: string; params?: Record<string, unknown> } }) {
+      actions.push({ action: step.action, params: step.params });
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      browser: fakeSurface as never
+    })
+  });
+  const pack = registry.get("boss-browser");
+  const rule: WatchRule = {
+    id: "watch-boss-browser-grounded-open",
+    goal: "Always watch BOSS直聘 and reply to candidate messages",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "browser",
+    workspaceName: "boss-browser-main",
+    skillName: null,
+    appTarget: null,
+    livePack: "boss-browser",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {
+      startUrl: "http://boss.local/boss"
+    },
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-boss-grounded-open",
+    name: "boss-browser-main",
+    rootPath: "/tmp/boss-browser-main",
+    profilePath: "/tmp/boss-browser-main/profile",
+    downloadsPath: "/tmp/boss-browser-main/downloads",
+    artifactsPath: "/tmp/boss-browser-main/artifacts",
+    scratchPath: "/tmp/boss-browser-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const detection = {
+    summary: "杨安娜",
+    context: ["你好，我对岗位很感兴趣。"],
+    inputs: {
+      openTarget: "杨安娜",
+      detailReadyTarget: "在线沟通"
+    },
+    metadata: {
+      openCandidate: {
+        id: "boss-vision-unread",
+        surface: "browser",
+        kind: "text",
+        text: "杨安娜",
+        role: "text",
+        bounds: { x: 540, y: 320, width: 264, height: 80, centerX: 672, centerY: 360 },
+        confidence: 0.8,
+        sourceHints: { source: "vision", latestSnippet: "你好，我对岗位很感兴趣。" },
+        isInteractive: true
+      },
+      visualThread: {
+        latestSnippet: "你好，我对岗位很感兴趣。"
+      }
+    }
+  };
+
+  const context = await pack?.extractContext?.({
+    rule,
+    worldState: initialWorldState as never,
+    detection: detection as never,
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => true,
+        analyzeImageJson: async () => ({
+          targetVisible: true,
+          evidence: "杨安娜 row is visible in the left list",
+          clickPoint: { x: 0.12, y: 0.28 },
+          rowBox: { x: 0.08, y: 0.24, width: 0.2, height: 0.09 }
+        })
+      }
+    } as never
+  });
+
+  assert.equal(actions[0]?.action, "clickAt");
+  assert.equal(Math.round(Number(actions[0]?.params?.x ?? 0)), 173);
+  assert.equal(Math.round(Number(actions[0]?.params?.y ?? 0)), 269);
+  const openCandidate = (context?.inputs?.openCandidate ?? null) as Record<string, unknown> | null;
+  assert.equal(Math.round(Number((openCandidate?.bounds as { centerX?: unknown } | undefined)?.centerX ?? 0)), 259);
+  assert.equal(Math.round(Number((openCandidate?.bounds as { centerY?: unknown } | undefined)?.centerY ?? 0)), 274);
+});
+
+test("boss browser extractContext dismisses the duplicate-login modal before grounding the reply composer", async () => {
+  const actions: Array<{ action: string; params: Record<string, unknown> | undefined }> = [];
+  let modalVisible = true;
+  const initialWorldState = {
+    version: 1,
+    surface: "browser",
+    workspaceId: "workspace-boss-duplicate-login",
+    appContext: {
+      title: "BOSS直聘",
+      url: "http://boss.local/boss"
+    },
+    capture: {
+      path: "/tmp/boss-browser-main-open.png",
+      metadata: {
+        windowBounds: {
+          x: 0,
+          y: 0,
+          width: 1440,
+          height: 960,
+          centerX: 720,
+          centerY: 480
+        }
+      }
+    },
+    ocrBlocks: [],
+    interactionCandidates: [],
+    visibleText: "BOSS直聘\n杨安娜\n候选人: 你好，我对岗位很感兴趣。",
+    recentActions: [],
+    summary: "BOSS candidate list",
+    timestamp: new Date().toISOString()
+  };
+  const modalWorldState = {
+    ...initialWorldState,
+    appContext: {
+      title: "杨安娜 - BOSS直聘",
+      url: "http://boss.local/boss/candidate?id=yang"
+    },
+    interactionCandidates: [
+      {
+        id: "modal-ok",
+        surface: "browser",
+        kind: "button",
+        text: "OK",
+        role: "button",
+        bounds: { x: 720, y: 110, width: 84, height: 36, centerX: 762, centerY: 128 },
+        confidence: 0.92,
+        sourceHints: { source: "browser", ariaLabel: "OK", tag: "button" },
+        isInteractive: true
+      }
+    ],
+    visibleText: "www.zhipin.com says\n您的账号已经登录过了，请勿重复登录。\nOK\n在线沟通"
+  };
+  const threadWorldState = {
+    ...initialWorldState,
+    appContext: {
+      title: "杨安娜 - BOSS直聘",
+      url: "http://boss.local/boss/candidate?id=yang"
+    },
+    interactionCandidates: [
+      {
+        id: "reply-box",
+        surface: "browser",
+        kind: "textarea",
+        text: "",
+        role: "textbox",
+        bounds: { x: 610, y: 740, width: 430, height: 80, centerX: 825, centerY: 780 },
+        confidence: 0.86,
+        sourceHints: { source: "browser", placeholder: "发送消息给杨安娜", tag: "textarea" },
+        isInteractive: true
+      },
+      {
+        id: "send",
+        surface: "browser",
+        kind: "button",
+        text: "发送",
+        role: "button",
+        bounds: { x: 1060, y: 740, width: 64, height: 32, centerX: 1092, centerY: 756 },
+        confidence: 0.86,
+        sourceHints: { source: "browser", ariaLabel: "发送消息", tag: "button" },
+        isInteractive: true
+      }
+    ],
+    visibleText: "BOSS直聘\n杨安娜\n候选人: 你好，我对岗位很感兴趣。\n在线沟通\n发送消息给杨安娜\n发送"
+  };
+  const fakeSurface = {
+    async observe() {
+      return modalVisible ? modalWorldState : threadWorldState;
+    },
+    async act({ step }: { step: { action: string; params?: Record<string, unknown> } }) {
+      actions.push({ action: step.action, params: step.params });
+      if (step.action === "press" && String(step.params?.key ?? "").trim() === "enter") {
+        modalVisible = false;
+      }
+      if (step.action === "clickTarget" && String(step.params?.targetQuery ?? "").trim() === "OK") {
+        modalVisible = false;
+      }
+      return { ok: true };
+    }
+  };
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({
+      browser: fakeSurface as never
+    })
+  });
+  const pack = registry.get("boss-browser");
+  const rule: WatchRule = {
+    id: "watch-boss-browser-duplicate-login",
+    goal: "Always watch BOSS直聘 and reply to candidate messages",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "browser",
+    workspaceName: "boss-browser-main",
+    skillName: null,
+    appTarget: null,
+    livePack: "boss-browser",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {
+      startUrl: "http://boss.local/boss"
+    },
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-boss-duplicate-login",
+    name: "boss-browser-main",
+    rootPath: "/tmp/boss-browser-main",
+    profilePath: "/tmp/boss-browser-main/profile",
+    downloadsPath: "/tmp/boss-browser-main/downloads",
+    artifactsPath: "/tmp/boss-browser-main/artifacts",
+    scratchPath: "/tmp/boss-browser-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const detection = {
+    summary: "杨安娜",
+    context: ["你好，我对岗位很感兴趣。"],
+    inputs: {
+      openTarget: "杨安娜",
+      detailReadyTarget: "在线沟通"
+    },
+    metadata: {
+      openCandidate: {
+        id: "boss-vision-unread",
+        surface: "browser",
+        kind: "text",
+        text: "杨安娜",
+        role: "text",
+        bounds: { x: 540, y: 320, width: 264, height: 80, centerX: 672, centerY: 360 },
+        confidence: 0.8,
+        sourceHints: { source: "vision", latestSnippet: "你好，我对岗位很感兴趣。" },
+        isInteractive: true
+      }
+    }
+  };
+
+  const context = await pack?.extractContext?.({
+    rule,
+    worldState: initialWorldState as never,
+    detection: detection as never,
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: { supportsImageJson: () => false }
+    } as never
+  });
+
+  assert.equal(actions.some((entry) => entry.action === "press" && entry.params?.key === "enter"), true);
+  assert.equal(context?.inputs?.sendTarget, "发送");
+  assert.equal(typeof (context?.inputs?.composeTarget as { bounds?: unknown } | undefined)?.bounds, "object");
+  assert.equal(context?.inputs?.typeTarget, "");
 });
 
 test("mail browser watch rules infer the browser pack, draft replies, and can be approved into tasks", async () => {
@@ -12226,7 +13478,7 @@ test("boss browser watch rules infer the browser pack and trigger candidate revi
     const { watch } = await createResponse.json();
     assert.equal(watch.livePack, "boss-browser");
 
-    const triggeredTask = await waitForWatchTask(server.baseUrl, watch.id);
+    const triggeredTask = await waitForWatchTask(server.baseUrl, watch.id, 20000);
     const completed = await waitForTask(server.baseUrl, triggeredTask.id, (task) => task.status === "completed");
     assert.equal(completed.status, "completed");
     assert.equal(completed.taskSpec.skillName, "boss-open-candidate");
@@ -12266,7 +13518,8 @@ test("boss browser watch rules draft candidate replies and approved drafts send 
 
     const pendingDraft = await waitForDraft(
       server.baseUrl,
-      (draft) => draft.watchRuleId === watch.id && draft.livePack === "boss-browser" && draft.status === "pending"
+      (draft) => draft.watchRuleId === watch.id && draft.livePack === "boss-browser" && draft.status === "pending",
+      20000
     );
     assert.equal(pendingDraft.riskDecision.action, "draft");
 
@@ -12285,7 +13538,7 @@ test("boss browser watch rules draft candidate replies and approved drafts send 
 
     state = await boss.getState();
     assert.equal(state.sentReplies.length, 1);
-    assert.equal(state.sentReplies[0].message, "你好，我已看到你的信息，会尽快查看并和你沟通后续。");
+    assert.equal(state.sentReplies[0].message, "你好，收到你的消息。关于这个岗位，我会先确认一下，并尽快和你沟通后续。");
   } finally {
     await server.close();
     await boss.close();
@@ -12319,7 +13572,8 @@ test("boss browser watch rules can auto-send follow-ups after one approval when 
 
     const pendingDraft = await waitForDraft(
       server.baseUrl,
-      (draft) => draft.watchRuleId === watch.id && draft.livePack === "boss-browser" && draft.status === "pending"
+      (draft) => draft.watchRuleId === watch.id && draft.livePack === "boss-browser" && draft.status === "pending",
+      20000
     );
     const approvedResponse = await fetch(`${server.baseUrl}/drafts/${pendingDraft.id}/approve`, {
       method: "POST"
@@ -12329,12 +13583,12 @@ test("boss browser watch rules can auto-send follow-ups after one approval when 
     assert.equal(firstCompleted.status, "completed");
 
     let state = await waitForValue(() => boss.getState(), (current) => current.sentReplies.length === 1);
-    assert.equal(state.sentReplies[0].message, "你好，我已看到你的信息，会尽快查看并和你沟通后续。");
+    assert.equal(state.sentReplies[0].message, "你好，收到你的消息。关于这个岗位，我会先确认一下，并尽快和你沟通后续。");
 
     await boss.pushIncomingMessage("候选人: 我这周三下午可以沟通。");
 
     state = await waitForValue(() => boss.getState(), (current) => current.sentReplies.length === 2, 15000);
-    assert.equal(state.sentReplies[1].message, "你好，我已看到你的信息，会尽快查看并和你沟通后续。");
+    assert.equal(state.sentReplies[1].message, "你好，收到你的消息。关于这周三下午的沟通安排，我会先确认一下，并尽快和你沟通后续。");
 
     const draftsPayload = await (await fetch(`${server.baseUrl}/drafts`)).json();
     assert.equal(draftsPayload.drafts.filter((draft) => draft.watchRuleId === watch.id).length, 1);

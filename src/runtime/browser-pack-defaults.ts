@@ -29,7 +29,7 @@ export function defaultBrowserStartUrlForPack(packName: string | null | undefine
     case "generic-mail-browser":
       return "https://outlook.office.com/mail/";
     case "boss-browser":
-      return "https://www.zhipin.com/web/geek/job-recommend";
+      return "https://www.zhipin.com/web/geek/chat";
     case "google-drive-browser":
       return "https://drive.google.com";
     case "google-docs-browser":
