@@ -6809,6 +6809,188 @@ test("outlook desktop pack falls back to a heuristic English draft when model dr
   assert.match(String(draft?.metadata?.modelError ?? ""), /Claude Code CLI request failed/);
 });
 
+test("outlook desktop pack can use model-backed semantic facts from a visible unread row", async () => {
+  const registry = new LivePackRegistry({
+    surfaceRegistry: new SurfaceRegistry({})
+  });
+  const pack = registry.get("outlook-desktop");
+  const rule: WatchRule = {
+    id: "watch-outlook-semantic-detect",
+    goal: "Always watch Outlook and prefill replies for unread mail",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "outlook-desktop-main",
+    skillName: null,
+    appTarget: "Microsoft Outlook",
+    livePack: "outlook-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspace: WorkspaceProfile = {
+    id: "profile-outlook-semantic-detect",
+    name: "outlook-desktop-main",
+    rootPath: "/tmp/outlook-desktop-main",
+    profilePath: "/tmp/outlook-desktop-main/profile",
+    downloadsPath: "/tmp/outlook-desktop-main/downloads",
+    artifactsPath: "/tmp/outlook-desktop-main/artifacts",
+    scratchPath: "/tmp/outlook-desktop-main/scratch",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const detection = await pack?.detectNewItems?.({
+    rule,
+    worldState: {
+      version: 1,
+      surface: "desktop",
+      workspaceId: "workspace-outlook-semantic-detect",
+      appContext: {
+        appName: "Microsoft Outlook"
+      },
+      capture: {
+        path: "/tmp/outlook-semantic-detect.png",
+        metadata: {}
+      },
+      ocrBlocks: [],
+      interactionCandidates: [
+        {
+          id: "outlook-row",
+          surface: "desktop",
+          kind: "element",
+          text: "Lazaro Waters",
+          role: "row",
+          bounds: { x: 180, y: 220, width: 260, height: 36, centerX: 310, centerY: 238 },
+          confidence: 0.91,
+          sourceHints: {
+            source: "accessibility",
+            windowTitle: "Focused Inbox - Microsoft Outlook",
+            ariaLabel: "Unread message from Lazaro Waters"
+          },
+          isInteractive: true
+        }
+      ],
+      visibleText: [
+        "Microsoft Outlook",
+        "Focused",
+        "Inbox",
+        "Lazaro Waters",
+        "Re: extend runway",
+        "Could we talk Tuesday afternoon?",
+        "Thanks for the note."
+      ].join("\n"),
+      recentActions: [],
+      summary: "Outlook",
+      timestamp: new Date().toISOString()
+    } as never,
+    dedupeState: {},
+    workspace,
+    surfaceRegistry: registry.surfaceRegistry as never,
+    controlPlane: {
+      modelClient: {
+        supportsImageJson: () => false,
+        isConfigured: () => true,
+        async completeJson() {
+          return {
+            latestInboundMessage: "Could we talk Tuesday afternoon?",
+            salientContext: [
+              "Could we talk Tuesday afternoon?",
+              "Thanks for the note."
+            ],
+            senderName: "Lazaro Waters",
+            speakerRole: "sender",
+            threadSummary: "Lazaro Waters",
+            subjectCue: "extend runway",
+            replyLanguageHint: "en",
+            evidence: "latest visible inbound question is present in the Outlook row context"
+          };
+        }
+      }
+    } as never
+  });
+
+  assert.equal(detection?.context?.[0], "Could we talk Tuesday afternoon?");
+  assert.equal((detection?.metadata?.semanticFacts as { source?: string } | undefined)?.source, "model");
+  assert.equal(detection?.metadata?.sender, "Lazaro Waters");
+  assert.equal(detection?.metadata?.direction, "inbound");
+});
+
+test("outlook desktop pack draft replies enrich model context with semantic facts", async () => {
+  const registry = new LivePackRegistry();
+  const pack = registry.get("outlook-desktop");
+  const seen: string[][] = [];
+  const rule: WatchRule = {
+    id: "watch-outlook-semantic-draft",
+    goal: "Always watch Outlook and prefill replies",
+    enabled: true,
+    status: "watching",
+    preferredSurface: "desktop",
+    workspaceName: "outlook-desktop-main",
+    skillName: null,
+    appTarget: "Microsoft Outlook",
+    livePack: "outlook-desktop",
+    pollIntervalMs: 1000,
+    watchProfile: {},
+    taskInputs: {},
+    dedupeState: {},
+    lastObservedAt: null,
+    lastTriggeredAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const draft = await pack?.draftReply?.({
+    rule,
+    detection: {
+      summary: "Re: extend runway",
+      context: ["Lazaro Waters"],
+      metadata: {
+        semanticFacts: {
+          latestInboundMessage: "Could we talk Tuesday afternoon?",
+          salientContext: [
+            "Could we talk Tuesday afternoon?",
+            "Thanks for the note."
+          ],
+          senderName: "Lazaro Waters",
+          speakerRole: "sender",
+          threadSummary: "Lazaro Waters",
+          subjectCue: "extend runway",
+          replyLanguageHint: "en",
+          source: "model",
+          evidence: "latest sender request visible"
+        }
+      }
+    } as never,
+    controlPlane: {
+      modelClient: {
+        isConfigured: () => true,
+        async draftReply(args: { context?: string[] }) {
+          seen.push(Array.isArray(args.context) ? args.context : []);
+          return {
+            replyText: "Thanks for your email. I received it and will follow up shortly.",
+            confidence: 0.82,
+            rationale: "semantic facts included"
+          };
+        }
+      },
+      listReplyStylePreferences: () => []
+    } as never
+  });
+
+  assert.equal(draft?.replyText, "Thanks for your email. I received it and will follow up shortly.");
+  assert.equal(seen[0]?.includes("Could we talk Tuesday afternoon?"), true);
+  assert.equal(seen[0]?.includes("Thanks for the note."), true);
+});
+
 test("outlook desktop pack does not retry opening a newly selected thread just because the reading pane subject differs from the sender row", async () => {
   const threadCapturePath = `/tmp/outlook-thread-subject-mismatch-${Date.now()}.png`;
   const composeCapturePath = `/tmp/outlook-thread-subject-mismatch-compose-${Date.now()}.png`;

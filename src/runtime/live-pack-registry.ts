@@ -8,6 +8,10 @@ import {
   defaultBrowserStartUrlForPack,
   inferBrowserManualInterventionFromUrl
 } from "./browser-pack-defaults.js";
+import {
+  inferOutlookSemanticFacts,
+  type OutlookSemanticFacts
+} from "./outlook-semantic-facts.js";
 import { inferReplyLanguage } from "./reply-language.js";
 import { packDefaultReplyPolicy } from "./reply-policy.js";
 import type { SurfaceRegistry } from "./surface-registry.js";
@@ -997,7 +1001,22 @@ async function draftPackReply({
   context: string[];
   metadata?: Record<string, unknown> | null;
 }): Promise<LivePackDraftResponse> {
-  const semanticFacts = ((metadata ?? {}) as { semanticFacts?: BossSemanticFacts | null }).semanticFacts ?? null;
+  const bossSemanticFacts = ((metadata ?? {}) as { semanticFacts?: BossSemanticFacts | null }).semanticFacts ?? null;
+  const outlookSemanticFacts = ((metadata ?? {}) as { semanticFacts?: OutlookSemanticFacts | null }).semanticFacts ?? null;
+  const effectiveContext =
+    livePack === "boss-browser" && bossSemanticFacts
+      ? uniqueStrings([
+          bossSemanticFacts.latestInboundMessage,
+          ...bossSemanticFacts.salientContext,
+          ...context
+        ]).filter(Boolean)
+      : livePack === "outlook-desktop" && outlookSemanticFacts
+        ? uniqueStrings([
+            outlookSemanticFacts.latestInboundMessage,
+            ...outlookSemanticFacts.salientContext,
+            ...context
+          ]).filter(Boolean)
+        : context;
   const stylePreferences = learnedReplyStylePreferences({
     controlPlane,
     livePack,
@@ -1010,9 +1029,9 @@ async function draftPackReply({
         goal,
         livePack,
         summary,
-        context,
+        context: effectiveContext,
         stylePreferences,
-        replyLanguageHint: inferReplyLanguage({ summary, context })
+        replyLanguageHint: inferReplyLanguage({ summary, context: effectiveContext })
       });
       return {
         replyText: String(drafted.replyText ?? "").trim(),
@@ -1031,8 +1050,8 @@ async function draftPackReply({
   if (livePack === "boss-browser") {
     return draftBossHeuristicReply({
       summary,
-      context,
-      semanticFacts,
+      context: effectiveContext,
+      semanticFacts: bossSemanticFacts,
       stylePreferences,
       modelError
     });
@@ -1042,7 +1061,7 @@ async function draftPackReply({
     family,
     goal,
     summary,
-    context,
+    context: effectiveContext,
     stylePreferences
   });
   return {
@@ -10526,7 +10545,20 @@ function createOutlookDesktopPack(): LivePack {
           String(thread.replyReason ?? "").trim(),
           ...contextForSignal(effectiveWorldState, { text: openTarget })
         ]).slice(0, 4);
-        const itemFingerprint = fingerprint(`outlook-desktop:${rule.workspaceName ?? "default"}:${openTarget}:${context.join("|")}`);
+        const semanticFacts = await inferOutlookSemanticFacts({
+          modelClient: controlPlane.modelClient,
+          worldState: effectiveWorldState,
+          summary: openTarget,
+          threadSummary: openTarget,
+          subjectCue: String(thread.subjectCue ?? "").trim() || null,
+          preferredLatestSnippet: String(thread.latestSnippet ?? "").trim() || null
+        });
+        const semanticContext = uniqueStrings([
+          semanticFacts.latestInboundMessage,
+          ...semanticFacts.salientContext,
+          ...context
+        ]).filter(Boolean).slice(0, 6);
+        const itemFingerprint = fingerprint(`outlook-desktop:${rule.workspaceName ?? "default"}:${openTarget}:${semanticContext.join("|")}`);
         if (dedupeState.lastFingerprint === itemFingerprint) {
           return null;
         }
@@ -10535,11 +10567,11 @@ function createOutlookDesktopPack(): LivePack {
           fingerprint: itemFingerprint,
           summary: openTarget,
           text: openTarget,
-          context,
+          context: semanticContext,
           inputs: {
             watchItemText: openTarget,
             watchSummary: openTarget,
-            watchContext: context.join("\n"),
+            watchContext: semanticContext.join("\n"),
             openTarget,
             threadTitle: openTarget,
             openCandidate: {
@@ -10560,6 +10592,7 @@ function createOutlookDesktopPack(): LivePack {
             openPoint,
             scrollPasses,
             ...(groundedTarget ? { threadGrounding: groundedTarget } : {}),
+            semanticFacts,
             openCandidate: {
               id: "outlook-vision-unread",
               text: openTarget,
@@ -10571,7 +10604,7 @@ function createOutlookDesktopPack(): LivePack {
               packName: "outlook-desktop",
               surface: "desktop",
               summary: openTarget,
-              context,
+              context: semanticContext,
               openTarget,
               candidate: {
                 id: "outlook-vision-unread",
@@ -10580,7 +10613,9 @@ function createOutlookDesktopPack(): LivePack {
                 isInteractive: true,
                 bounds: openCandidateBounds
               } as InteractionCandidate
-            })
+            }),
+            ...(semanticFacts.senderName ? { sender: semanticFacts.senderName } : {}),
+            ...(semanticFacts.speakerRole === "sender" ? { direction: "inbound" as const } : {})
           },
           taskSpec: {
             preferredSurface: "desktop",
@@ -10608,7 +10643,18 @@ function createOutlookDesktopPack(): LivePack {
       }
 
       const context = contextForSignal(worldState, { text: candidate.text || summary });
-      const itemFingerprint = fingerprint(`outlook-desktop:${rule.workspaceName ?? "default"}:${summary}:${context.join("|")}`);
+      const semanticFacts = await inferOutlookSemanticFacts({
+        modelClient: controlPlane.modelClient,
+        worldState,
+        summary,
+        threadSummary: summary
+      });
+      const semanticContext = uniqueStrings([
+        semanticFacts.latestInboundMessage,
+        ...semanticFacts.salientContext,
+        ...context
+      ]).filter(Boolean).slice(0, 6);
+      const itemFingerprint = fingerprint(`outlook-desktop:${rule.workspaceName ?? "default"}:${summary}:${semanticContext.join("|")}`);
       if (dedupeState.lastFingerprint === itemFingerprint) {
         return null;
       }
@@ -10617,21 +10663,26 @@ function createOutlookDesktopPack(): LivePack {
         fingerprint: itemFingerprint,
         summary,
         text: summary,
-        context,
+        context: semanticContext,
         inputs: {
           watchItemText: summary,
           watchSummary: summary,
-          watchContext: context.join("\n"),
+          watchContext: semanticContext.join("\n"),
           openTarget: String(candidate.text ?? summary).trim() || summary
         },
-        metadata: buildConversationMetadata({
-          packName: "outlook-desktop",
-          surface: "desktop",
-          summary,
-          context,
-          openTarget: String(candidate.text ?? summary).trim() || summary,
-          candidate
-        })
+        metadata: {
+          ...buildConversationMetadata({
+            packName: "outlook-desktop",
+            surface: "desktop",
+            summary,
+            context: semanticContext,
+            openTarget: String(candidate.text ?? summary).trim() || summary,
+            candidate
+          }),
+          semanticFacts,
+          ...(semanticFacts.senderName ? { sender: semanticFacts.senderName } : {}),
+          ...(semanticFacts.speakerRole === "sender" ? { direction: "inbound" as const } : {})
+        }
       };
     },
     async extractContext({ rule, workspace, surfaceRegistry, detection, controlPlane, worldState }) {
@@ -10779,8 +10830,25 @@ function createOutlookDesktopPack(): LivePack {
           )
           ?? deriveOutlookComposerVerifyRegionFromVisual(visualThreadState.composer);
         if (composeBounds) {
-          const context = extractOutlookThreadContext(threadState, summary);
           const openTarget = detectedOpenTarget;
+          const fallbackContext = extractOutlookThreadContext(threadState, summary);
+          const semanticFacts = await inferOutlookSemanticFacts({
+            modelClient: controlPlane.modelClient,
+            worldState: threadState,
+            summary: openTarget,
+            threadSummary: openTarget,
+            subjectCue: String(
+              (detection.metadata?.visualThread as { subjectCue?: unknown } | null)?.subjectCue ?? ""
+            ).trim() || null,
+            preferredLatestSnippet: String(
+              (detection.metadata?.visualThread as { latestSnippet?: unknown } | null)?.latestSnippet ?? ""
+            ).trim() || null
+          });
+          const context = uniqueStrings([
+            semanticFacts.latestInboundMessage,
+            ...semanticFacts.salientContext,
+            ...fallbackContext
+          ]).filter(Boolean).slice(0, 6);
           const openCandidate = (detection.metadata?.openCandidate ?? null) as InteractionCandidate | Record<string, unknown> | null;
           const sendCandidate = findOutlookSendCandidate(threadState);
           return {
@@ -10809,6 +10877,7 @@ function createOutlookDesktopPack(): LivePack {
             metadata: {
               ...(detection.metadata ?? {}),
               visualThreadState,
+              semanticFacts,
               ...buildConversationMetadata({
                 packName: "outlook-desktop",
                 surface: "desktop",
@@ -10816,7 +10885,9 @@ function createOutlookDesktopPack(): LivePack {
                 context,
                 openTarget,
                 candidate: openCandidate
-              })
+              }),
+              ...(semanticFacts.senderName ? { sender: semanticFacts.senderName } : {}),
+              ...(semanticFacts.speakerRole === "sender" ? { direction: "inbound" as const } : {})
             },
             taskSpec: {
               preferredSurface: "desktop",
@@ -10839,9 +10910,26 @@ function createOutlookDesktopPack(): LivePack {
           "Microsoft Outlook",
           composeTarget.bounds
         );
-        const context = extractOutlookThreadContext(threadState, summary);
+        const fallbackContext = extractOutlookThreadContext(threadState, summary);
         const openTarget = detectedOpenTarget;
         const openCandidate = (detection.metadata?.openCandidate ?? null) as InteractionCandidate | Record<string, unknown> | null;
+        const semanticFacts = await inferOutlookSemanticFacts({
+          modelClient: controlPlane.modelClient,
+          worldState: threadState,
+          summary: openTarget,
+          threadSummary: openTarget,
+          subjectCue: String(
+            (detection.metadata?.visualThread as { subjectCue?: unknown } | null)?.subjectCue ?? ""
+          ).trim() || null,
+          preferredLatestSnippet: String(
+            (detection.metadata?.visualThread as { latestSnippet?: unknown } | null)?.latestSnippet ?? ""
+          ).trim() || null
+        });
+        const context = uniqueStrings([
+          semanticFacts.latestInboundMessage,
+          ...semanticFacts.salientContext,
+          ...fallbackContext
+        ]).filter(Boolean).slice(0, 6);
         return {
           summary,
           context,
@@ -10861,6 +10949,7 @@ function createOutlookDesktopPack(): LivePack {
           },
           metadata: {
             ...(detection.metadata ?? {}),
+            semanticFacts,
             ...buildConversationMetadata({
               packName: "outlook-desktop",
               surface: "desktop",
@@ -10868,7 +10957,9 @@ function createOutlookDesktopPack(): LivePack {
               context,
               openTarget,
               candidate: openCandidate
-            })
+            }),
+            ...(semanticFacts.senderName ? { sender: semanticFacts.senderName } : {}),
+            ...(semanticFacts.speakerRole === "sender" ? { direction: "inbound" as const } : {})
           },
           taskSpec: {
             preferredSurface: "desktop",
@@ -10880,8 +10971,25 @@ function createOutlookDesktopPack(): LivePack {
       if (!composeCandidate) {
         return null;
       }
-      const context = extractOutlookThreadContext(threadState, summary);
+      const fallbackContext = extractOutlookThreadContext(threadState, summary);
       const openTarget = detectedOpenTarget;
+      const semanticFacts = await inferOutlookSemanticFacts({
+        modelClient: controlPlane.modelClient,
+        worldState: threadState,
+        summary: openTarget,
+        threadSummary: openTarget,
+        subjectCue: String(
+          (detection.metadata?.visualThread as { subjectCue?: unknown } | null)?.subjectCue ?? ""
+        ).trim() || null,
+        preferredLatestSnippet: String(
+          (detection.metadata?.visualThread as { latestSnippet?: unknown } | null)?.latestSnippet ?? ""
+        ).trim() || null
+      });
+      const context = uniqueStrings([
+        semanticFacts.latestInboundMessage,
+        ...semanticFacts.salientContext,
+        ...fallbackContext
+      ]).filter(Boolean).slice(0, 6);
       return {
         summary,
         context,
@@ -10894,6 +11002,7 @@ function createOutlookDesktopPack(): LivePack {
         },
         metadata: {
           ...(detection.metadata ?? {}),
+          semanticFacts,
           ...buildConversationMetadata({
             packName: "outlook-desktop",
             surface: "desktop",
@@ -10901,7 +11010,9 @@ function createOutlookDesktopPack(): LivePack {
             context,
             openTarget,
             candidate: (detection.metadata?.openCandidate ?? null) as InteractionCandidate | Record<string, unknown> | null
-          })
+          }),
+          ...(semanticFacts.senderName ? { sender: semanticFacts.senderName } : {}),
+          ...(semanticFacts.speakerRole === "sender" ? { direction: "inbound" as const } : {})
         },
         taskSpec: undefined
       };
@@ -10916,7 +11027,8 @@ function createOutlookDesktopPack(): LivePack {
         family: "mail",
         goal: rule.goal,
         summary,
-        context
+        context,
+        metadata: detection.metadata ?? null
       });
     }
   };
