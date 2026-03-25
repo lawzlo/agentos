@@ -9,6 +9,16 @@ import {
   inferBrowserManualInterventionFromUrl
 } from "./browser-pack-defaults.js";
 import {
+  bossSnippetLooksLikeCandidateName,
+  bossSnippetLooksLikeProfileMetadata,
+  bossSnippetLooksUsable,
+  inferBossSemanticFacts,
+  normalizeBossSummary,
+  pickBossReplyTopic,
+  sanitizeBossReplySnippet,
+  type BossSemanticFacts
+} from "./boss-semantic-facts.js";
+import {
   inferOutlookSemanticFacts,
   type OutlookSemanticFacts
 } from "./outlook-semantic-facts.js";
@@ -130,17 +140,6 @@ interface DesktopVisualAnalysis {
   targetThreadOpen?: boolean | null;
   prefillVisible?: boolean | null;
 }
-
-interface BossSemanticFacts {
-  latestInboundMessage: string | null;
-  salientContext: string[];
-  speakerRole: "candidate" | "recruiter" | "unknown";
-  threadSummary: string | null;
-  source: "model" | "heuristic" | "vision";
-  evidence: string;
-}
-
-type BossSemanticModelClient = Pick<LivePackControlPlane["modelClient"], "isConfigured" | "completeJson"> | null | undefined;
 
 interface WeChatVisualAnalysis {
   openThread: string | null;
@@ -590,344 +589,6 @@ function learnedReplyStylePreferences({
     preferredSurface,
     limit: 6
   });
-}
-
-function sanitizeBossReplySnippet(value: string): string {
-  return String(value ?? "")
-    .trim()
-    .replace(/^\[草稿\]\s*/iu, "")
-    .replace(/^候选人\s*[:：]\s*/u, "")
-    .replace(/\s+/gu, " ")
-    .trim();
-}
-
-function bossSnippetLooksUsable(snippet: string): boolean {
-  const normalized = sanitizeBossReplySnippet(snippet);
-  if (!normalized) {
-    return false;
-  }
-  const chars = Array.from(normalized);
-  const allowedChars = chars.filter((char) => /[\u4e00-\u9fffA-Za-z0-9\s,，。.!?？:：'’"“”\-+()/]/u.test(char));
-  if (allowedChars.length <= Math.floor(chars.length / 2)) {
-    return false;
-  }
-  return /[\u4e00-\u9fffA-Za-z]{2,}/u.test(normalized);
-}
-
-function bossSnippetLooksLikeCandidateName(snippet: string): boolean {
-  const normalized = sanitizeBossReplySnippet(snippet).replace(/\s+/gu, "");
-  if (!normalized) {
-    return false;
-  }
-  if (/[0-9]/u.test(normalized) || /[。！？!?，,：:;；"'“”‘’()（）]/u.test(normalized)) {
-    return false;
-  }
-  return /^[\u4e00-\u9fffA-Za-z·•]{2,16}$/u.test(normalized);
-}
-
-function bossSnippetLooksLikeProfileMetadata(snippet: string): boolean {
-  const normalized = sanitizeBossReplySnippet(snippet);
-  if (!normalized) {
-    return false;
-  }
-  if (/[。！？!?，,：:;；"'“”‘’()（）]/u.test(normalized)) {
-    return false;
-  }
-  if (
-    /(?:\d+\s*年经验|应届|本科|硕士|博士|产品经理|工程师|设计师|运营|销售|市场|实习|上海|北京|深圳|广州|杭州|苏州|成都|武汉|西安|远程|onsite|hybrid)$/iu.test(
-      normalized
-    )
-  ) {
-    return true;
-  }
-  return (
-    Array.from(normalized).length <= 6
-    && !/(岗位|职位|空缺|hc|机会|薪资|薪酬|待遇|base|简历|经历|背景|项目|作品|沟通|方便|可以|周[一二三四五六日天]|上午|下午|晚上|明天|后天|cloud|aws|google)/iu.test(
-      normalized
-    )
-  );
-}
-
-function isBossInboundMessageLine(line: string): boolean {
-  return /^候选人\s*[:：]/u.test(String(line ?? "").trim());
-}
-
-function isBossOutboundMessageLine(line: string): boolean {
-  return /^(招聘方|agentos|assistant|me)\s*[:：]/iu.test(String(line ?? "").trim());
-}
-
-function extractBossConversationContextLines(lines: string[], normalizedSummary: string): string[] {
-  const filtered = lines.filter((line) => {
-    const normalized = normalizeBossSummary(line);
-    return normalized && normalized !== normalizedSummary && !SEND_PATTERN.test(line) && !isBossUiChrome(line);
-  });
-
-  const inboundOnly = filtered.filter((line) => isBossInboundMessageLine(line));
-  if (inboundOnly.length) {
-    return uniqueStrings(inboundOnly);
-  }
-
-  return uniqueStrings(
-    filtered.filter(
-      (line) =>
-        !isBossOutboundMessageLine(line)
-        && !bossSnippetLooksLikeCandidateName(line)
-        && !bossSnippetLooksLikeProfileMetadata(line)
-    )
-  );
-}
-
-function resolveBossContextWindow(
-  worldState: WorldState | null,
-  summary: string,
-  {
-    trailingWindow = 5,
-    includePreviousLine = true,
-    excludeComposeChrome = false
-  }: {
-    trailingWindow?: number;
-    includePreviousLine?: boolean;
-    excludeComposeChrome?: boolean;
-  } = {}
-): string[] {
-  const lines = visibleLines(worldState).filter((line) => !isBossUiChrome(line));
-  const normalizedSummary = normalizeBossSummary(summary);
-  const summaryIndex = lines.findIndex((line) => normalizeBossSummary(line) === normalizedSummary);
-  const startIndex =
-    summaryIndex === -1
-      ? 0
-      : Math.max(0, summaryIndex - (includePreviousLine ? 1 : 0));
-  const pool = summaryIndex === -1 ? lines : lines.slice(startIndex, summaryIndex + trailingWindow);
-  return excludeComposeChrome
-    ? pool.filter((line) => !/^(发送消息|message|reply|chat|contact|沟通|回复|输入|联系)/iu.test(line.trim()))
-    : pool;
-}
-
-function fallbackBossSemanticFacts({
-  worldState,
-  summary,
-  preferredLatestSnippet = null,
-  threadSummary = null,
-  trailingWindow = 6,
-  excludeComposeChrome = false
-}: {
-  worldState: WorldState | null;
-  summary: string;
-  preferredLatestSnippet?: string | null;
-  threadSummary?: string | null;
-  trailingWindow?: number;
-  excludeComposeChrome?: boolean;
-}): BossSemanticFacts {
-  const contextLines = (
-    excludeComposeChrome
-      ? extractBossThreadContext(worldState, summary)
-      : extractBossContext(worldState, summary)
-  ).slice(0, Math.max(1, trailingWindow));
-  const normalizedPreferredSnippet = sanitizeBossReplySnippet(String(preferredLatestSnippet ?? ""));
-  const latestInboundMessage =
-    normalizedPreferredSnippet && !bossSnippetLooksLikeProfileMetadata(normalizedPreferredSnippet)
-      ? normalizedPreferredSnippet
-      : (contextLines
-          .map((line) => sanitizeBossReplySnippet(line))
-          .find((line) => bossSnippetLooksUsable(line)) ?? null);
-  const salientContext = uniqueStrings([
-    latestInboundMessage,
-    ...contextLines
-  ]).filter(Boolean).slice(0, 6);
-  return {
-    latestInboundMessage,
-    salientContext,
-    speakerRole: "candidate",
-    threadSummary: normalizeBossSummary(threadSummary || summary) || null,
-    source: preferredLatestSnippet ? "vision" : "heuristic",
-    evidence: preferredLatestSnippet ? "vision latest snippet with heuristic context fallback" : "heuristic context extraction"
-  };
-}
-
-function canonicalizeBossSemanticLine(line: string, sourceLines: string[]): string | null {
-  const normalized = normalizeBossSummary(line);
-  if (!normalized) {
-    return null;
-  }
-
-  const exact = sourceLines.find((entry) => normalizeBossSummary(entry) === normalized);
-  if (exact) {
-    return exact.trim();
-  }
-
-  const fuzzy = sourceLines.find((entry) => {
-    const entrySummary = normalizeBossSummary(entry);
-    return entrySummary && (entrySummary.includes(normalized) || normalized.includes(entrySummary));
-  });
-  return fuzzy?.trim() ?? null;
-}
-
-async function inferBossSemanticFacts({
-  modelClient,
-  worldState,
-  summary,
-  preferredLatestSnippet = null,
-  threadSummary = null,
-  trailingWindow = 6,
-  excludeComposeChrome = false
-}: {
-  modelClient: BossSemanticModelClient;
-  worldState: WorldState | null;
-  summary: string;
-  preferredLatestSnippet?: string | null;
-  threadSummary?: string | null;
-  trailingWindow?: number;
-  excludeComposeChrome?: boolean;
-}): Promise<BossSemanticFacts> {
-  const fallback = fallbackBossSemanticFacts({
-    worldState,
-    summary,
-    preferredLatestSnippet,
-    threadSummary,
-    trailingWindow,
-    excludeComposeChrome
-  });
-
-  if (!modelClient?.isConfigured?.() || typeof modelClient.completeJson !== "function") {
-    return fallback;
-  }
-
-  const visibleConversationLines = resolveBossContextWindow(worldState, summary, {
-    trailingWindow,
-    excludeComposeChrome
-  })
-    .map((line) => String(line ?? "").trim())
-    .filter(Boolean)
-    .slice(0, 18);
-  if (!visibleConversationLines.length) {
-    return fallback;
-  }
-
-  try {
-    const result = await modelClient.completeJson<
-      {
-        summary: string;
-        threadSummary: string | null;
-        preferredLatestSnippet: string | null;
-        visibleConversationLines: string[];
-        heuristicContext: string[];
-      },
-      {
-        latestInboundMessage: string | null;
-        salientContext: string[];
-        speakerRole: "candidate" | "recruiter" | "unknown";
-        threadSummary: string | null;
-        evidence: string | null;
-      }
-    >({
-      schemaName: "agentos_boss_semantic_facts",
-      schema: {
-        type: "object",
-        properties: {
-          latestInboundMessage: { type: ["string", "null"] },
-          salientContext: { type: "array", items: { type: "string" } },
-          speakerRole: { type: "string", enum: ["candidate", "recruiter", "unknown"] },
-          threadSummary: { type: ["string", "null"] },
-          evidence: { type: ["string", "null"] }
-        },
-        required: ["latestInboundMessage", "salientContext", "speakerRole", "threadSummary", "evidence"],
-        additionalProperties: false
-      },
-      systemPrompt: [
-        "You extract semantic conversation facts for AgentOS from BOSS直聘 chat text.",
-        "Use only the supplied visibleConversationLines. Do not invent or rewrite lines.",
-        "Ignore candidate names, role/location metadata, browser chrome, and message composer placeholders.",
-        "latestInboundMessage must be the latest visible message from the candidate that the recruiter should reply to.",
-        "salientContext should contain up to 4 exact visible lines that best preserve the candidate's request.",
-        "speakerRole should describe who wrote latestInboundMessage.",
-        "threadSummary should be the candidate name or short thread title when visible.",
-        "Return strict JSON only."
-      ].join(" "),
-      userPayload: {
-        summary,
-        threadSummary,
-        preferredLatestSnippet,
-        visibleConversationLines,
-        heuristicContext: fallback.salientContext
-      },
-      temperature: 0
-    });
-
-    const latestInboundMessage = canonicalizeBossSemanticLine(String(result.latestInboundMessage ?? ""), visibleConversationLines);
-    const salientContext = uniqueStrings(
-      (Array.isArray(result.salientContext) ? result.salientContext : [])
-        .map((line) => canonicalizeBossSemanticLine(String(line ?? ""), visibleConversationLines))
-        .filter((line): line is string => Boolean(line))
-    ).slice(0, 6);
-    const normalizedThreadSummary = normalizeBossSummary(String(result.threadSummary ?? threadSummary ?? summary));
-
-    if (!latestInboundMessage && !salientContext.length) {
-      return fallback;
-    }
-
-    return {
-      latestInboundMessage: latestInboundMessage ?? fallback.latestInboundMessage,
-      salientContext: uniqueStrings([
-        latestInboundMessage,
-        ...salientContext,
-        ...fallback.salientContext
-      ]).filter(Boolean).slice(0, 6),
-      speakerRole: result.speakerRole ?? fallback.speakerRole,
-      threadSummary: normalizedThreadSummary || fallback.threadSummary,
-      source: "model",
-      evidence: String(result.evidence ?? "").trim() || "model semantic conversation facts"
-    };
-  } catch {
-    return fallback;
-  }
-}
-
-function pickBossReplyTopic(
-  context: string[],
-  language: "zh" | "en",
-  latestInboundMessage: string | null = null
-): string | null {
-  const normalizedContext = uniqueStrings([
-    sanitizeBossReplySnippet(String(latestInboundMessage ?? "")),
-    ...context.map((entry) => sanitizeBossReplySnippet(entry))
-  ]).filter(Boolean);
-  const prioritizedContext = [...normalizedContext].reverse();
-  const snippet =
-    prioritizedContext.find(
-      (entry) =>
-        bossSnippetLooksUsable(entry)
-        && !bossSnippetLooksLikeCandidateName(entry)
-        && !bossSnippetLooksLikeProfileMetadata(entry)
-    ) ?? null;
-  if (!snippet) {
-    return null;
-  }
-
-  if (language === "zh") {
-    const timeMatch = snippet.match(/(这?周[一二三四五六日天](?:上午|中午|下午|晚上)?|下周[一二三四五六日天](?:上午|中午|下午|晚上)?|明天(?:上午|中午|下午|晚上)?|后天(?:上午|中午|下午|晚上)?)/u);
-    if (timeMatch?.[1]) {
-      return `${timeMatch[1]}的沟通安排`;
-    }
-    if (/(岗位|职位|空缺|hc|机会)/iu.test(snippet)) {
-      return "这个岗位";
-    }
-    if (/(薪资|薪酬|待遇|base)/iu.test(snippet)) {
-      return "薪资和岗位情况";
-    }
-    if (/(简历|经历|背景|项目|作品|产品经理|aigc|ai)/iu.test(snippet)) {
-      return `你提到的${snippet.replace(/[。！？!?].*$/u, "").slice(0, 18)}`;
-    }
-    return `你提到的“${snippet.replace(/[。！？!?].*$/u, "").slice(0, 18)}”`;
-  }
-
-  const lower = snippet.toLowerCase();
-  if (/(aws|google cloud|cloud|credits|partnership)/iu.test(lower)) {
-    return "the cloud partnership details";
-  }
-  if (/(role|position|opening|job)/iu.test(lower)) {
-    return "the role";
-  }
-  return `your note about "${snippet.replace(/[.!?].*$/u, "").slice(0, 28)}"`;
 }
 
 function draftBossHeuristicReply({
@@ -6337,19 +5998,6 @@ function mailSummariesMatch(left: string | null | undefined, right: string | nul
   return false;
 }
 
-function normalizeBossSummary(value: string): string {
-  const normalized = String(value ?? "")
-    .replace(/^[●•]\s*/u, "")
-    .replace(/^(new candidate|candidate update|candidate|新候选人|候选人|待沟通|待跟进)\s*[:：-]?\s*/iu, "")
-    .replace(/^\(\d+\)\s*/u, "")
-    .replace(/\s+\(\d+\)$/u, "")
-    .trim();
-  if (!/\p{L}/u.test(normalized)) {
-    return "";
-  }
-  return normalized;
-}
-
 function deriveBossOpenTarget(value: string): string {
   const normalized = normalizeBossSummary(value);
   if (!normalized) {
@@ -7143,7 +6791,20 @@ function extractBossContext(worldState: WorldState | null, summary: string): str
   const normalizedSummary = normalizeBossSummary(summary);
   const summaryIndex = lines.findIndex((line) => normalizeBossSummary(line) === normalizedSummary);
   const pool = summaryIndex === -1 ? lines : lines.slice(Math.max(0, summaryIndex - 1), summaryIndex + 5);
-  return extractBossConversationContextLines(pool, normalizedSummary).slice(0, 5);
+  return uniqueStrings(
+    pool.filter((line) => {
+      const normalized = normalizeBossSummary(line);
+      return (
+        normalized
+        && normalized !== normalizedSummary
+        && !SEND_PATTERN.test(line)
+        && !isBossUiChrome(line)
+        && !bossSnippetLooksLikeCandidateName(line)
+        && !bossSnippetLooksLikeProfileMetadata(line)
+        && bossSnippetLooksUsable(line)
+      );
+    })
+  ).slice(0, 5);
 }
 
 function wantsBossReplyWorkflow(goal: string): boolean {
@@ -7400,9 +7061,21 @@ function extractBossThreadContext(worldState: WorldState | null, summary: string
   const normalizedSummary = normalizeBossSummary(summary);
   const summaryIndex = lines.findIndex((line) => normalizeBossSummary(line) === normalizedSummary);
   const pool = summaryIndex === -1 ? lines : lines.slice(Math.max(0, summaryIndex - 1), summaryIndex + 8);
-  return extractBossConversationContextLines(
-    pool.filter((line) => !/^(发送消息|message|reply|chat|contact|沟通|回复|输入|联系)/iu.test(line.trim())),
-    normalizedSummary
+  return uniqueStrings(
+    pool
+      .filter((line) => !/^(发送消息|message|reply|chat|contact|沟通|回复|输入|联系)/iu.test(line.trim()))
+      .filter((line) => {
+        const normalized = normalizeBossSummary(line);
+        return (
+          normalized
+          && normalized !== normalizedSummary
+          && !SEND_PATTERN.test(line)
+          && !isBossUiChrome(line)
+          && !bossSnippetLooksLikeCandidateName(line)
+          && !bossSnippetLooksLikeProfileMetadata(line)
+          && bossSnippetLooksUsable(line)
+        );
+      })
   ).slice(0, 6);
 }
 
@@ -11218,7 +10891,7 @@ function createBossPack(): LivePack {
           }),
           ...(semanticFacts.speakerRole === "candidate"
             ? {
-                sender: "候选人",
+                sender: semanticFacts.senderName ?? (deriveBossOpenTarget(summary) || summary),
                 direction: "inbound"
               }
             : {}),
@@ -11353,7 +11026,7 @@ function createBossPack(): LivePack {
           }),
           ...(semanticFacts.speakerRole === "candidate"
             ? {
-                sender: "候选人",
+                sender: semanticFacts.senderName ?? (deriveBossOpenTarget(summary) || summary),
                 direction: "inbound"
               }
             : {}),

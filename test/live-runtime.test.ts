@@ -12343,7 +12343,7 @@ test("boss browser pack can extract candidate thread context and build approval-
   assert.equal(detection?.summary, "李雷 · 产品经理");
   assert.equal(detection?.inputs?.openTarget, "李雷");
   assert.equal(detection?.metadata?.threadKey, "李雷 · 产品经理");
-  assert.equal(detection?.metadata?.sender, "候选人");
+  assert.equal(detection?.metadata?.sender, "李雷");
   assert.equal(detection?.metadata?.direction, "inbound");
 
   const context = await pack?.extractContext?.({
@@ -12362,7 +12362,7 @@ test("boss browser pack can extract candidate thread context and build approval-
   assert.equal(openCandidate ? "bounds" in openCandidate : false, true);
   assert.equal(context?.inputs?.sendTarget, "发送");
   assert.equal(context?.metadata?.threadKey, "李雷 · 产品经理");
-  assert.equal(context?.metadata?.sender, "候选人");
+  assert.equal(context?.metadata?.sender, "李雷");
   assert.equal(context?.taskSpec?.skillName, null);
   assert.equal(Array.isArray(context?.taskSpec?.steps), true);
   const typeStep = context?.taskSpec?.steps?.find((step) => step.action === "typeIntoTarget") ?? null;
@@ -13758,6 +13758,7 @@ test("boss browser semantic facts can use model-backed unlabeled thread lines", 
 
   assert.equal(detection?.context?.[0], "Curious, are you using AWS or Google Cloud?");
   assert.equal((detection?.metadata?.semanticFacts as { source?: string } | undefined)?.source, "model");
+  assert.equal((detection?.metadata?.semanticFacts as { senderName?: string } | undefined)?.senderName, "Lazaro Waters");
 
   const context = await pack?.extractContext?.({
     rule,
@@ -13772,6 +13773,7 @@ test("boss browser semantic facts can use model-backed unlabeled thread lines", 
 
   assert.equal(context?.context?.[0], "Curious, are you using AWS or Google Cloud?");
   assert.equal((context?.metadata?.semanticFacts as { latestInboundMessage?: string } | undefined)?.latestInboundMessage, "Curious, are you using AWS or Google Cloud?");
+  assert.equal((context?.metadata?.sender as string | undefined) ?? null, "Lazaro Waters");
 });
 
 test("boss browser heuristic drafts can use semantic facts instead of prefixed chat heuristics", async () => {
@@ -13807,6 +13809,7 @@ test("boss browser heuristic drafts can use semantic facts instead of prefixed c
         semanticFacts: {
           latestInboundMessage: "Curious, are you using AWS or Google Cloud?",
           salientContext: ["Curious, are you using AWS or Google Cloud?"],
+          senderName: "Lazaro Waters",
           speakerRole: "candidate",
           threadSummary: "Lazaro Waters",
           source: "model",
