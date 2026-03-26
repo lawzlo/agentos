@@ -348,11 +348,9 @@ function createBrowserAdapter(): BrowserStateAdapter {
 
   return new BrowserSurfaceAdapter({
     artifactStore,
-    browserMode: config.browserMode,
+    dataDir: config.dataDir,
     browserExecutable: config.browserExecutable ?? null,
-    browserCdpUrl: config.browserCdpUrl ?? null,
-    modelConfig: config.model,
-    headless: config.headless
+    modelConfig: config.model
   }) as BrowserStateAdapter;
 }
 
@@ -646,7 +644,7 @@ async function collectBrowserState(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error ?? "browser state failed");
     const unavailable =
-      /No attachable Chrome session is available|Configured browser CDP endpoint .* cannot be bootstrapped|Browser CDP endpoint did not become ready|No attachable Chrome page is open|Stagehand runtime is unavailable/iu.test(message);
+      /Browser app unavailable|No desktop browser app is available|No supported browser app could be focused/iu.test(message);
     return {
       request,
       surface: "browser",

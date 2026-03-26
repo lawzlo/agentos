@@ -22,9 +22,7 @@
     "package:windows": "node scripts/build-windows-msi.mjs"
   },
   "dependencies": {
-    "@browserbasehq/stagehand": "^3.2.0",
     "deepmerge": "^4.3.1",
-    "playwright-core": "^1.54.2",
     "ws": "^8.18.3",
     "zod": "^3.25.76"
   },

@@ -148,20 +148,21 @@ export class ControlPlane {
     this.modelClient = new OpenAICompatibleModelClient(config.model);
     this.licenseService = new LicenseService(config);
     this.groundingEngine = new GroundingEngine({ traceStore: this.traceStore });
+    const desktopSurface = new DesktopSurfaceAdapter({
+      artifactStore: this.artifactStore,
+      dataDir: config.dataDir,
+      visualModelClient: this.modelClient
+    });
     this.surfaceRegistry = new SurfaceRegistry({
       browser: new BrowserSurfaceAdapter({
         artifactStore: this.artifactStore,
-        browserMode: config.browserMode,
-        browserExecutable: config.browserExecutable,
-        browserCdpUrl: config.browserCdpUrl,
-        modelConfig: config.model,
-        headless: config.headless
-      }),
-      desktop: new DesktopSurfaceAdapter({
-        artifactStore: this.artifactStore,
         dataDir: config.dataDir,
-        visualModelClient: this.modelClient
-      })
+        browserExecutable: config.browserExecutable,
+        modelConfig: config.model,
+        visualModelClient: this.modelClient,
+        desktopSurface
+      }),
+      desktop: desktopSurface
     });
     this.surfaceScheduler = new SurfaceScheduler();
     this.surfaceCoordinator = new SurfaceCoordinator({

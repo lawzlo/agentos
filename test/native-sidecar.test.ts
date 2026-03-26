@@ -84,7 +84,7 @@ test("native sidecar client prefers the repo release binary over the cached copy
   await fs.writeFile(manifestPath, "[package]\nname = \"agentos-native\"\nversion = \"0.0.0\"\n", "utf8");
   await fs.writeFile(
     targetBinary,
-    `#!/usr/bin/env node
+    `#!${process.execPath}
 import readline from "node:readline";
 const rl = readline.createInterface({ input: process.stdin });
 rl.on("line", (line) => {
@@ -96,7 +96,7 @@ rl.on("line", (line) => {
   );
   await fs.writeFile(
     cachedBinary,
-    `#!/usr/bin/env node
+    `#!${process.execPath}
 import readline from "node:readline";
 const rl = readline.createInterface({ input: process.stdin });
 rl.on("line", (line) => {

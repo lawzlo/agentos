@@ -239,7 +239,7 @@ test("collectSurfaceState opens boss chat by default and treats expired sessions
   assert.equal(report.recoverySuggested, "complete_signin");
 });
 
-test("collectSurfaceState returns browser_unavailable when attach-existing browser prerequisites are missing", async () => {
+test("collectSurfaceState returns browser_unavailable when no supported browser app can be focused", async () => {
   const request: SurfaceStateRequest = {
     surface: "browser",
     appName: null,
@@ -256,12 +256,10 @@ test("collectSurfaceState returns browser_unavailable when attach-existing brows
   const report = await collectSurfaceState(request, {
     browserAdapter: {
       async act() {
-        throw new Error(
-          "No attachable Chrome session is available at http://127.0.0.1:9222, and AgentOS could not bootstrap Chrome because no browser executable was detected."
-        );
+        throw new Error("Browser app unavailable: could not focus Google Chrome, Chromium, Microsoft Edge.");
       },
       async observe() {
-        throw new Error("observe should not be reached when browser setup is missing");
+        throw new Error("observe should not be reached when browser app focus is missing");
       },
       async shutdown() {}
     }

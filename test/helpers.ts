@@ -5,6 +5,7 @@ import path from "node:path";
 import type { AddressInfo } from "node:net";
 
 import { createServer as createAgentServer } from "../src/server.js";
+import { TestBrowserSurface } from "./browser-surface.mock.js";
 
 const DEFAULT_TASK_WAIT_TIMEOUT_MS = Number.parseInt(process.env.AGENTOS_WAIT_TASK_TIMEOUT_MS ?? "", 10) || 60000;
 const TASK_WAIT_INTERVAL_MS = 250;
@@ -800,12 +801,11 @@ export async function startDocsFilesFixtureServer() {
   };
 }
 
-export async function startAgentServer({ dataDir, ...overrides }) {
+export async function startAgentServer({ dataDir, browserSurface = undefined, ...overrides }) {
   const app = await createAgentServer({
     port: 0,
     dataDir,
     headless: true,
-    browserMode: "managed_profile",
     ...(overrides.model
       ? {}
       : {
@@ -819,6 +819,7 @@ export async function startAgentServer({ dataDir, ...overrides }) {
         }),
     ...overrides
   });
+  app.controlPlane.surfaceRegistry.surfaces.set("browser", browserSurface ?? new TestBrowserSurface(app.controlPlane.artifactStore));
   const port = await app.listen();
 
   return {

@@ -45,12 +45,15 @@ export function hasOutlookInboxRecoveryHint(lines: string[]) {
 }
 
 export function findOutlookInboxRecoveryPoint(worldState: WorldState | null): { x: number; y: number } | null {
-  const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
+  const interactionCandidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
+  const screenTextBlocks = Array.isArray(worldState?.screenTextBlocks) ? worldState.screenTextBlocks : [];
   const windowBounds = findDesktopWindowBounds(worldState, "Microsoft Outlook");
   const maxSidebarX = windowBounds
     ? windowBounds.x + windowBounds.width * 0.38
     : Number.POSITIVE_INFINITY;
-  const ranked = candidates.map((candidate) => ({
+
+  const rankedInteractionCandidates = interactionCandidates
+    .map((candidate) => ({
       text: String(candidate?.text ?? "").trim(),
       bounds: candidate?.bounds ?? null,
       score: (candidate?.isInteractive ? 10 : 0) + (candidate?.role === "button" ? 5 : 0)
@@ -70,13 +73,42 @@ export function findOutlookInboxRecoveryPoint(worldState: WorldState | null): { 
       return Number(right.score ?? 0) - Number(left.score ?? 0)
         || Number(left.bounds?.centerY ?? Number.POSITIVE_INFINITY) - Number(right.bounds?.centerY ?? Number.POSITIVE_INFINITY);
     });
-  const match = ranked[0];
-  if (!match?.bounds || !Number.isFinite(Number(match.bounds.centerX)) || !Number.isFinite(Number(match.bounds.centerY))) {
+  const interactionMatch = rankedInteractionCandidates[0];
+  if (interactionMatch?.bounds && Number.isFinite(Number(interactionMatch.bounds.centerX)) && Number.isFinite(Number(interactionMatch.bounds.centerY))) {
+    return {
+      x: Number(interactionMatch.bounds.centerX),
+      y: Number(interactionMatch.bounds.centerY)
+    };
+  }
+
+  const rankedScreenTextBlocks = screenTextBlocks
+    .map((block) => ({
+      text: String((block as { text?: unknown } | null)?.text ?? "").trim(),
+      bounds: (block as { bounds?: InteractionCandidate["bounds"] } | null)?.bounds ?? null,
+      score: Math.round(Number((block as { confidence?: unknown } | null)?.confidence ?? 0) * 10)
+    }))
+    .filter((block) => {
+      const text = String(block.text ?? "").trim();
+      const bounds = block.bounds;
+      return (
+        OUTLOOK_INBOX_RECOVERY_PATTERN.test(text) &&
+        bounds &&
+        Number.isFinite(bounds.centerX) &&
+        Number.isFinite(bounds.centerY) &&
+        Number(bounds.centerX) <= maxSidebarX
+      );
+    })
+    .sort((left, right) => {
+      return Number(right.score ?? 0) - Number(left.score ?? 0)
+        || Number(left.bounds?.centerY ?? Number.POSITIVE_INFINITY) - Number(right.bounds?.centerY ?? Number.POSITIVE_INFINITY);
+    });
+  const screenMatch = rankedScreenTextBlocks[0];
+  if (!screenMatch?.bounds || !Number.isFinite(Number(screenMatch.bounds.centerX)) || !Number.isFinite(Number(screenMatch.bounds.centerY))) {
     return null;
   }
   return {
-    x: Number(match.bounds.centerX),
-    y: Number(match.bounds.centerY)
+    x: Number(screenMatch.bounds.centerX),
+    y: Number(screenMatch.bounds.centerY)
   };
 }
 
