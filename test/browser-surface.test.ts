@@ -77,8 +77,8 @@ test("browser goto reuses the current tab via desktop actions", async () => {
   });
 
   const result = await adapter.act({
-    task: createTask(),
-    workspace: createWorkspace(),
+    task: createTask() as any,
+    workspace: createWorkspace() as any,
     traceId: null,
     step: {
       action: "goto",
@@ -159,8 +159,8 @@ test("browserExtract uses visible browser state with the image model", async () 
   });
 
   const result = await adapter.act({
-    task: createTask(),
-    workspace: createWorkspace(),
+    task: createTask() as any,
+    workspace: createWorkspace() as any,
     traceId: null,
     step: {
       action: "browserExtract",
@@ -454,4 +454,171 @@ test("browserExecute refuses to clear text at an ungrounded point", async () => 
   );
 
   assert.deepEqual(actions, []);
+});
+
+
+test("browser verify can require the target conversation to be visibly open", async () => {
+  const prompts: Array<{ schemaName: string; userPrompt: string }> = [];
+  const adapter = new BrowserSurfaceAdapter({
+    artifactStore: TEST_ARTIFACT_STORE,
+    modelConfig: {
+      provider: "openai_compatible",
+      baseUrl: "",
+      apiKey: "",
+      name: "",
+      timeoutMs: 5000
+    },
+    visualModelClient: {
+      supportsImageJson() {
+        return true;
+      },
+      async analyzeImageJson<TResponse>({ schemaName, userPrompt }) {
+        prompts.push({ schemaName, userPrompt });
+        return {
+          conversationOpen: true,
+          editableVisible: false,
+          rationale: "The thread is visibly open in the main detail pane."
+        } as TResponse;
+      }
+    },
+    desktopSurface: {
+      async observe() {
+        return {
+          version: 1,
+          surface: "desktop",
+          workspaceId: "ws-browser-test",
+          appContext: {
+            appName: "Google Chrome",
+            title: "BOSS直聘",
+            url: "https://www.zhipin.com/web/geek/chat",
+            windows: [
+              {
+                windowName: "BOSS直聘",
+                windowNumber: 1,
+                bounds: { x: 10, y: 20, width: 1200, height: 800 }
+              }
+            ],
+            captureWindowNumber: 1
+          },
+          capture: { path: "/tmp/browser-verify.png" },
+          screenTextBlocks: [],
+          interactionCandidates: [
+            {
+              id: "composer",
+              text: "发送消息",
+              role: "textbox",
+              isInteractive: true,
+              sourceHints: { selector: "textarea" },
+              bounds: { centerX: 600, centerY: 700 }
+            }
+          ],
+          visibleText: "曾渝\n想了解一下贵公司是否还在招高级全栈工程师...\n发送消息",
+          recentActions: [],
+          summary: "BOSS直聘",
+          timestamp: new Date().toISOString()
+        };
+      },
+      async capture() {
+        return { path: "/tmp/browser-verify.png" };
+      },
+      async focus() {
+        return { focused: true };
+      },
+      async act() {
+        return { ok: true };
+      },
+      async shutdown() {}
+    }
+  });
+
+  const verification = await adapter.verify({
+    task: createTask() as any,
+    workspace: createWorkspace() as any,
+    traceId: null,
+    expectation: {
+      activeConversationSummary: "曾渝",
+      activeConversationMessage: "想了解一下贵公司是否还在招高级全栈工程师..."
+    }
+  });
+
+  assert.equal(verification.ok, true);
+  assert.equal(prompts[0]?.schemaName, "agentos_browser_page_expectation_verify");
+  assert.match(prompts[0]?.userPrompt ?? "", /not merely visible in the sidebar list/i);
+});
+
+test("browser verify can require a visible editable target", async () => {
+  const adapter = new BrowserSurfaceAdapter({
+    artifactStore: TEST_ARTIFACT_STORE,
+    modelConfig: {
+      provider: "openai_compatible",
+      baseUrl: "",
+      apiKey: "",
+      name: "",
+      timeoutMs: 5000
+    },
+    visualModelClient: {
+      supportsImageJson() {
+        return true;
+      },
+      async analyzeImageJson<TResponse>() {
+        return {
+          conversationOpen: true,
+          editableVisible: false,
+          rationale: "No visible editable composer is present."
+        } as TResponse;
+      }
+    },
+    desktopSurface: {
+      async observe() {
+        return {
+          version: 1,
+          surface: "desktop",
+          workspaceId: "ws-browser-test",
+          appContext: {
+            appName: "Google Chrome",
+            title: "BOSS直聘",
+            url: "https://www.zhipin.com/web/geek/chat",
+            windows: [
+              {
+                windowName: "BOSS直聘",
+                windowNumber: 1,
+                bounds: { x: 10, y: 20, width: 1200, height: 800 }
+              }
+            ],
+            captureWindowNumber: 1
+          },
+          capture: { path: "/tmp/browser-verify.png" },
+          screenTextBlocks: [],
+          interactionCandidates: [],
+          visibleText: "曾渝\n想了解一下贵公司是否还在招高级全栈工程师...",
+          recentActions: [],
+          summary: "BOSS直聘",
+          timestamp: new Date().toISOString()
+        };
+      },
+      async capture() {
+        return { path: "/tmp/browser-verify.png" };
+      },
+      async focus() {
+        return { focused: true };
+      },
+      async act() {
+        return { ok: true };
+      },
+      async shutdown() {}
+    }
+  });
+
+  const verification = await adapter.verify({
+    task: createTask() as any,
+    workspace: createWorkspace() as any,
+    traceId: null,
+    expectation: {
+      activeConversationSummary: "曾渝",
+      editableTargetVisible: true
+    }
+  });
+
+  assert.equal(verification.ok, false);
+  assert.equal(verification.details?.editableTargetVisible, false);
 });

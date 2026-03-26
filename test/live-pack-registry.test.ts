@@ -204,7 +204,7 @@ test("boss browser detectNewItems uses generic browserExtract conversation detec
   assert.equal(detection?.metadata?.latestInboundMessage, "Curious, are you using AWS or Google Cloud?");
 });
 
-test("boss browser extractContext emits a generic browserExecute task spec", async () => {
+test("boss browser extractContext emits phased generic browserExecute task steps", async () => {
   const registry = new LivePackRegistry();
   const pack = registry.get("boss-browser");
   assert.ok(pack);
@@ -234,13 +234,19 @@ test("boss browser extractContext emits a generic browserExecute task spec", asy
 
   assert.equal(extracted?.taskSpec?.preferredSurface, "browser");
   assert.equal(extracted?.taskSpec?.executionMode, "planned");
+  assert.equal(extracted?.taskSpec?.steps?.length, 3);
   assert.equal(extracted?.taskSpec?.steps?.[0]?.action, "browserExecute");
+  assert.equal(extracted?.taskSpec?.steps?.[1]?.action, "browserExecute");
+  assert.equal(extracted?.taskSpec?.steps?.[2]?.action, "browserExecute");
   assert.equal(extracted?.taskSpec?.steps?.[0]?.params?.allowNewTabs, false);
   assert.equal(extracted?.taskSpec?.steps?.[0]?.params?.allowCrossOriginNavigation, false);
-  assert.equal(extracted?.taskSpec?.steps?.[0]?.expect?.textVisible, "{{typeTextSuffixPreview}}");
-  assert.match(String(extracted?.taskSpec?.inputs?.browserInstruction ?? ""), /Do not open a new tab, popup, or window/i);
-  assert.match(String(extracted?.taskSpec?.inputs?.browserInstruction ?? ""), /\{\{typeText\}\}/);
-  assert.match(String(extracted?.taskSpec?.inputs?.browserInstruction ?? ""), /Lazaro Waters/);
+  assert.equal(extracted?.taskSpec?.steps?.[0]?.expect?.activeConversationSummary, "{{activeConversationSummary}}");
+  assert.equal(extracted?.taskSpec?.steps?.[1]?.expect?.editableTargetVisible, true);
+  assert.equal(extracted?.taskSpec?.steps?.[2]?.expect?.textVisible, "{{typeTextSuffixPreview}}");
+  assert.match(String(extracted?.taskSpec?.inputs?.browserOpenInstruction ?? ""), /Do not type, paste, clear, or send anything during this step/i);
+  assert.match(String(extracted?.taskSpec?.inputs?.browserComposerInstruction ?? ""), /visible editable composer or input/i);
+  assert.match(String(extracted?.taskSpec?.inputs?.browserPrefillInstruction ?? ""), /\{\{typeText\}\}/);
+  assert.match(String(extracted?.taskSpec?.inputs?.browserPrefillInstruction ?? ""), /Lazaro Waters/);
 });
 
 test("boss browser activate focuses the existing browser session without navigating", async () => {

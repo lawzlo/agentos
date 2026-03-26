@@ -13,7 +13,9 @@ import {
 } from "./browser-pack-utils.js";
 import {
   BROWSER_CONVERSATION_DETECTION_SCHEMA,
+  buildComposerFocusInstruction,
   buildConversationDetectionInstruction,
+  buildConversationOpenInstruction,
   buildConversationPrefillInstruction
 } from "./browser-runtime-prompts.js";
 import {
@@ -7230,11 +7232,27 @@ function createBossPack(): LivePack {
       const summary = String(args.detection.summary ?? "").trim();
       const context = Array.isArray(args.detection.context) ? args.detection.context : [];
       const openTarget = String(args.detection.inputs?.openTarget ?? summary).trim() || summary;
-      const browserInstruction = buildConversationPrefillInstruction({
+      const senderName = String(args.detection.metadata?.sender ?? "").trim() || null;
+      const latestInboundMessage = String(args.detection.metadata?.latestInboundMessage ?? "").trim() || null;
+      const browserOpenInstruction = buildConversationOpenInstruction({
         goal: args.rule.goal,
         summary,
-        senderName: String(args.detection.metadata?.sender ?? "").trim() || null,
-        latestInboundMessage: String(args.detection.metadata?.latestInboundMessage ?? "").trim() || null,
+        senderName,
+        latestInboundMessage,
+        context
+      });
+      const browserComposerInstruction = buildComposerFocusInstruction({
+        goal: args.rule.goal,
+        summary,
+        senderName,
+        latestInboundMessage,
+        context
+      });
+      const browserPrefillInstruction = buildConversationPrefillInstruction({
+        goal: args.rule.goal,
+        summary,
+        senderName,
+        latestInboundMessage,
         context
       });
 
@@ -7267,22 +7285,60 @@ function createBossPack(): LivePack {
           preferredSurface: "browser",
           executionMode: "planned",
           inputs: {
-            browserInstruction
+            browserOpenInstruction,
+            browserComposerInstruction,
+            browserPrefillInstruction,
+            activeConversationSummary: summary,
+            activeConversationMessage: latestInboundMessage ?? ""
           },
           steps: [
             {
-              label: "Open conversation and prefill reply",
+              label: "Open BOSS target conversation",
               surface: "browser",
               action: "browserExecute",
               params: {
-                instruction: "{{browserInstruction}}",
+                instruction: "{{browserOpenInstruction}}",
                 startUrl: "{{startUrl}}",
-                maxSteps: 6,
+                maxSteps: 4,
                 allowSameTabNavigation: true,
                 allowNewTabs: false,
                 allowCrossOriginNavigation: false
               },
               expect: {
+                activeConversationSummary: "{{activeConversationSummary}}",
+                activeConversationMessage: "{{activeConversationMessage}}"
+              }
+            },
+            {
+              label: "Ground BOSS reply composer",
+              surface: "browser",
+              action: "browserExecute",
+              params: {
+                instruction: "{{browserComposerInstruction}}",
+                maxSteps: 4,
+                allowSameTabNavigation: true,
+                allowNewTabs: false,
+                allowCrossOriginNavigation: false
+              },
+              expect: {
+                activeConversationSummary: "{{activeConversationSummary}}",
+                editableTargetVisible: true
+              }
+            },
+            {
+              label: "Prefill BOSS reply",
+              surface: "browser",
+              action: "browserExecute",
+              params: {
+                instruction: "{{browserPrefillInstruction}}",
+                maxSteps: 4,
+                allowSameTabNavigation: true,
+                allowNewTabs: false,
+                allowCrossOriginNavigation: false
+              },
+              expect: {
+                activeConversationSummary: "{{activeConversationSummary}}",
+                editableTargetVisible: true,
                 textVisible: "{{typeTextSuffixPreview}}"
               }
             }

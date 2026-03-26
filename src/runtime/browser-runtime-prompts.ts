@@ -78,3 +78,60 @@ export function buildConversationPrefillInstruction({
     .filter(Boolean)
     .join("\n\n");
 }
+
+export function buildConversationOpenInstruction({
+  goal,
+  summary,
+  senderName,
+  latestInboundMessage,
+  context
+}: {
+  goal: string;
+  summary: string;
+  senderName?: string | null;
+  latestInboundMessage?: string | null;
+  context?: string[];
+}): string {
+  return [
+    "Use the current page in the existing browser tab. Do not open a new tab, popup, or window.",
+    "Open the target conversation in the same tab if it is not already open.",
+    "Do not type, paste, clear, or send anything during this step.",
+    "Stop only when the target conversation is visibly open in the main conversation area, not merely highlighted in the sidebar.",
+    cleanLine(goal) ? `User goal:\n${cleanLine(goal)}` : null,
+    cleanLine(summary) ? `Target conversation summary: ${cleanLine(summary)}` : null,
+    cleanLine(senderName) ? `Expected sender or participant: ${cleanLine(senderName)}` : null,
+    cleanLine(latestInboundMessage) ? `Latest inbound message:\n${cleanLine(latestInboundMessage)}` : null,
+    context?.length ? `Additional visible context:\n${bulletList(context)}` : null
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+export function buildComposerFocusInstruction({
+  goal,
+  summary,
+  senderName,
+  latestInboundMessage,
+  context
+}: {
+  goal: string;
+  summary: string;
+  senderName?: string | null;
+  latestInboundMessage?: string | null;
+  context?: string[];
+}): string {
+  return [
+    "Use the current page in the existing browser tab. Do not open a new tab, popup, or window.",
+    "Assume the target conversation should already be open in the current tab.",
+    "Focus the main visible reply or message composer for that open conversation.",
+    "Do not type, paste, clear, or send anything during this step.",
+    "Stop only when a visible editable composer or input for the open conversation is clearly grounded.",
+    cleanLine(goal) ? `User goal:\n${cleanLine(goal)}` : null,
+    cleanLine(summary) ? `Target conversation summary: ${cleanLine(summary)}` : null,
+    cleanLine(senderName) ? `Expected sender or participant: ${cleanLine(senderName)}` : null,
+    cleanLine(latestInboundMessage) ? `Latest inbound message:\n${cleanLine(latestInboundMessage)}` : null,
+    context?.length ? `Additional visible context:\n${bulletList(context)}` : null
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}

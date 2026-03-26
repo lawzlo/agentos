@@ -150,6 +150,17 @@ const BROWSER_TEXT_VISIBILITY_SCHEMA = {
   required: ["visible"]
 } as const;
 
+const BROWSER_PAGE_EXPECTATION_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    conversationOpen: { type: ["boolean", "null"] },
+    editableVisible: { type: ["boolean", "null"] },
+    rationale: { type: ["string", "null"] }
+  },
+  required: ["conversationOpen", "editableVisible"]
+} as const;
+
 function cleanText(value: unknown): string {
   return String(value ?? "").replace(/\s+/gu, " ").trim();
 }
@@ -497,6 +508,36 @@ function visibilityPrompt({
       60
     )}`
   ].join("\n\n");
+}
+
+function pageExpectationPrompt({
+  activeConversationSummary,
+  activeConversationMessage,
+  expectEditable,
+  state
+}: {
+  activeConversationSummary?: string | null;
+  activeConversationMessage?: string | null;
+  expectEditable: boolean;
+  state: WorldState;
+}): string {
+  return [
+    "Inspect the current browser screenshot and determine whether the target conversation is actually open in the main detail pane, not merely visible in the sidebar list.",
+    expectEditable
+      ? "Also determine whether a visible editable reply/message composer or input is present for that open conversation."
+      : "You may ignore composer visibility unless it helps explain the state.",
+    cleanText(activeConversationSummary)
+      ? `Target conversation summary: ${cleanText(activeConversationSummary)}`
+      : null,
+    cleanText(activeConversationMessage)
+      ? `Expected visible inbound message or context from the open conversation:\n${cleanText(activeConversationMessage)}`
+      : null,
+    `Visible accessibility text preview:\n${browserVisibleTextPreview(state)}`,
+    `Editable candidates for typing:\n${renderEditableCandidateInventory(browserInteractionCandidates(state))}`,
+    `Accessibility candidates:\n${renderCandidateInventory(browserInteractionCandidates(state), 60)}`
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 function asBrowserBlocker(kind: BrowserBlocker["kind"], detail: string): BrowserExecutionResult {
@@ -1335,6 +1376,49 @@ export class BrowserSurfaceAdapter extends SurfaceAdapter {
       const lastKnownUrl = this.#lastKnownUrl(workspace) ?? "";
       details.url = lastKnownUrl;
       if (!lastKnownUrl.includes(cleanText(expectation.urlIncludes))) {
+        return { ok: false, details };
+      }
+    }
+
+    const activeConversationSummary = cleanText(expectation.activeConversationSummary);
+    const activeConversationMessage = cleanText(expectation.activeConversationMessage);
+    const expectEditable = expectation.editableTargetVisible === true;
+    if (activeConversationSummary || activeConversationMessage || expectEditable) {
+      const directEditableVisible = browserInteractionCandidates(state).some((candidate) => isEditableBrowserCandidate(candidate));
+      details.editableTargetVisible = directEditableVisible;
+      try {
+        const pageExpectation = await this.#analyzeBrowserImage<{
+          conversationOpen: boolean | null;
+          editableVisible: boolean | null;
+          rationale?: string | null;
+        }>({
+          task,
+          workspace,
+          traceId,
+          label: "browser-verify-page-state",
+          schemaName: "agentos_browser_page_expectation_verify",
+          schema: BROWSER_PAGE_EXPECTATION_SCHEMA as unknown as Record<string, unknown>,
+          systemPrompt:
+            "You are a strict browser UI verifier for AgentOS. Inspect the screenshot and return JSON only.",
+          userPrompt: pageExpectationPrompt({
+            activeConversationSummary,
+            activeConversationMessage,
+            expectEditable,
+            state
+          }),
+          state
+        });
+        details.activeConversationOpen = pageExpectation.conversationOpen;
+        details.pageExpectationRationale = pageExpectation.rationale ?? null;
+        if ((activeConversationSummary || activeConversationMessage) && pageExpectation.conversationOpen !== true) {
+          return { ok: false, details };
+        }
+        details.editableTargetVisible = pageExpectation.editableVisible === true || directEditableVisible;
+        if (expectEditable && details.editableTargetVisible !== true) {
+          return { ok: false, details };
+        }
+      } catch (error) {
+        details.pageExpectationError = error instanceof Error ? error.message : String(error);
         return { ok: false, details };
       }
     }
