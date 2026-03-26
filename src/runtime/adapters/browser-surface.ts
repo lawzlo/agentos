@@ -233,6 +233,10 @@ function browserWindowBounds(appContext: Record<string, unknown> | null | undefi
   return firstBounds?.bounds ? (firstBounds.bounds as Record<string, unknown>) : null;
 }
 
+function browserObservedUrl(appContext: Record<string, unknown> | null | undefined): string | null {
+  return cleanText(appContext?.url) || null;
+}
+
 function detectBrowserBlockers({
   visibleText,
   title,
@@ -618,10 +622,14 @@ export class BrowserSurfaceAdapter extends SurfaceAdapter {
     });
     const appContext = ((desktopState.appContext ?? null) as Record<string, unknown> | null) ?? {};
     const title = browserWindowTitle(appContext);
+    const observedUrl = browserObservedUrl(appContext) ?? this.#lastKnownUrl(workspace);
+    if (observedUrl) {
+      this.#setLastKnownUrl(workspace, observedUrl);
+    }
     const blockers = detectBrowserBlockers({
       visibleText: cleanText(desktopState.visibleText),
       title,
-      lastKnownUrl: this.#lastKnownUrl(workspace),
+      lastKnownUrl: observedUrl,
       candidateCount: Array.isArray(desktopState.interactionCandidates) ? desktopState.interactionCandidates.length : 0
     });
 
@@ -631,7 +639,7 @@ export class BrowserSurfaceAdapter extends SurfaceAdapter {
       appContext: {
         ...appContext,
         title: title || null,
-        url: this.#lastKnownUrl(workspace),
+        url: observedUrl,
         blockers,
         runtime: "desktop_browser",
         browserAppName: this.browserAppCandidates[0]
@@ -641,7 +649,7 @@ export class BrowserSurfaceAdapter extends SurfaceAdapter {
       screenTextBlocks: Array.isArray(desktopState.screenTextBlocks) ? desktopState.screenTextBlocks : [],
       visibleText: cleanText(desktopState.visibleText).slice(0, 4000),
       recentActions: summarizeRecentActions(recentActions as Array<Record<string, unknown>>),
-      summary: `${title || this.browserAppCandidates[0]} @ ${this.#lastKnownUrl(workspace) || "current tab"}`
+      summary: `${title || this.browserAppCandidates[0]} @ ${observedUrl || "current tab"}`
     }) as WorldState;
   }
 
@@ -949,10 +957,6 @@ export class BrowserSurfaceAdapter extends SurfaceAdapter {
     params: Record<string, unknown>
   ): Promise<BrowserExecutionResult> {
     const input = normalizeBrowserExecutionInput(params, this.modelConfig.timeoutMs);
-    if (input.startUrl && input.navigationPolicy?.allowSameTabNavigation !== false) {
-      await this.#navigateCurrentTab({ task, workspace, traceId, url: input.startUrl });
-    }
-
     const instructions = input.actions?.length ? input.actions : [input.instruction];
     const recentActions: string[] = [];
     let extractedResult: unknown = null;

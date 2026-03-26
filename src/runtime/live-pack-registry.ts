@@ -4425,25 +4425,6 @@ function createDocumentPack({
 
       const watchTask = createWatchTask(rule);
       const watchWorkspace = profileAsWorkspace(rule, workspace);
-      const startUrl = String(
-        rule.taskInputs?.startUrl ?? rule.taskInputs?.url ?? rule.appTarget ?? defaultBrowserStartUrlForPack(name) ?? ""
-      ).trim();
-      if (/^https?:\/\//u.test(startUrl)) {
-        await adapter.act({
-          task: watchTask,
-          step: {
-            id: `watch-goto-${rule.id}`,
-            action: "goto",
-            surface: "browser",
-            params: { url: startUrl, waitUntil: "domcontentloaded", timeoutMs: 15000 }
-          },
-          workspace: watchWorkspace,
-          traceId: null,
-          outputs: {}
-        });
-        return;
-      }
-
       await adapter
         .focus({
           task: watchTask,
@@ -4769,29 +4750,11 @@ function createSlackPack({
         return;
       }
 
-      const startUrl = String(
-        rule.taskInputs?.startUrl ?? rule.taskInputs?.url ?? rule.appTarget ?? defaultBrowserStartUrlForPack(name) ?? ""
-      ).trim();
-      if (/^https?:\/\//u.test(startUrl)) {
-        await adapter.act({
-          task: watchTask,
-          step: {
-            id: `watch-goto-${rule.id}`,
-            action: "goto",
-            surface,
-            params: { url: startUrl, waitUntil: "domcontentloaded", timeoutMs: 15000 }
-          },
-          workspace: watchWorkspace,
-          traceId: null,
-          outputs: {}
-        });
-      } else {
-        await adapter.focus({
-          task: watchTask,
-          workspace: watchWorkspace,
-          traceId: null
-        }).catch(() => null);
-      }
+      await adapter.focus({
+        task: watchTask,
+        workspace: watchWorkspace,
+        traceId: null
+      }).catch(() => null);
     },
     async observeInbox(args) {
       return observeWatchSurface({
@@ -6318,29 +6281,11 @@ function createMailPack({
         return;
       }
 
-      const startUrl = String(
-        rule.taskInputs?.startUrl ?? rule.taskInputs?.url ?? rule.appTarget ?? defaultBrowserStartUrlForPack(name) ?? ""
-      ).trim();
-      if (/^https?:\/\//u.test(startUrl)) {
-        await adapter.act({
-          task: watchTask,
-          step: {
-            id: `watch-goto-${rule.id}`,
-            action: "goto",
-            surface,
-            params: { url: startUrl, waitUntil: "domcontentloaded", timeoutMs: 15000 }
-          },
-          workspace: watchWorkspace,
-          traceId: null,
-          outputs: {}
-        });
-      } else {
-        await adapter.focus({
-          task: watchTask,
-          workspace: watchWorkspace,
-          traceId: null
-        }).catch(() => null);
-      }
+      await adapter.focus({
+        task: watchTask,
+        workspace: watchWorkspace,
+        traceId: null
+      }).catch(() => null);
     },
     async observeInbox(args) {
       return observeWatchSurface({
@@ -7199,25 +7144,6 @@ function createBossPack(): LivePack {
     async activate({ rule, workspace, surfaceRegistry }) {
       const adapter = surfaceRegistry.get("browser");
       if (!adapter) {
-        return;
-      }
-
-      const startUrl = String(
-        rule.taskInputs?.startUrl ?? rule.taskInputs?.url ?? rule.appTarget ?? defaultBrowserStartUrlForPack("boss-browser") ?? ""
-      ).trim();
-      if (/^https?:\/\//u.test(startUrl)) {
-        await adapter.act({
-          task: createWatchTask(rule),
-          step: {
-            id: `watch-goto-${rule.id}`,
-            action: "goto",
-            surface: "browser",
-            params: { url: startUrl, waitUntil: "domcontentloaded", timeoutMs: 15000 }
-          },
-          workspace: profileAsWorkspace(rule, workspace),
-          traceId: null,
-          outputs: {}
-        });
         return;
       }
 

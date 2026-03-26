@@ -562,22 +562,6 @@ async function collectBrowserState(
   const effectiveUrl = request.url ?? defaultBrowserStartUrlForPack(request.packName);
 
   try {
-    if (effectiveUrl) {
-      await adapter.act({
-        task,
-        workspace,
-        traceId: null,
-        step: {
-          action: "openUrl",
-          params: {
-            url: effectiveUrl,
-            waitUntil: "domcontentloaded",
-            timeoutMs: request.timeoutMs
-          }
-        }
-      });
-    }
-
     const worldState = await adapter.observe({
       task,
       workspace,

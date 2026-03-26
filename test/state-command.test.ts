@@ -139,7 +139,7 @@ test("collectSurfaceState maps browser sign-in pages into explicit blockers", as
   assert.equal(report.manualIntervention?.kind, "login");
 });
 
-test("collectSurfaceState uses pack defaults to open browser workspaces and classify URL-only sign-in pages", async () => {
+test("collectSurfaceState classifies URL-only sign-in pages without navigating the current browser tab", async () => {
   const request: SurfaceStateRequest = {
     surface: "browser",
     appName: null,
@@ -153,11 +153,11 @@ test("collectSurfaceState uses pack defaults to open browser workspaces and clas
     browserProfilePath: null
   };
 
-  let openedUrl: string | null = null;
+  let actCalls = 0;
   const report = await collectSurfaceState(request, {
     browserAdapter: {
-      async act({ step }) {
-        openedUrl = String(step.params?.url ?? "");
+      async act() {
+        actCalls += 1;
         return { ok: true };
       },
       async observe() {
@@ -182,13 +182,13 @@ test("collectSurfaceState uses pack defaults to open browser workspaces and clas
     }
   });
 
-  assert.equal(openedUrl, "https://app.slack.com/client");
+  assert.equal(actCalls, 0);
   assert.equal(report.readinessState, "blocked_signin");
   assert.equal(report.scene, "signin");
   assert.equal(report.manualIntervention?.kind, "login");
 });
 
-test("collectSurfaceState opens boss chat by default and treats expired sessions as blocked sign-in", async () => {
+test("collectSurfaceState treats expired Boss sessions as blocked sign-in without navigating the current browser tab", async () => {
   const request: SurfaceStateRequest = {
     surface: "browser",
     appName: null,
@@ -202,11 +202,11 @@ test("collectSurfaceState opens boss chat by default and treats expired sessions
     browserProfilePath: null
   };
 
-  let openedUrl: string | null = null;
+  let actCalls = 0;
   const report = await collectSurfaceState(request, {
     browserAdapter: {
-      async act({ step }) {
-        openedUrl = String(step.params?.url ?? "");
+      async act() {
+        actCalls += 1;
         return { ok: true };
       },
       async observe() {
@@ -231,7 +231,7 @@ test("collectSurfaceState opens boss chat by default and treats expired sessions
     }
   });
 
-  assert.equal(openedUrl, "https://www.zhipin.com/web/geek/chat");
+  assert.equal(actCalls, 0);
   assert.equal(report.readinessState, "blocked_signin");
   assert.equal(report.scene, "signin");
   assert.equal(report.manualIntervention?.kind, "session_expired");
@@ -256,10 +256,10 @@ test("collectSurfaceState returns browser_unavailable when no supported browser 
   const report = await collectSurfaceState(request, {
     browserAdapter: {
       async act() {
-        throw new Error("Browser app unavailable: could not focus Google Chrome, Chromium, Microsoft Edge.");
+        throw new Error("state should not navigate or mutate the browser session");
       },
       async observe() {
-        throw new Error("observe should not be reached when browser app focus is missing");
+        throw new Error("Browser app unavailable: could not focus Google Chrome, Chromium, Microsoft Edge.");
       },
       async shutdown() {}
     }

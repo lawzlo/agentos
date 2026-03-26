@@ -242,3 +242,63 @@ test("boss browser extractContext emits a generic browserExecute task spec", asy
   assert.match(String(extracted?.taskSpec?.inputs?.browserInstruction ?? ""), /\{\{typeText\}\}/);
   assert.match(String(extracted?.taskSpec?.inputs?.browserInstruction ?? ""), /Lazaro Waters/);
 });
+
+test("boss browser activate focuses the existing browser session without navigating", async () => {
+  const registry = new LivePackRegistry();
+  const pack = registry.get("boss-browser");
+  assert.ok(pack);
+
+  let focusCalls = 0;
+  const surfaceRegistry = new SurfaceRegistry({
+    browser: {
+      name: "browser",
+      async focus() {
+        focusCalls += 1;
+        return { focused: true };
+      },
+      async act() {
+        throw new Error("boss browser activate should not navigate the current browser tab");
+      },
+      async shutdown() {}
+    } as never
+  });
+
+  await pack.activate({
+    rule: makeBossRule(),
+    workspace: makeWorkspace(),
+    surfaceRegistry,
+    controlPlane: {} as never
+  });
+
+  assert.equal(focusCalls, 1);
+});
+
+test("slack browser activate focuses the existing browser session without navigating", async () => {
+  const registry = new LivePackRegistry();
+  const pack = registry.get("slack-browser");
+  assert.ok(pack);
+
+  let focusCalls = 0;
+  const surfaceRegistry = new SurfaceRegistry({
+    browser: {
+      name: "browser",
+      async focus() {
+        focusCalls += 1;
+        return { focused: true };
+      },
+      async act() {
+        throw new Error("slack browser activate should not navigate the current browser tab");
+      },
+      async shutdown() {}
+    } as never
+  });
+
+  await pack.activate({
+    rule: makeRule("https://app.slack.com/client"),
+    workspace: makeWorkspace(),
+    surfaceRegistry,
+    controlPlane: {} as never
+  });
+
+  assert.equal(focusCalls, 1);
+});

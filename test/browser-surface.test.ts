@@ -182,3 +182,90 @@ test("browserExtract uses visible browser state with the image model", async () 
   assert.equal(prompts[0]?.imagePath, "/tmp/browser-extract.png");
   assert.match(prompts[0]?.userPrompt ?? "", /latest inbound message/i);
 });
+
+test("browserExecute does not auto-navigate the current tab from startUrl hints", async () => {
+  const actions: Array<{ action: string; params?: Record<string, unknown> }> = [];
+  const adapter = new BrowserSurfaceAdapter({
+    artifactStore: TEST_ARTIFACT_STORE,
+    modelConfig: {
+      provider: "openai_compatible",
+      baseUrl: "",
+      apiKey: "",
+      name: "",
+      timeoutMs: 5000
+    },
+    visualModelClient: {
+      supportsImageJson() {
+        return true;
+      },
+      async analyzeImageJson<TResponse>() {
+        return {
+          status: "completed",
+          rationale: "The current visible tab is already ready for takeover."
+        } as TResponse;
+      }
+    },
+    desktopSurface: {
+      async observe() {
+        return {
+          version: 1,
+          surface: "desktop",
+          workspaceId: "ws-browser-test",
+          appContext: {
+            appName: "Google Chrome",
+            title: "BOSS直聘",
+            url: "https://www.zhipin.com/web/geek/chat",
+            windows: [
+              {
+                windowName: "BOSS直聘",
+                windowNumber: 1,
+                bounds: { x: 10, y: 20, width: 1200, height: 800 }
+              }
+            ],
+            captureWindowNumber: 1
+          },
+          capture: { path: "/tmp/browser-execute.png" },
+          screenTextBlocks: [],
+          interactionCandidates: [],
+          visibleText: "全部\n未读\n当前暂无消息",
+          recentActions: [],
+          summary: "BOSS直聘",
+          timestamp: new Date().toISOString()
+        };
+      },
+      async capture() {
+        return { path: "/tmp/browser-execute.png" };
+      },
+      async focus() {
+        return { focused: true };
+      },
+      async act({ step }) {
+        actions.push({ action: step.action, params: step.params });
+        return { ok: true };
+      },
+      async shutdown() {}
+    }
+  });
+
+  const result = await adapter.act({
+    task: createTask(),
+    workspace: createWorkspace(),
+    traceId: null,
+    step: {
+      action: "browserExecute",
+      params: {
+        instruction: "Take over the current Boss直聘 tab without changing pages.",
+        startUrl: "https://www.zhipin.com/web/geek/chat",
+        maxSteps: 1
+      }
+    }
+  });
+
+  assert.deepEqual(actions, []);
+  assert.deepEqual(result, {
+    status: "completed",
+    finalUrl: "https://www.zhipin.com/web/geek/chat",
+    blockers: [],
+    verification: null
+  });
+});
