@@ -269,3 +269,189 @@ test("browserExecute does not auto-navigate the current tab from startUrl hints"
     verification: null
   });
 });
+
+test("browserExecute refuses to type into non-editable candidates", async () => {
+  const actions: Array<{ action: string; params?: Record<string, unknown> }> = [];
+  const adapter = new BrowserSurfaceAdapter({
+    artifactStore: TEST_ARTIFACT_STORE,
+    modelConfig: {
+      provider: "openai_compatible",
+      baseUrl: "",
+      apiKey: "",
+      name: "",
+      timeoutMs: 5000
+    },
+    visualModelClient: {
+      supportsImageJson() {
+        return true;
+      },
+      async analyzeImageJson<TResponse>() {
+        return {
+          status: "continue",
+          rationale: "The unread thread row looks like the text input.",
+          action: {
+            type: "type_into_target",
+            targetId: "thread-row",
+            text: "你好",
+            clear: true
+          }
+        } as TResponse;
+      }
+    },
+    desktopSurface: {
+      async observe() {
+        return {
+          version: 1,
+          surface: "desktop",
+          workspaceId: "ws-browser-test",
+          appContext: {
+            appName: "Google Chrome",
+            title: "BOSS直聘",
+            url: "https://www.zhipin.com/web/geek/chat",
+            windows: [
+              {
+                windowName: "BOSS直聘",
+                windowNumber: 1,
+                bounds: { x: 10, y: 20, width: 1200, height: 800 }
+              }
+            ],
+            captureWindowNumber: 1
+          },
+          capture: { path: "/tmp/browser-execute.png" },
+          screenTextBlocks: [],
+          interactionCandidates: [
+            {
+              id: "thread-row",
+              text: "曾渝 高级全栈工程师",
+              role: "button",
+              isInteractive: true,
+              bounds: { centerX: 220, centerY: 260 }
+            }
+          ],
+          visibleText: "曾渝\n想了解一下贵公司是否还在招高级全栈工程师...",
+          recentActions: [],
+          summary: "BOSS直聘",
+          timestamp: new Date().toISOString()
+        };
+      },
+      async capture() {
+        return { path: "/tmp/browser-execute.png" };
+      },
+      async focus() {
+        return { focused: true };
+      },
+      async act({ step }) {
+        actions.push({ action: step.action, params: step.params });
+        return { ok: true };
+      },
+      async shutdown() {}
+    }
+  });
+
+  await assert.rejects(
+    adapter.act({
+      task: createTask(),
+      workspace: createWorkspace(),
+      traceId: null,
+      step: {
+        action: "browserExecute",
+        params: {
+          instruction: "Open the current conversation and prefill a reply without sending.",
+          maxSteps: 1
+        }
+      }
+    }),
+    /non-editable candidate/
+  );
+
+  assert.deepEqual(actions, []);
+});
+
+test("browserExecute refuses to clear text at an ungrounded point", async () => {
+  const actions: Array<{ action: string; params?: Record<string, unknown> }> = [];
+  const adapter = new BrowserSurfaceAdapter({
+    artifactStore: TEST_ARTIFACT_STORE,
+    modelConfig: {
+      provider: "openai_compatible",
+      baseUrl: "",
+      apiKey: "",
+      name: "",
+      timeoutMs: 5000
+    },
+    visualModelClient: {
+      supportsImageJson() {
+        return true;
+      },
+      async analyzeImageJson<TResponse>() {
+        return {
+          status: "continue",
+          rationale: "The reply box is probably near the lower center of the page.",
+          action: {
+            type: "type_into_point",
+            point: { x: 0.5, y: 0.75 },
+            text: "你好",
+            clear: true
+          }
+        } as TResponse;
+      }
+    },
+    desktopSurface: {
+      async observe() {
+        return {
+          version: 1,
+          surface: "desktop",
+          workspaceId: "ws-browser-test",
+          appContext: {
+            appName: "Google Chrome",
+            title: "BOSS直聘",
+            url: "https://www.zhipin.com/web/geek/chat",
+            windows: [
+              {
+                windowName: "BOSS直聘",
+                windowNumber: 1,
+                bounds: { x: 10, y: 20, width: 1200, height: 800 }
+              }
+            ],
+            captureWindowNumber: 1
+          },
+          capture: { path: "/tmp/browser-execute.png" },
+          screenTextBlocks: [],
+          interactionCandidates: [],
+          visibleText: "曾渝\n想了解一下贵公司是否还在招高级全栈工程师...",
+          recentActions: [],
+          summary: "BOSS直聘",
+          timestamp: new Date().toISOString()
+        };
+      },
+      async capture() {
+        return { path: "/tmp/browser-execute.png" };
+      },
+      async focus() {
+        return { focused: true };
+      },
+      async act({ step }) {
+        actions.push({ action: step.action, params: step.params });
+        return { ok: true };
+      },
+      async shutdown() {}
+    }
+  });
+
+  await assert.rejects(
+    adapter.act({
+      task: createTask(),
+      workspace: createWorkspace(),
+      traceId: null,
+      step: {
+        action: "browserExecute",
+        params: {
+          instruction: "Prefill a reply in the visible composer without sending.",
+          maxSteps: 1
+        }
+      }
+    }),
+    /ungrounded point/
+  );
+
+  assert.deepEqual(actions, []);
+});

@@ -63,8 +63,10 @@ export function buildConversationPrefillInstruction({
   return [
     "Use the current page in the existing browser tab. Do not open a new tab, popup, or window.",
     "If the target conversation is not already open, open it in the same tab.",
+    "Do not type anything until that target conversation is visibly open.",
     "Focus the main visible reply or message composer for that conversation.",
-    "Clear any existing drafted reply text in that visible composer.",
+    "Only clear text after a visible editable composer or input is grounded.",
+    "Never clear or select all on the full page, chat transcript, or any non-editable region.",
     `Prefill this exact reply text without sending it:\n${replyPlaceholder}`,
     "Do not click any send, submit, or confirm action.",
     cleanLine(goal) ? `User goal:\n${cleanLine(goal)}` : null,

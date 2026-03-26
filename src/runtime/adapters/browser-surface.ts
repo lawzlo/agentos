@@ -305,6 +305,63 @@ function summarizeCandidate(candidate: Record<string, unknown>): string {
   ].join(" ");
 }
 
+function candidateSourceHints(candidate: Record<string, unknown>): Record<string, unknown> {
+  const sourceHints = candidate.sourceHints;
+  return sourceHints && typeof sourceHints === "object" ? (sourceHints as Record<string, unknown>) : {};
+}
+
+function editableRoleHint(value: unknown): boolean {
+  const role = cleanText(value).toLowerCase();
+  if (!role) {
+    return false;
+  }
+  return /(textbox|textarea|searchbox|combobox|input|editor|editable|text field|edit text|entry)/iu.test(role);
+}
+
+function editableSelectorHint(value: unknown): boolean {
+  const selector = cleanText(value).toLowerCase();
+  if (!selector) {
+    return false;
+  }
+  return /(input|textarea|contenteditable|editor|textbox)/iu.test(selector);
+}
+
+function isEditableBrowserCandidate(candidate: Record<string, unknown> | null | undefined): boolean {
+  if (!candidate || candidate.isInteractive === false) {
+    return false;
+  }
+
+  const sourceHints = candidateSourceHints(candidate);
+  const sourceValues = [
+    candidate.role,
+    sourceHints.role,
+    sourceHints.axRole,
+    sourceHints.subrole,
+    sourceHints.tagName,
+    sourceHints.controlType
+  ];
+  if (sourceValues.some((value) => editableRoleHint(value))) {
+    return true;
+  }
+
+  const selectorValues = [
+    sourceHints.selector,
+    sourceHints.cssSelector,
+    sourceHints.xpath
+  ];
+  if (selectorValues.some((value) => editableSelectorHint(value))) {
+    return true;
+  }
+
+  const attributeValues = [
+    sourceHints.placeholder,
+    sourceHints.ariaLabel,
+    sourceHints.name,
+    sourceHints.label
+  ];
+  return attributeValues.some((value) => editableRoleHint(value) || editableSelectorHint(value));
+}
+
 function browserInteractionCandidates(worldState: Pick<WorldState, "interactionCandidates">): Array<Record<string, unknown>> {
   return Array.isArray(worldState.interactionCandidates)
     ? (worldState.interactionCandidates as unknown as Array<Record<string, unknown>>)
@@ -317,6 +374,11 @@ function renderCandidateInventory(candidates: Array<Record<string, unknown>>, li
     .map((candidate) => `- ${summarizeCandidate(candidate)}`)
     .join("\n");
   return inventory || "- none";
+}
+
+function renderEditableCandidateInventory(candidates: Array<Record<string, unknown>>, limit = 24): string {
+  const editable = candidates.filter((candidate) => isEditableBrowserCandidate(candidate));
+  return renderCandidateInventory(editable, limit);
 }
 
 function browserVisibleTextPreview(worldState: WorldState): string {
@@ -379,7 +441,9 @@ function decisionPrompt({
     "Do not open a new window, popup, or browser profile.",
     "Stay in the current visible tab unless the instruction explicitly requires same-tab navigation.",
     "Do not click any send, submit, or confirm action unless the instruction explicitly says to do so.",
-    "Prefer candidate ids when possible. If the visible target is not present in the candidate list, use a normalized screenshot point via click_point or type_into_point.",
+    "Prefer candidate ids when possible. Use typing actions only on clearly editable candidates such as textbox, textarea, input, or editor elements.",
+    "Never use type_into_point with clear=true. If no editable candidate is available yet, click or wait until the visible composer is clearly grounded first.",
+    "If the visible target is not present in the candidate list, use a normalized screenshot point via click_point. Use type_into_point only for direct typing without clearing existing text.",
     `Instruction:\n${instruction}`,
     successCriteria ? `Success criteria:\n${successCriteria}` : null,
     `Step ${stepNumber} of at most ${maxSteps}.`,
@@ -387,6 +451,7 @@ function decisionPrompt({
     lastKnownUrl ? `Last known URL hint: ${lastKnownUrl}` : null,
     recentActions.length ? `Recent actions:\n${recentActions.map((entry) => `- ${entry}`).join("\n")}` : "Recent actions:\n- none",
     `Visible accessibility text preview:\n${browserVisibleTextPreview(state)}`,
+    `Editable candidates for typing:\n${renderEditableCandidateInventory(candidates)}`,
     `Accessibility candidates:\n${renderCandidateInventory(candidates)}`
   ]
     .filter(Boolean)
@@ -833,6 +898,11 @@ export class BrowserSurfaceAdapter extends SurfaceAdapter {
         if (!candidate) {
           throw new Error(`Browser action could not resolve target ${cleanText(action.targetId) || "unknown"} for typing.`);
         }
+        if (!isEditableBrowserCandidate(candidate)) {
+          throw new Error(
+            `Browser refused to type into non-editable candidate ${cleanText(action.targetId) || "unknown"}. Ground a visible composer or input first.`
+          );
+        }
         await this.desktopSurface.act({
           task,
           workspace,
@@ -854,6 +924,9 @@ export class BrowserSurfaceAdapter extends SurfaceAdapter {
         if (!point) {
           throw new Error("Browser action could not resolve a visible typing point.");
         }
+        if (action.clear !== false) {
+          throw new Error("Browser refused to clear text at an ungrounded point. Ground a visible composer or input target first.");
+        }
         await this.desktopSurface.act({
           task,
           workspace,
@@ -864,28 +937,6 @@ export class BrowserSurfaceAdapter extends SurfaceAdapter {
             label: "Focus browser typing point"
           }
         });
-        if (action.clear !== false) {
-          await this.desktopSurface.act({
-            task,
-            workspace,
-            traceId,
-            step: {
-              action: "pressKey",
-              params: { key: "a", modifiers: [browserShortcutModifier()], appName },
-              label: "Select existing browser draft text"
-            }
-          });
-          await this.desktopSurface.act({
-            task,
-            workspace,
-            traceId,
-            step: {
-              action: "pressKey",
-              params: { key: "delete", modifiers: [], appName },
-              label: "Clear existing browser draft text"
-            }
-          });
-        }
         await this.desktopSurface.act({
           task,
           workspace,
