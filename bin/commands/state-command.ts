@@ -667,6 +667,31 @@ async function collectBrowserState(
           }
         : null
     };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error ?? "browser state failed");
+    const unavailable =
+      /No browser CDP endpoint configured|No attachable Chrome page is open|Stagehand runtime is unavailable/iu.test(message);
+    return {
+      request,
+      surface: "browser",
+      ready: false,
+      readinessState: unavailable ? "browser_unavailable" : "needs_takeover",
+      blockers: [unavailable ? "browser_unavailable" : "needs_takeover"],
+      runnerType: "browser_native",
+      scene: "unknown",
+      selectedTarget: null,
+      skipReasons: [unavailable ? "browser_unavailable" : "needs_takeover"],
+      recoverySuggested: unavailable ? "takeover" : "takeover",
+      frontmostApp: null,
+      activeWindow: null,
+      visibleTextPreview: [],
+      capturePath: null,
+      threadCandidates: [],
+      composeCandidate: null,
+      sendCandidate: null,
+      packAnalysis: null,
+      manualIntervention: null
+    };
   } finally {
     if (!deps.browserAdapter) {
       await adapter.shutdown().catch(() => null);

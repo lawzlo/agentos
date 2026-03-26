@@ -239,6 +239,41 @@ test("collectSurfaceState opens boss chat by default and treats expired sessions
   assert.equal(report.recoverySuggested, "complete_signin");
 });
 
+test("collectSurfaceState returns browser_unavailable when attach-existing browser prerequisites are missing", async () => {
+  const request: SurfaceStateRequest = {
+    surface: "browser",
+    appName: null,
+    packName: "boss-browser",
+    workspaceName: "state-boss-browser-missing-cdp",
+    sampleLimit: 5,
+    timeoutMs: 1500,
+    requireAccessibility: false,
+    waitReady: false,
+    url: "https://www.zhipin.com/web/geek/chat",
+    browserProfilePath: null
+  };
+
+  const report = await collectSurfaceState(request, {
+    browserAdapter: {
+      async act() {
+        throw new Error(
+          "No browser CDP endpoint configured. Start Chrome with --remote-debugging-port and set AGENTOS_BROWSER_CDP_URL."
+        );
+      },
+      async observe() {
+        throw new Error("observe should not be reached when browser setup is missing");
+      },
+      async shutdown() {}
+    }
+  });
+
+  assert.equal(report.ready, false);
+  assert.equal(report.readinessState, "browser_unavailable");
+  assert.deepEqual(report.blockers, ["browser_unavailable"]);
+  assert.deepEqual(report.skipReasons, ["browser_unavailable"]);
+  assert.equal(report.recoverySuggested, "takeover");
+});
+
 test("collectSurfaceState treats empty browser shells as needs_takeover instead of no_visible_thread", async () => {
   const request: SurfaceStateRequest = {
     surface: "browser",
