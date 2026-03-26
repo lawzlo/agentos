@@ -12,16 +12,6 @@ const NATIVE_PROTOCOL_VERSION: u32 = 1;
 unsafe extern "C" {
     fn agentos_macos_permissions_status_json() -> *mut c_char;
     fn agentos_macos_list_windows_json() -> *mut c_char;
-    fn agentos_macos_ocr_image_json(path: *const c_char) -> *mut c_char;
-    fn agentos_macos_ocr_image_region_json(
-        path: *const c_char,
-        x: f64,
-        y: f64,
-        width: f64,
-        height: f64,
-        scale: f64,
-    ) -> *mut c_char;
-    fn agentos_macos_find_text_json(path: *const c_char, query: *const c_char) -> *mut c_char;
     fn agentos_macos_type_text_json(text: *const c_char) -> *mut c_char;
     fn agentos_macos_key_press_json(key: *const c_char, modifiers_csv: *const c_char) -> *mut c_char;
     fn agentos_macos_click_at_json(x: f64, y: f64) -> *mut c_char;
@@ -46,14 +36,6 @@ struct Response {
     result: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
-}
-
-#[derive(Clone, Copy)]
-struct NormalizedRegion {
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
 }
 
 fn main() {
@@ -133,8 +115,6 @@ fn handle_request(request: &Request) -> Result<Value, String> {
                 "frontmost_app",
                 "permissions_status",
                 "list_windows",
-                "ocr_image",
-                "find_text",
                 "type_text",
                 "key_press",
                 "click_at",
@@ -155,19 +135,6 @@ fn handle_request(request: &Request) -> Result<Value, String> {
         "frontmost_app" => frontmost_app(),
         "permissions_status" => permissions_status(),
         "list_windows" => list_windows(),
-        "ocr_image" => ocr_image(
-            param_string(&request.params, "filePath")?,
-            optional_normalized_region(&request.params, "region")?,
-            request
-                .params
-                .get("scale")
-                .and_then(|value| value.as_f64())
-                .filter(|value| value.is_finite() && *value > 0.0),
-        ),
-        "find_text" => find_text(
-            param_string(&request.params, "filePath")?,
-            param_string(&request.params, "query")?,
-        ),
         "type_text" => match env::consts::OS {
             "macos" => macos_type_text(param_string(&request.params, "text")?),
             "windows" => windows_type_text(param_string(&request.params, "text")?),
@@ -237,43 +204,6 @@ fn param_number(params: &Value, key: &str) -> Result<f64, String> {
         .get(key)
         .and_then(|value| value.as_f64())
         .ok_or_else(|| format!("{key} is required"))
-}
-
-fn optional_normalized_region(params: &Value, key: &str) -> Result<Option<NormalizedRegion>, String> {
-    let Some(value) = params.get(key) else {
-        return Ok(None);
-    };
-    let Some(region) = value.as_object() else {
-        return Err(format!("{key} must be an object"));
-    };
-    let x = region
-        .get("x")
-        .and_then(|entry| entry.as_f64())
-        .ok_or_else(|| format!("{key}.x is required"))?;
-    let y = region
-        .get("y")
-        .and_then(|entry| entry.as_f64())
-        .ok_or_else(|| format!("{key}.y is required"))?;
-    let width = region
-        .get("width")
-        .and_then(|entry| entry.as_f64())
-        .ok_or_else(|| format!("{key}.width is required"))?;
-    let height = region
-        .get("height")
-        .and_then(|entry| entry.as_f64())
-        .ok_or_else(|| format!("{key}.height is required"))?;
-    if ![x, y, width, height].iter().all(|value| value.is_finite()) {
-        return Err(format!("{key} must contain finite numbers"));
-    }
-    if width <= 0.0 || height <= 0.0 {
-        return Err(format!("{key}.width and {key}.height must be greater than 0"));
-    }
-    Ok(Some(NormalizedRegion {
-        x,
-        y,
-        width,
-        height,
-    }))
 }
 
 fn capture_screen(file_path: String, window_number: Option<u32>) -> Result<Value, String> {
@@ -369,26 +299,6 @@ fn list_windows() -> Result<Value, String> {
     }
 }
 
-fn ocr_image(
-    file_path: String,
-    region: Option<NormalizedRegion>,
-    scale: Option<f64>,
-) -> Result<Value, String> {
-    match env::consts::OS {
-        "macos" => macos_ocr_image(file_path, region, scale),
-        "windows" => windows_ocr_image(file_path),
-        other => Err(format!("ocr_image is not available on {other}")),
-    }
-}
-
-fn find_text(file_path: String, query: String) -> Result<Value, String> {
-    match env::consts::OS {
-        "macos" => macos_find_text(file_path, query),
-        "windows" => windows_find_text(file_path, query),
-        other => Err(format!("find_text is not available on {other}")),
-    }
-}
-
 fn escape_applescript(input: &str) -> String {
     input.replace('\\', "\\\\").replace('\"', "\\\"")
 }
@@ -431,50 +341,6 @@ fn macos_list_windows() -> Result<Value, String> {
 #[cfg(not(target_os = "macos"))]
 fn macos_list_windows() -> Result<Value, String> {
     Err(format!("list_windows is not available on {}", env::consts::OS))
-}
-
-#[cfg(target_os = "macos")]
-fn macos_ocr_image(
-    file_path: String,
-    region: Option<NormalizedRegion>,
-    scale: Option<f64>,
-) -> Result<Value, String> {
-    let file_path = macos_string_arg(&file_path)?;
-    if let Some(region) = region {
-        macos_json_from_ptr(unsafe {
-            agentos_macos_ocr_image_region_json(
-                file_path.as_ptr(),
-                region.x,
-                region.y,
-                region.width,
-                region.height,
-                scale.unwrap_or(1.0),
-            )
-        })
-    } else {
-        macos_json_from_ptr(unsafe { agentos_macos_ocr_image_json(file_path.as_ptr()) })
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn macos_ocr_image(
-    _file_path: String,
-    _region: Option<NormalizedRegion>,
-    _scale: Option<f64>,
-) -> Result<Value, String> {
-    Err(format!("ocr_image is not available on {}", env::consts::OS))
-}
-
-#[cfg(target_os = "macos")]
-fn macos_find_text(file_path: String, query: String) -> Result<Value, String> {
-    let file_path = macos_string_arg(&file_path)?;
-    let query = macos_string_arg(&query)?;
-    macos_json_from_ptr(unsafe { agentos_macos_find_text_json(file_path.as_ptr(), query.as_ptr()) })
-}
-
-#[cfg(not(target_os = "macos"))]
-fn macos_find_text(_file_path: String, _query: String) -> Result<Value, String> {
-    Err(format!("find_text is not available on {}", env::consts::OS))
 }
 
 #[cfg(target_os = "macos")]
@@ -753,97 +619,6 @@ $callback = [AgentOSWindowEnumerator+EnumWindowsProc]{
 @{ windows = @($windows) } | ConvertTo-Json -Compress -Depth 8
 "#,
     )
-}
-
-fn create_windows_ocr_script(file_path: &str) -> String {
-    r#"
-Add-Type -AssemblyName System.Runtime.WindowsRuntime
-$null = [Windows.Storage.StorageFile, Windows.Storage, ContentType = WindowsRuntime]
-$null = [Windows.Storage.FileAccessMode, Windows.Storage, ContentType = WindowsRuntime]
-$null = [Windows.Graphics.Imaging.BitmapDecoder, Windows.Graphics.Imaging, ContentType = WindowsRuntime]
-$null = [Windows.Media.Ocr.OcrEngine, Windows.Media.Ocr, ContentType = WindowsRuntime]
-function Await($operation) { [System.WindowsRuntimeSystemExtensions]::AsTask($operation).GetAwaiter().GetResult() }
-$file = Await([Windows.Storage.StorageFile]::GetFileFromPathAsync('__PATH__'))
-$stream = Await($file.OpenAsync([Windows.Storage.FileAccessMode]::Read))
-$decoder = Await([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream))
-$bitmap = Await($decoder.GetSoftwareBitmapAsync())
-$engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
-$result = Await($engine.RecognizeAsync($bitmap))
-$observations = foreach ($line in $result.Lines) {
-  foreach ($word in $line.Words) {
-    $bounds = $word.BoundingRect
-    [pscustomobject]@{
-      text = $word.Text
-      confidence = 0.8
-      box = [pscustomobject]@{
-        x = [double]$bounds.X
-        y = [double]$bounds.Y
-        width = [double]$bounds.Width
-        height = [double]$bounds.Height
-        centerX = [double]($bounds.X + ($bounds.Width / 2))
-        centerY = [double]($bounds.Y + ($bounds.Height / 2))
-      }
-    }
-  }
-}
-@{ observations = @($observations) } | ConvertTo-Json -Compress -Depth 8
-"#
-    .replace("__PATH__", &escape_powershell(file_path))
-}
-
-fn windows_ocr_image(file_path: String) -> Result<Value, String> {
-    run_powershell_json(&create_windows_ocr_script(&file_path))
-}
-
-fn windows_find_text(file_path: String, query: String) -> Result<Value, String> {
-    let ocr = windows_ocr_image(file_path)?;
-    let observations = ocr
-        .get("observations")
-        .and_then(|value| value.as_array())
-        .cloned()
-        .unwrap_or_default();
-    let query_lower = query.to_lowercase();
-    let mut ranked = observations
-        .iter()
-        .filter_map(|observation| {
-            let text = observation.get("text")?.as_str()?.to_string();
-            let lowered = text.to_lowercase();
-            let score = if lowered == query_lower {
-                2
-            } else if lowered.contains(query_lower.as_str()) {
-                1
-            } else {
-                0
-            };
-            if score == 0 {
-                return None;
-            }
-            let confidence = observation
-                .get("confidence")
-                .and_then(|value| value.as_f64())
-                .unwrap_or(0.0);
-            Some((score, confidence, observation.clone()))
-        })
-        .collect::<Vec<(i32, f64, Value)>>();
-    ranked.sort_by(|left, right| {
-        right
-            .0
-            .cmp(&left.0)
-            .then_with(|| right.1.partial_cmp(&left.1).unwrap_or(std::cmp::Ordering::Equal))
-    });
-
-    if let Some((_, _, observation)) = ranked.first() {
-        Ok(json!({
-            "found": true,
-            "match": observation,
-            "count": observations.len()
-        }))
-    } else {
-        Ok(json!({
-            "found": false,
-            "count": observations.len()
-        }))
-    }
 }
 
 fn windows_type_text(text: String) -> Result<Value, String> {

@@ -90,22 +90,6 @@ function createObserveAdapter(timeouts?: Record<string, number>) {
         ]
       };
     },
-    async ocrImage() {
-      return {
-        observations: [
-          {
-            text: "Acme renewal",
-            confidence: 0.9,
-            box: { x: 20, y: 20, width: 120, height: 20, centerX: 80, centerY: 30 }
-          },
-          {
-            text: "# duration ms 49970",
-            confidence: 0.9,
-            box: { x: 620, y: 30, width: 180, height: 20, centerX: 710, centerY: 40 }
-          }
-        ]
-      };
-    },
     async listWindows() {
       return {
         windows: [
@@ -225,20 +209,28 @@ test("desktop surface actions time out focus and launch helpers instead of hangi
   assert.deepEqual(launchResult, { launched: false, timedOut: true });
 });
 
-test("desktop clickTarget prefers targetQuery OCR grounding over stale bounds", async () => {
+test("desktop clickTarget prefers targetQuery interaction grounding over stale bounds", async () => {
   const { adapter } = createObserveAdapter();
   const clicks: Array<{ x: number; y: number }> = [];
 
-  adapter.bridge.findText = async (_filePath: string, query: string) => ({
-    found: query === "Reply",
-    count: query === "Reply" ? 1 : 0,
-    match: query === "Reply"
-      ? {
-          text: "Reply",
-          confidence: 0.98,
-          box: { x: 300, y: 220, width: 80, height: 20, centerX: 340, centerY: 230 }
-        }
-      : undefined
+  adapter.bridge.getFrontmostApp = async () => ({ appName: "Microsoft Outlook" });
+  adapter.bridge.getAccessibilitySnapshot = async () => ({
+    appName: "Microsoft Outlook",
+    windows: [
+      {
+        title: "Inbox - Microsoft Outlook",
+        bounds: { x: 0, y: 0, width: 1200, height: 800, centerX: 600, centerY: 400 }
+      }
+    ],
+    elements: [
+      {
+        id: "ax-reply",
+        role: "AXButton",
+        title: "Reply",
+        actions: ["AXPress"],
+        bounds: { x: 300, y: 220, width: 80, height: 20, centerX: 340, centerY: 230 }
+      }
+    ]
   });
   adapter.bridge.clickAt = async (x: number, y: number) => {
     clicks.push({ x, y });
@@ -269,7 +261,7 @@ test("desktop clickTarget prefers targetQuery OCR grounding over stale bounds", 
   assert.deepEqual(clicks, [{ x: 340, y: 230 }]);
 });
 
-test("desktop clickTarget falls back to interaction candidates when OCR misses the query", async () => {
+test("desktop clickTarget resolves interaction candidates from the accessibility snapshot", async () => {
   const { adapter } = createObserveAdapter();
   const clicks: Array<{ x: number; y: number }> = [];
 
@@ -293,7 +285,6 @@ test("desktop clickTarget falls back to interaction candidates when OCR misses t
       }
     ]
   });
-  adapter.bridge.findText = async () => ({ found: false, count: 0 });
   adapter.bridge.clickAt = async (x: number, y: number) => {
     clicks.push({ x, y });
     return { ok: true, x, y };
@@ -319,22 +310,31 @@ test("desktop clickTarget falls back to interaction candidates when OCR misses t
   assert.deepEqual(clicks, [{ x: 380, y: 200 }]);
 });
 
-test("desktop typeIntoTarget focuses targetQuery OCR match before typing", async () => {
+test("desktop typeIntoTarget focuses a grounded accessibility target before typing", async () => {
   const { adapter } = createObserveAdapter();
   const clicks: Array<{ x: number; y: number }> = [];
   const typed: string[] = [];
   const keyPresses: Array<{ key: string; modifiers: string[] }> = [];
 
-  adapter.bridge.findText = async (_filePath: string, query: string) => ({
-    found: query === "Reply",
-    count: query === "Reply" ? 1 : 0,
-    match: query === "Reply"
-      ? {
-          text: "Reply",
-          confidence: 0.98,
-          box: { x: 410, y: 260, width: 90, height: 22, centerX: 455, centerY: 271 }
-        }
-      : undefined
+  adapter.bridge.getFrontmostApp = async () => ({ appName: "Microsoft Outlook" });
+  adapter.bridge.getAccessibilitySnapshot = async () => ({
+    appName: "Microsoft Outlook",
+    windows: [
+      {
+        title: "Inbox - Microsoft Outlook",
+        bounds: { x: 0, y: 0, width: 1200, height: 800, centerX: 600, centerY: 400 }
+      }
+    ],
+    elements: [
+      {
+        id: "ax-reply-editor",
+        role: "AXTextArea",
+        title: "Reply",
+        description: "Reply message editor",
+        actions: ["AXPress"],
+        bounds: { x: 410, y: 260, width: 90, height: 22, centerX: 455, centerY: 271 }
+      }
+    ]
   });
   adapter.bridge.clickAt = async (x: number, y: number) => {
     clicks.push({ x, y });
@@ -381,16 +381,25 @@ test("desktop typeIntoTarget can paste into a grounded target", async () => {
   const pasted: string[] = [];
   const keyPresses: Array<{ key: string; modifiers: string[] }> = [];
 
-  adapter.bridge.findText = async (_filePath: string, query: string) => ({
-    found: query === "Reply",
-    count: query === "Reply" ? 1 : 0,
-    match: query === "Reply"
-      ? {
-          text: "Reply",
-          confidence: 0.98,
-          box: { x: 410, y: 260, width: 90, height: 22, centerX: 455, centerY: 271 }
-        }
-      : undefined
+  adapter.bridge.getFrontmostApp = async () => ({ appName: "Microsoft Outlook" });
+  adapter.bridge.getAccessibilitySnapshot = async () => ({
+    appName: "Microsoft Outlook",
+    windows: [
+      {
+        title: "Inbox - Microsoft Outlook",
+        bounds: { x: 0, y: 0, width: 1200, height: 800, centerX: 600, centerY: 400 }
+      }
+    ],
+    elements: [
+      {
+        id: "ax-reply-editor",
+        role: "AXTextArea",
+        title: "Reply",
+        description: "Reply message editor",
+        actions: ["AXPress"],
+        bounds: { x: 410, y: 260, width: 90, height: 22, centerX: 455, centerY: 271 }
+      }
+    ]
   });
   adapter.bridge.clickAt = async (x: number, y: number) => {
     clicks.push({ x, y });
@@ -435,16 +444,25 @@ test("desktop typeIntoTarget skips clear keystrokes when clear is false", async 
   const pasted: string[] = [];
   const keyPresses: Array<{ key: string; modifiers: string[] }> = [];
 
-  adapter.bridge.findText = async (_filePath: string, query: string) => ({
-    found: query === "Reply",
-    count: query === "Reply" ? 1 : 0,
-    match: query === "Reply"
-      ? {
-          text: "Reply",
-          confidence: 0.98,
-          box: { x: 410, y: 260, width: 90, height: 22, centerX: 455, centerY: 271 }
-        }
-      : undefined
+  adapter.bridge.getFrontmostApp = async () => ({ appName: "Microsoft Outlook" });
+  adapter.bridge.getAccessibilitySnapshot = async () => ({
+    appName: "Microsoft Outlook",
+    windows: [
+      {
+        title: "Inbox - Microsoft Outlook",
+        bounds: { x: 0, y: 0, width: 1200, height: 800, centerX: 600, centerY: 400 }
+      }
+    ],
+    elements: [
+      {
+        id: "ax-reply-editor",
+        role: "AXTextArea",
+        title: "Reply",
+        description: "Reply message editor",
+        actions: ["AXPress"],
+        bounds: { x: 410, y: 260, width: 90, height: 22, centerX: 455, centerY: 271 }
+      }
+    ]
   });
   adapter.bridge.clickAt = async (x: number, y: number) => {
     clicks.push({ x, y });
@@ -484,7 +502,7 @@ test("desktop typeIntoTarget skips clear keystrokes when clear is false", async 
   assert.deepEqual(pasted, ["hello"]);
 });
 
-test("desktop waitForTarget resolves interaction candidates without OCR text matches", async () => {
+test("desktop waitForTarget resolves interaction candidates from the accessibility snapshot", async () => {
   const { adapter } = createObserveAdapter();
 
   adapter.bridge.getFrontmostApp = async () => ({ appName: "Microsoft Outlook" });
@@ -507,8 +525,6 @@ test("desktop waitForTarget resolves interaction candidates without OCR text mat
       }
     ]
   });
-  adapter.bridge.findText = async () => ({ found: false, count: 0 });
-
   const result = await adapter.act({
     task: { id: "task_test" },
     step: {
@@ -559,7 +575,7 @@ test("desktop surface focus treats a timed focus helper as success when the targ
   });
 });
 
-test("desktop observe filters OCR blocks to the frontmost app window", async () => {
+test("desktop observe builds visible text and interaction candidates from accessibility data", async () => {
   const { adapter, registeredArtifacts } = createObserveAdapter();
 
   const worldState = (await adapter.observe({
@@ -576,124 +592,10 @@ test("desktop observe filters OCR blocks to the frontmost app window", async () 
   assert.equal(worldState.appContext?.appName, "Slack");
   const accessibility = worldState.appContext?.accessibility as { elements?: unknown[] } | undefined;
   assert.equal(Array.isArray(accessibility?.elements), true);
-  assert.equal(worldState.ocrBlocks.length, 1);
-  assert.equal(worldState.ocrBlocks[0]?.text, "Acme renewal");
+  assert.equal(worldState.screenTextBlocks.length, 0);
   assert.equal(worldState.interactionCandidates.some((candidate) => candidate.sourceHints?.source === "accessibility"), true);
   assert.equal(worldState.visibleText.includes("Unread: Acme renewal"), true);
   assert.equal(worldState.visibleText.includes("Message"), true);
-  assert.equal(worldState.visibleText.includes("# duration ms 49970"), false);
-});
-
-test("desktop observe falls back to accessibility when OCR fails", async () => {
-  const { adapter } = createObserveAdapter();
-  adapter.bridge.ocrImage = async () => {
-    throw new Error("ocr_image failed");
-  };
-
-  const worldState = (await adapter.observe({
-    task: { id: "task_test" },
-    workspace: {
-      id: "workspace_test",
-      artifactsPath: "/tmp",
-      rootPath: "/tmp"
-    },
-    traceId: "trace_test"
-  })) as WorldState;
-
-  assert.equal(worldState.appContext?.appName, "Slack");
-  assert.equal(worldState.appContext?.ocrAvailable, false);
-  assert.equal(worldState.appContext?.ocrError, "ocr_image failed");
-  assert.equal(worldState.ocrBlocks.length, 0);
-  assert.equal(worldState.interactionCandidates.some((candidate) => candidate.sourceHints?.source === "accessibility"), true);
-  assert.equal(worldState.visibleText.includes("Unread: Acme renewal"), true);
-  assert.equal(worldState.summary.includes("OCR unavailable: ocr_image failed"), true);
-});
-
-test("desktop observe augments WeChat window captures with supplemental OCR regions", async () => {
-  const { adapter } = createObserveAdapter();
-  const ocrCalls: Array<Record<string, unknown>> = [];
-  adapter.bridge.captureScreen = async (_filePath: string, windowNumber?: number | null) => ({
-    ok: true,
-    windowNumber: windowNumber ?? null
-  });
-  adapter.bridge.getFrontmostApp = async () => ({ appName: "WeChat" });
-  adapter.bridge.listWindows = async () => ({
-    windows: [
-      {
-        ownerName: "WeChat",
-        windowName: "WeChat",
-        windowNumber: 11,
-        bounds: { x: 0, y: 0, width: 900, height: 700, centerX: 450, centerY: 350 }
-      }
-    ]
-  });
-  adapter.bridge.getAccessibilitySnapshot = async () => ({
-    appName: "WeChat",
-    windows: [],
-    elements: []
-  });
-  adapter.bridge.ocrImage = async (_filePath: string, options?: { region?: Record<string, number>; scale?: number }) => {
-    ocrCalls.push({
-      region: options?.region ?? null,
-      scale: options?.scale ?? null
-    });
-    if (!options?.region) {
-      return {
-        observations: [
-          {
-            text: "03/11",
-            confidence: 0.8,
-            box: { x: 350, y: 120, width: 60, height: 24, centerX: 380, centerY: 132 }
-          }
-        ]
-      };
-    }
-    if (Number(options.region.x) < 0.2) {
-      return {
-        observations: [
-          {
-            text: "Official Accounts",
-            confidence: 0.95,
-            box: { x: 120, y: 120, width: 180, height: 28, centerX: 210, centerY: 134 }
-          }
-        ]
-      };
-    }
-    return {
-      observations: [
-        {
-          text: "输入",
-          confidence: 0.9,
-          box: { x: 420, y: 610, width: 120, height: 32, centerX: 480, centerY: 626 }
-        }
-      ]
-    };
-  };
-
-  const worldState = (await adapter.observe({
-    task: { id: "task_test" },
-    workspace: {
-      id: "workspace_test",
-      artifactsPath: "/tmp",
-      rootPath: "/tmp"
-    },
-    traceId: "trace_test"
-  })) as WorldState;
-
-  assert.equal(ocrCalls.length, 3);
-  assert.deepEqual(ocrCalls[1]?.region, { x: 0.1, y: 0.09, width: 0.34, height: 0.78 });
-  assert.deepEqual(ocrCalls[2]?.region, { x: 0.34, y: 0.78, width: 0.6, height: 0.18 });
-  assert.equal(worldState.appContext?.supplementalOcrBlockCount, 2);
-  assert.equal(worldState.ocrBlocks.some((block) => block.text === "Official Accounts"), true);
-  assert.equal(worldState.ocrBlocks.some((block) => block.text === "输入"), true);
-  assert.equal(
-    worldState.interactionCandidates.some((candidate) => candidate.text === "Official Accounts" && candidate.sourceHints?.source === "ocr-wechat-list"),
-    true
-  );
-  assert.equal(
-    worldState.interactionCandidates.some((candidate) => candidate.text === "输入" && candidate.sourceHints?.source === "ocr-wechat-compose"),
-    true
-  );
 });
 
 test("desktop observe captures the target app window even when another app is frontmost", async () => {
@@ -735,224 +637,6 @@ test("desktop observe captures the target app window even when another app is fr
   assert.deepEqual(capturedWindowNumbers, [52183]);
   assert.equal(worldState.appContext?.targetAppName, "WeChat");
   assert.equal(worldState.appContext?.captureWindowNumber, 52183);
-});
-
-test("desktop verify can require region text visibility", async () => {
-  const { adapter } = createObserveAdapter();
-  adapter.bridge.getFrontmostApp = async () => ({ appName: "WeChat" });
-  adapter.bridge.ocrImage = async (_filePath: string, options?: { region?: Record<string, number> }) => {
-    if (options?.region && Number(options.region.x) > 0.3) {
-      return {
-        observations: [
-          {
-            text: "Tan",
-            confidence: 0.95,
-            box: { x: 520, y: 28, width: 60, height: 24, centerX: 550, centerY: 40 }
-          }
-        ]
-      };
-    }
-    return { observations: [] };
-  };
-
-  const result = await adapter.verify({
-    task: { id: "task_test" },
-    workspace: {
-      id: "workspace_test",
-      artifactsPath: "/tmp",
-      rootPath: "/tmp"
-    },
-    traceId: "trace_test",
-    expectation: {
-      frontmostApp: "WeChat",
-      regionTextVisible: {
-        text: "Tan",
-        region: { x: 0.34, y: 0.02, width: 0.6, height: 0.16 },
-        scale: 2.2
-      }
-    }
-  });
-
-  assert.equal(result.ok, true);
-  assert.equal(result.details.frontmostApp, "WeChat");
-  assert.equal(result.details.regionTextVisible, true);
-});
-
-test("desktop verify fails when region text is not visible in the requested area", async () => {
-  const { adapter } = createObserveAdapter();
-  adapter.bridge.getFrontmostApp = async () => ({ appName: "WeChat" });
-  adapter.bridge.ocrImage = async () => ({
-    observations: [
-      {
-        text: "Official Accounts",
-        confidence: 0.95,
-        box: { x: 120, y: 140, width: 180, height: 28, centerX: 210, centerY: 154 }
-      }
-    ]
-  });
-
-  const result = await adapter.verify({
-    task: { id: "task_test" },
-    workspace: {
-      id: "workspace_test",
-      artifactsPath: "/tmp",
-      rootPath: "/tmp"
-    },
-    traceId: "trace_test",
-    expectation: {
-      frontmostApp: "WeChat",
-      regionTextVisible: {
-        text: "Tan",
-        region: { x: 0.34, y: 0.02, width: 0.6, height: 0.16 },
-        scale: 2.2
-      }
-    }
-  });
-
-  assert.equal(result.ok, false);
-  assert.equal(result.details.frontmostApp, "WeChat");
-  assert.equal(result.details.regionTextVisible, false);
-  assert.deepEqual(result.details.regionTextPreview, ["Official Accounts"]);
-});
-
-test("desktop verify does not accept tiny OCR fragments as a full region-text match", async () => {
-  const { adapter } = createObserveAdapter();
-  adapter.bridge.getFrontmostApp = async () => ({ appName: "Microsoft Outlook" });
-  adapter.bridge.ocrImage = async () => ({
-    observations: [
-      {
-        text: "4",
-        confidence: 0.92,
-        box: { x: 640, y: 330, width: 12, height: 20, centerX: 646, centerY: 340 }
-      }
-    ]
-  });
-
-  const result = await adapter.verify({
-    task: { id: "task_test" },
-    workspace: {
-      id: "workspace_test",
-      artifactsPath: "/tmp",
-      rootPath: "/tmp"
-    },
-    traceId: "trace_test",
-    expectation: {
-      frontmostApp: "Outlook",
-      regionTextVisible: {
-        text: "AGENTOS PASTE 4",
-        region: { x: 0.4, y: 0.2, width: 0.4, height: 0.2 },
-        scale: 2.4
-      }
-    }
-  });
-
-  assert.equal(result.ok, false);
-  assert.equal(result.details.regionTextVisible, false);
-  assert.deepEqual(result.details.regionTextPreview, ["4"]);
-});
-
-test("desktop verify supports matching region text across multiple candidate regions", async () => {
-  const { adapter } = createObserveAdapter();
-  adapter.bridge.getFrontmostApp = async () => ({ appName: "WeChat" });
-  adapter.bridge.ocrImage = async (
-    _path: string,
-    options?: { region?: { x?: number; y?: number; width?: number; height?: number } }
-  ) => {
-    const regionHeight = Number(options?.region?.height ?? 0);
-    if (regionHeight <= 0.2) {
-      return {
-        observations: [
-          {
-            text: "Official Accounts",
-            confidence: 0.95,
-            box: { x: 120, y: 140, width: 180, height: 28, centerX: 210, centerY: 154 }
-          }
-        ]
-      };
-    }
-    return {
-      observations: [
-        {
-          text: "Tan",
-          confidence: 0.96,
-          box: { x: 620, y: 84, width: 60, height: 24, centerX: 650, centerY: 96 }
-        }
-      ]
-    };
-  };
-
-  const result = await adapter.verify({
-    task: { id: "task_test" },
-    workspace: {
-      id: "workspace_test",
-      artifactsPath: "/tmp",
-      rootPath: "/tmp"
-    },
-    traceId: "trace_test",
-    expectation: {
-      frontmostApp: "WeChat",
-      regionTextAnyVisible: [
-        {
-          text: "Tan",
-          region: { x: 0.34, y: 0.02, width: 0.6, height: 0.16 },
-          scale: 2.2
-        },
-        {
-          text: "Tan",
-          region: { x: 0.34, y: 0.02, width: 0.62, height: 0.72 },
-          scale: 2.2
-        }
-      ]
-    }
-  });
-
-  assert.equal(result.ok, true);
-  assert.equal(result.details.frontmostApp, "WeChat");
-  assert.equal(result.details.regionTextAnyVisible, true);
-  assert.equal(result.details.regionTextAnyChecks[0]?.matched, false);
-  assert.equal(result.details.regionTextAnyChecks[1]?.matched, true);
-});
-
-test("desktop verify can match region text against the combined OCR preview of a single region", async () => {
-  const { adapter } = createObserveAdapter();
-  adapter.bridge.getFrontmostApp = async () => ({ appName: "Microsoft Outlook" });
-  adapter.bridge.ocrImage = async () => ({
-    observations: [
-      {
-        text: "Thanks for your email.",
-        confidence: 0.96,
-        box: { x: 640, y: 340, width: 210, height: 24, centerX: 745, centerY: 352 }
-      },
-      {
-        text: "I received it and will follow up shortly.",
-        confidence: 0.95,
-        box: { x: 640, y: 372, width: 320, height: 24, centerX: 800, centerY: 384 }
-      }
-    ]
-  });
-
-  const result = await adapter.verify({
-    task: { id: "task_test" },
-    workspace: {
-      id: "workspace_test",
-      artifactsPath: "/tmp",
-      rootPath: "/tmp"
-    },
-    traceId: "trace_test",
-    expectation: {
-      frontmostApp: "Outlook",
-      regionTextVisible: {
-        text: "Thanks for your email. I received it and will follow up shortly.",
-        region: { x: 0.38, y: 0.27, width: 0.22, height: 0.14 },
-        scale: 2.4
-      }
-    }
-  });
-
-  assert.equal(result.ok, true);
-  assert.equal(result.details.frontmostApp, "Microsoft Outlook");
-  assert.equal(result.details.regionTextVisible, true);
-  assert.equal((result.details.regionTextMatch as { source?: string } | undefined)?.source, "combined_preview");
 });
 
 test("desktop verify falls back to matching windows when frontmost app lookup times out", async () => {
@@ -1086,9 +770,6 @@ test("desktop verify can use visual checks for WeChat thread and prefill validat
     async getPermissionsStatus() {
       return { accessibility: true, screenRecording: true };
     },
-    async ocrImage() {
-      return { observations: [] };
-    }
   };
 
   const result = await adapter.verify({
@@ -1169,9 +850,6 @@ test("desktop visual checks require explicit positive verification results", asy
     async getPermissionsStatus() {
       return { accessibility: true, screenRecording: true };
     },
-    async ocrImage() {
-      return { observations: [] };
-    }
   };
 
   const result = await adapter.verify({
@@ -1247,7 +925,6 @@ test("desktop observe times out slow helper calls instead of hanging", async () 
   const { adapter } = createObserveAdapter({
     captureMs: 20,
     frontmostMs: 20,
-    ocrMs: 20,
     windowsMs: 20,
     permissionsMs: 20,
     accessibilityMs: 20
@@ -1260,10 +937,6 @@ test("desktop observe times out slow helper calls instead of hanging", async () 
   adapter.bridge.getFrontmostApp = async () => {
     await new Promise((resolve) => setTimeout(resolve, 200));
     return { appName: "WeChat" };
-  };
-  adapter.bridge.ocrImage = async () => {
-    await new Promise((resolve) => setTimeout(resolve, 200));
-    return { observations: [{ text: "slow" }] };
   };
   adapter.bridge.listWindows = async () => {
     await new Promise((resolve) => setTimeout(resolve, 200));
@@ -1298,9 +971,7 @@ test("desktop observe times out slow helper calls instead of hanging", async () 
   assert.equal(worldState.capture, null);
   assert.equal(worldState.appContext?.captureAvailable, false);
   assert.match(String(worldState.appContext?.captureError ?? ""), /timed out after 20ms/i);
-  assert.equal(worldState.ocrBlocks.length, 0);
-  assert.equal(worldState.appContext?.ocrAvailable, false);
-  assert.match(String(worldState.appContext?.ocrError ?? ""), /capture unavailable/i);
+  assert.equal(worldState.screenTextBlocks.length, 0);
 });
 
 test("desktop waitForAppReady reports timeout-backed readiness details", async () => {

@@ -140,6 +140,56 @@ function heuristicPlan(taskSpec: TaskSpec): RuntimeStep[] {
     return taskSpec.steps.map((step, index) => normalizeStep(step, index));
   }
 
+  if (
+    defaultSurface === "browser"
+    && (
+      (typeof inputs.browserInstruction === "string" && inputs.browserInstruction.trim())
+      || (Array.isArray(inputs.browserActions) && inputs.browserActions.length)
+    )
+  ) {
+    steps.push(
+      normalizeStep(
+        {
+          label: "Run browser automation",
+          surface: "browser",
+          action: "browserExecute",
+          params: {
+            instruction: String(inputs.browserInstruction ?? taskSpec.goal ?? "").trim(),
+            ...(inputs.startUrl ? { url: String(inputs.startUrl), startUrl: String(inputs.startUrl) } : {}),
+            ...(Array.isArray(inputs.browserActions) ? { actions: inputs.browserActions } : {}),
+            ...(inputs.browserSuccessCriteria ? { successCriteria: String(inputs.browserSuccessCriteria) } : {}),
+            ...(inputs.browserVerificationSchema ? { verificationSchema: inputs.browserVerificationSchema } : {}),
+            maxSteps: Math.max(1, Number(inputs.browserMaxSteps ?? taskSpec.autonomy?.maxSteps ?? 5)),
+            allowSameTabNavigation: inputs.allowSameTabNavigation !== false,
+            allowNewTabs: inputs.allowNewTabs === true,
+            allowCrossOriginNavigation: inputs.allowCrossOriginNavigation === true
+          },
+          ...(inputs.browserExpect && typeof inputs.browserExpect === "object"
+            ? { expect: inputs.browserExpect as Record<string, unknown> }
+            : {})
+        },
+        steps.length
+      )
+    );
+
+    if (inputs.capture) {
+      steps.push(
+        normalizeStep(
+          {
+            label: "Capture page",
+            surface: "browser",
+            action: "capture",
+            params: { label: inputs.captureLabel ?? "capture" },
+            saveAs: "capture"
+          },
+          steps.length
+        )
+      );
+    }
+
+    return steps;
+  }
+
   if (defaultSurface === "browser" && inputs.startUrl) {
     steps.push(
       normalizeStep(

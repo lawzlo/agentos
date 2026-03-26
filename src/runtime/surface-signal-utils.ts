@@ -71,7 +71,7 @@ function collectSignals(worldState: WorldState | null): SurfaceSignal[] {
     });
   }
 
-  for (const [index, block] of (worldState?.ocrBlocks ?? []).entries()) {
+  for (const [index, block] of (worldState?.screenTextBlocks ?? []).entries()) {
     const text = String(block?.text ?? "").trim();
     if (!text) {
       continue;
@@ -79,7 +79,7 @@ function collectSignals(worldState: WorldState | null): SurfaceSignal[] {
 
     signals.push({
       text,
-      source: "ocr",
+      source: "screen",
       interactive: false,
       role: "text",
       index,

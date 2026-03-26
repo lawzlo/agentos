@@ -32,7 +32,7 @@ function buildBossWorldState(visibleText: string): WorldState {
       },
       createdAt: new Date().toISOString()
     },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [],
     visibleText,
     recentActions: [],
@@ -111,4 +111,44 @@ test("boss semantic facts can use model-backed unlabeled thread lines without pr
     "Curious, are you using AWS or Google Cloud?",
     "We help funded startups stretch runway by getting them $50-100k+ in cloud credits."
   ]);
+});
+
+test("boss semantic facts fall back cleanly when model extraction exceeds the detect-stage budget", async () => {
+  const modelClient: BossSemanticModelClient = {
+    isConfigured: () => true,
+    async completeJson<TPayload, TResponse>() {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return {
+        latestInboundMessage: "Should not win the race",
+        salientContext: ["Should not win the race"],
+        senderName: "Timeout Candidate",
+        speakerRole: "candidate",
+        threadSummary: "Timeout Candidate",
+        evidence: "delayed"
+      } as TResponse;
+    }
+  };
+
+  const facts = await inferBossSemanticFacts({
+    modelClient,
+    worldState: buildBossWorldState(
+      [
+        "BOSS直聘",
+        "李雷",
+        "产品经理",
+        "候选人: 方便聊下这个岗位吗？",
+        "发送消息给李雷",
+        "发送"
+      ].join("\n")
+    ),
+    summary: "李雷 · 产品经理",
+    threadSummary: "李雷 · 产品经理",
+    trailingWindow: 6,
+    excludeComposeChrome: true,
+    timeoutMs: 1
+  });
+
+  assert.equal(facts.source, "heuristic");
+  assert.equal(facts.latestInboundMessage, "候选人: 方便聊下这个岗位吗？");
+  assert.equal(facts.senderName, "李雷");
 });

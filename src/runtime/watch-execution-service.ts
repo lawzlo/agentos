@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 
 import { nowIso } from "./id.js";
-import { materializeWatchActionTemplate } from "./watch-profile.js";
+import { materializeWatchActionTemplate, materializeWatchValue } from "./watch-profile.js";
 import { inferReplyLanguage } from "./reply-language.js";
 import { clearExpiredReplyApprovalGrant, deriveReplyThreadKey, hasActiveReplyApprovalGrant } from "./reply-policy.js";
 import { ModelBudgetExceededError, type ModelUsageBudget } from "./model-client.js";
@@ -759,8 +759,15 @@ export class WatchExecutionService {
 
     const templateInputs =
       ((watchRule.watchProfile?.metadata as { templateInputs?: TeachTemplateInput[] } | undefined)?.templateInputs ?? []);
+    const explicitInputs = explicitTaskSpec.inputs
+      ? (materializeWatchValue(explicitTaskSpec.inputs, runtimeInputs, templateInputs) as Record<string, unknown>)
+      : {};
+    const resolvedRuntimeInputs = {
+      ...runtimeInputs,
+      ...explicitInputs
+    };
     const explicitSteps = Array.isArray(explicitTaskSpec.steps)
-      ? materializeWatchActionTemplate(explicitTaskSpec.steps, runtimeInputs, templateInputs)
+      ? materializeWatchActionTemplate(explicitTaskSpec.steps, resolvedRuntimeInputs, templateInputs)
       : baseTaskSpec.steps;
     const filteredExplicitSteps = stripSendLikeSteps(explicitSteps, runtimeInputs.autoSend);
     const resolvedExecutionMode =
@@ -770,10 +777,7 @@ export class WatchExecutionService {
     const resolvedTaskSpec = {
       ...baseTaskSpec,
       ...explicitTaskSpec,
-      inputs: {
-        ...runtimeInputs,
-        ...(explicitTaskSpec.inputs ?? {})
-      },
+      inputs: resolvedRuntimeInputs,
       steps: filteredExplicitSteps,
       executionMode: resolvedExecutionMode
     };

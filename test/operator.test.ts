@@ -101,11 +101,11 @@ function createWorkspace() {
 test("operator skips low-confidence desktop fuzzy pre-grounding and keeps targetQuery-only execution", async () => {
   const { operator, actedSteps } = createOperator({
     groundResult: {
-      targetId: "desktop-ocr-1",
+      targetId: "desktop-screen-1",
       resolutionMode: "fuzzy_text",
       confidence: 0.15,
       target: {
-        id: "desktop-ocr-1",
+        id: "desktop-screen-1",
         text: "+",
         bounds: { centerX: 10, centerY: 20 }
       }
@@ -137,11 +137,11 @@ test("operator skips low-confidence desktop fuzzy pre-grounding and keeps target
 test("operator preserves high-confidence pre-grounded desktop targets", async () => {
   const { operator, actedSteps } = createOperator({
     groundResult: {
-      targetId: "desktop-ocr-thread",
+      targetId: "desktop-screen-thread",
       resolutionMode: "exact_text",
       confidence: 0.92,
       target: {
-        id: "desktop-ocr-thread",
+        id: "desktop-screen-thread",
         text: "上海光华",
         bounds: { centerX: 300, centerY: 200 }
       }

@@ -4,7 +4,6 @@ import path from "node:path";
 import { apiRequest, boolOption, config, print, type CliOptions } from "../cli-utils.js";
 import { collectDesktopProbe, type DesktopProbeDeps, type DesktopProbeReport, type DesktopProbeRequest } from "./desktop-command.js";
 import { BrowserSurfaceAdapter } from "../../src/runtime/adapters/browser-surface.js";
-import { ChromeMainSessionSurfaceAdapter } from "../../src/runtime/adapters/chrome-main-session-surface.js";
 import { defaultBrowserStartUrlForPack } from "../../src/runtime/browser-pack-defaults.js";
 import { detectInstallSourceSync } from "../../src/install-source.js";
 import { resolveLicenseState } from "../../src/license.js";
@@ -36,7 +35,6 @@ export type SurfaceReadinessState =
   | "no_visible_thread"
   | "no_visible_composer"
   | "focus_lost"
-  | "degraded_ocr"
   | "browser_unavailable";
 
 interface BrowserStateAdapter {
@@ -83,8 +81,6 @@ export interface SurfaceStateReport {
   activeWindow: string | null;
   visibleTextPreview: string[];
   capturePath: string | null;
-  ocrAvailable: boolean | null;
-  ocrError: string | null;
   threadCandidates: DesktopProbeCandidateSummary[];
   composeCandidate: DesktopProbeCandidateSummary | null;
   sendCandidate: DesktopProbeCandidateSummary | null;
@@ -350,18 +346,14 @@ function createBrowserAdapter(): BrowserStateAdapter {
     }
   } as never;
 
-  return (
-    config.browserMode === "main_chrome" && process.platform === "darwin"
-      ? new ChromeMainSessionSurfaceAdapter({
-          artifactStore,
-          dataDir: config.dataDir
-        })
-      : new BrowserSurfaceAdapter({
-          artifactStore,
-          browserExecutable: config.browserExecutable ?? null,
-          headless: config.headless
-        })
-  ) as BrowserStateAdapter;
+  return new BrowserSurfaceAdapter({
+    artifactStore,
+    browserMode: config.browserMode,
+    browserExecutable: config.browserExecutable ?? null,
+    browserCdpUrl: config.browserCdpUrl ?? null,
+    modelConfig: config.model,
+    headless: config.headless
+  }) as BrowserStateAdapter;
 }
 
 function buildSyntheticStateRule(request: SurfaceStateRequest): WatchRule {
@@ -399,9 +391,6 @@ function deriveDesktopReadiness(report: DesktopProbeReport): {
   if (targetApp && frontmostApp && !frontmostApp.includes(targetApp.toLowerCase())) {
     blockers.push("focus_lost");
   }
-  if (report.ocrAvailable === false) {
-    blockers.push("degraded_ocr");
-  }
   if (report.packAnalysis) {
     if (report.packAnalysis.foreground === false && !blockers.includes("focus_lost")) {
       blockers.push("focus_lost");
@@ -438,6 +427,9 @@ function deriveBrowserReadiness({
   blockers: SurfaceReadinessState[];
 } {
   const blockers: SurfaceReadinessState[] = [];
+  const runtimeBlockers = Array.isArray((worldState.appContext?.blockers ?? null))
+    ? (worldState.appContext?.blockers as Array<{ kind?: string }>)
+    : [];
   const interventionKind = manualIntervention?.metadata?.manualInterventionKind ?? null;
   if (interventionKind === "verification") {
     blockers.push("blocked_verification");
@@ -445,6 +437,17 @@ function deriveBrowserReadiness({
     blockers.push("blocked_signin");
   } else if (interventionKind === "access_denied") {
     blockers.push("blocked_access_denied");
+  }
+
+  if (!blockers.length) {
+    const runtimeKind = String(runtimeBlockers[0]?.kind ?? "").trim().toLowerCase();
+    if (runtimeKind === "verification_required") {
+      blockers.push("blocked_verification");
+    } else if (runtimeKind === "signin_required" || runtimeKind === "session_expired") {
+      blockers.push("blocked_signin");
+    } else if (runtimeKind === "page_unavailable") {
+      blockers.push("needs_takeover");
+    }
   }
 
   if (!blockers.length && !String(worldState.visibleText ?? "").trim()) {
@@ -493,9 +496,6 @@ function renderSurfaceState(report: SurfaceStateReport): string {
   }
   if (report.capturePath) {
     lines.push(`Capture: ${report.capturePath}`);
-  }
-  if (report.ocrAvailable === false) {
-    lines.push(`OCR: unavailable (${report.ocrError ?? "unknown error"})`);
   }
   if (report.visibleTextPreview.length) {
     lines.push("");
@@ -574,8 +574,6 @@ async function collectBrowserState(
       activeWindow: null,
       visibleTextPreview: [],
       capturePath: null,
-      ocrAvailable: null,
-      ocrError: null,
       threadCandidates: [],
       composeCandidate: null,
       sendCandidate: null,
@@ -656,8 +654,6 @@ async function collectBrowserState(
         .filter(Boolean)
         .slice(0, Math.max(3, request.sampleLimit)),
       capturePath: typeof worldState.capture?.path === "string" ? worldState.capture.path : null,
-      ocrAvailable: null,
-      ocrError: null,
       threadCandidates: packAnalysis?.topUnreadCandidates ?? [],
       composeCandidate: packAnalysis?.composeCandidate ?? null,
       sendCandidate: packAnalysis?.sendCandidate ?? null,
@@ -721,8 +717,6 @@ export async function collectSurfaceState(
     activeWindow: activeWindow || report.targetAppInspection?.frontmostApp || null,
     visibleTextPreview: report.visibleTextPreview,
     capturePath: report.capturePath,
-    ocrAvailable: report.ocrAvailable,
-    ocrError: report.ocrError,
     threadCandidates: report.packAnalysis?.topUnreadCandidates ?? report.topCandidates,
     composeCandidate: report.packAnalysis?.composeCandidate ?? null,
     sendCandidate: report.packAnalysis?.sendCandidate ?? null,

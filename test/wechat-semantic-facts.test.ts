@@ -14,7 +14,7 @@ function buildWeChatWorldState(visibleText: string): WorldState {
       windows: [{ title: "WeChat" }]
     },
     capture: null,
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [],
     visibleText,
     recentActions: [],

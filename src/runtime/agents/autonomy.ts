@@ -31,7 +31,12 @@ const ALLOWED_ACTIONS = {
     "typeIntoTarget",
     "waitForTarget",
     "extractFromTarget",
-    "scrollSurface"
+    "scrollSurface",
+    "browserObserve",
+    "browserAct",
+    "browserObserveAct",
+    "browserExtract",
+    "browserExecute"
   ],
   desktop: [
     "focusApp",
@@ -42,7 +47,6 @@ const ALLOWED_ACTIONS = {
     "clickAt",
     "scroll",
     "waitForText",
-    "ocrScreen",
     "wait",
     "capture",
     "clickTarget",

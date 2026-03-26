@@ -176,7 +176,18 @@ export function materializeWatchValue(value, runtimeInputs = {}, templateInputs 
   if (typeof value === "string") {
     const match = value.match(/^\{\{([a-zA-Z0-9_]+)\}\}$/);
     if (!match) {
-      return value;
+      return value.replace(/\{\{([a-zA-Z0-9_]+)\}\}/g, (full, key) => {
+        if (Object.prototype.hasOwnProperty.call(runtimeInputs, key)) {
+          const resolved = runtimeInputs[key];
+          if (resolved == null) {
+            return "";
+          }
+          return typeof resolved === "string" ? resolved : JSON.stringify(resolved);
+        }
+
+        const fallback = templateInputs.find((entry) => entry.key === key)?.defaultValue;
+        return fallback ?? full;
+      });
     }
 
     const key = match[1];

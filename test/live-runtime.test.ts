@@ -1401,7 +1401,7 @@ test("slack desktop pack can detect unread threads and build reply steps from a 
       windows: [{ title: "Slack" }]
     },
     capture: null,
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [
       {
         id: "nav-threads",
@@ -1411,7 +1411,7 @@ test("slack desktop pack can detect unread threads and build reply steps from a 
         role: "button",
         bounds: { x: 10, y: 10, width: 140, height: 24, centerX: 80, centerY: 22 },
         confidence: 0.8,
-        sourceHints: { source: "ocr", ariaLabel: "Threads" },
+        sourceHints: { source: "screen", ariaLabel: "Threads" },
         isInteractive: true
       },
       {
@@ -1422,7 +1422,7 @@ test("slack desktop pack can detect unread threads and build reply steps from a 
         role: "button",
         bounds: { x: 10, y: 40, width: 140, height: 24, centerX: 80, centerY: 52 },
         confidence: 0.8,
-        sourceHints: { source: "ocr" },
+        sourceHints: { source: "screen" },
         isInteractive: true
       },
       {
@@ -1453,7 +1453,7 @@ test("slack desktop pack can detect unread threads and build reply steps from a 
         role: "text",
         bounds: { x: 10, y: 10, width: 140, height: 24, centerX: 80, centerY: 22 },
         confidence: 0.8,
-        sourceHints: { source: "ocr" },
+        sourceHints: { source: "screen" },
         isInteractive: true
       },
       {
@@ -1619,7 +1619,7 @@ test("slack desktop pack ignores detections when Slack is not the foreground app
         windows: [{ title: "Terminal" }]
       },
       capture: null,
-      ocrBlocks: [],
+      screenTextBlocks: [],
       interactionCandidates: [
         {
           id: "thread-bad-read",
@@ -1629,7 +1629,7 @@ test("slack desktop pack ignores detections when Slack is not the foreground app
           role: "button",
           bounds: { x: 10, y: 10, width: 120, height: 24, centerX: 70, centerY: 22 },
           confidence: 0.8,
-          sourceHints: { source: "ocr", ariaLabel: "Unread thread bonkr" },
+          sourceHints: { source: "screen", ariaLabel: "Unread thread bonkr" },
           isInteractive: true
         }
       ],
@@ -1668,7 +1668,7 @@ test("slack desktop pack continues inbox observation even when AX readiness is u
           windows: [{ title: "Slack" }]
         },
         capture: null,
-        ocrBlocks: [],
+        screenTextBlocks: [],
         interactionCandidates: [],
         visibleText: "Slack",
         recentActions: [],
@@ -1730,13 +1730,13 @@ test("slack desktop pack continues inbox observation even when AX readiness is u
   assert.equal(observeCalls, 1);
 });
 
-test("slack desktop pack ignores OCR-only detections when no accessibility candidates are available", async () => {
+test("slack desktop pack ignores screen text-only detections when no accessibility candidates are available", async () => {
   const registry = new LivePackRegistry({
     surfaceRegistry: new SurfaceRegistry({})
   });
   const pack = registry.get("slack-desktop");
   const rule: WatchRule = {
-    id: "watch-slack-ocr-only",
+    id: "watch-slack-screen-only",
     goal: "Always watch Slack and reply to unread threads",
     enabled: true,
     status: "watching",
@@ -1756,7 +1756,7 @@ test("slack desktop pack ignores OCR-only detections when no accessibility candi
     updatedAt: new Date().toISOString()
   };
   const workspace: WorkspaceProfile = {
-    id: "profile-slack-ocr-only",
+    id: "profile-slack-screen-only",
     name: "slack-desktop-main",
     rootPath: "/tmp/slack-desktop-main",
     profilePath: "/tmp/slack-desktop-main/profile",
@@ -1773,40 +1773,40 @@ test("slack desktop pack ignores OCR-only detections when no accessibility candi
     worldState: {
       version: 1,
       surface: "desktop",
-      workspaceId: "workspace-slack-ocr-only",
+      workspaceId: "workspace-slack-screen-only",
       appContext: {
         appName: "Slack",
         windows: [{ title: "Slack" }]
       },
       capture: null,
-      ocrBlocks: [],
+      screenTextBlocks: [],
       interactionCandidates: [
         {
-          id: "ocr-close",
+          id: "screen-close",
           surface: "desktop",
           kind: "text",
           text: "close button",
           role: "button",
           bounds: { x: 12, y: 12, width: 24, height: 24, centerX: 24, centerY: 24 },
           confidence: 0.72,
-          sourceHints: { source: "ocr" },
+          sourceHints: { source: "screen" },
           isInteractive: true
         },
         {
-          id: "ocr-thread",
+          id: "screen-thread",
           surface: "desktop",
           kind: "text",
           text: "# bonkr",
           role: "button",
           bounds: { x: 32, y: 96, width: 120, height: 24, centerX: 92, centerY: 108 },
           confidence: 0.76,
-          sourceHints: { source: "ocr" },
+          sourceHints: { source: "screen" },
           isInteractive: true
         }
       ],
       visibleText: "Slack\nclose button\n# bonkr",
       recentActions: [],
-      summary: "Slack with 0 accessibility candidates and 2 OCR observations",
+      summary: "Slack with 0 accessibility candidates and 2 screen text observations",
       timestamp: new Date().toISOString()
     } as never,
     dedupeState: {},
@@ -1829,7 +1829,7 @@ test("slack desktop pack skips reply context extraction when composer is missing
       windows: [{ title: "Slack" }]
     },
     capture: null,
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [
       {
         id: "thread-acme",
@@ -1962,7 +1962,7 @@ test("slack desktop pack can use visual model analysis to build a prefill task w
       metadata: {},
       createdAt: new Date().toISOString()
     },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [],
     visibleText: "Slack\nHome\nDMs\nBonkr v\nMessage Jingwen Sun",
     recentActions: [],
@@ -2146,7 +2146,7 @@ test("slack desktop pack recovers foreign views before selecting an unread threa
       ]
     },
     capture: { path: "/tmp/slack-foreign-view.png" },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [],
     visibleText: "Slack\nProfile\nMessage\nFiles",
     recentActions: [],
@@ -2295,7 +2295,7 @@ test("wechat desktop pack can detect unread conversations and build reply steps 
       ]
     },
     capture: { path: "/tmp/wechat-thread-detect.png" },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [
       {
         id: "thread-zhangsan",
@@ -2518,7 +2518,7 @@ test("wechat desktop pack recovers foreign views with a visible recovery control
       ]
     },
     capture: { path: "/tmp/wechat-foreign-view.png" },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [],
     visibleText: "WeChat\nMinimized Groups",
     recentActions: [],
@@ -2678,7 +2678,7 @@ test("wechat desktop pack falls back to Escape recovery when no recovery control
       ]
     },
     capture: { path: "/tmp/wechat-foreign-view-escape.png" },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [],
     visibleText: "WeChat\nOfficial Accounts article",
     recentActions: [],
@@ -2835,7 +2835,7 @@ test("wechat desktop pack can fall back to the window composer region when visio
       ]
     },
     capture: { path: "/tmp/wechat-composer-fallback.png" },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [
       {
         id: "thread-tan-badge",
@@ -2845,7 +2845,7 @@ test("wechat desktop pack can fall back to the window composer region when visio
         role: "text",
         bounds: { x: 150, y: 160, width: 20, height: 20, centerX: 160, centerY: 170 },
         confidence: 0.95,
-        sourceHints: { source: "ocr" },
+        sourceHints: { source: "screen" },
         isInteractive: true
       },
       {
@@ -2856,7 +2856,7 @@ test("wechat desktop pack can fall back to the window composer region when visio
         role: "text",
         bounds: { x: 180, y: 160, width: 80, height: 24, centerX: 220, centerY: 172 },
         confidence: 0.96,
-        sourceHints: { source: "ocr-wechat-list" },
+        sourceHints: { source: "screen-wechat-list" },
         isInteractive: true
       }
     ],
@@ -2965,7 +2965,7 @@ test("wechat desktop extractContext reuses prior visual analysis without a secon
       ]
     },
     capture: { path: "/tmp/wechat-vision-reuse-before.png" },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [
       {
         id: "thread-unread",
@@ -2975,7 +2975,7 @@ test("wechat desktop extractContext reuses prior visual analysis without a secon
         role: "button",
         bounds: { x: 220, y: 180, width: 180, height: 32, centerX: 310, centerY: 196 },
         confidence: 0.96,
-        sourceHints: { source: "ocr-wechat-sidebar" },
+        sourceHints: { source: "screen-wechat-sidebar" },
         isInteractive: true
       }
     ],
@@ -2996,7 +2996,7 @@ test("wechat desktop extractContext reuses prior visual analysis without a secon
         role: "textbox",
         bounds: { x: 600, y: 640, width: 240, height: 36, centerX: 720, centerY: 658 },
         confidence: 0.98,
-        sourceHints: { source: "ocr-wechat-compose", placeholder: "输入消息" },
+        sourceHints: { source: "screen-wechat-compose", placeholder: "输入消息" },
         isInteractive: true
       },
       {
@@ -3007,7 +3007,7 @@ test("wechat desktop extractContext reuses prior visual analysis without a secon
         role: "button",
         bounds: { x: 860, y: 640, width: 48, height: 28, centerX: 884, centerY: 654 },
         confidence: 0.97,
-        sourceHints: { source: "ocr" },
+        sourceHints: { source: "screen" },
         isInteractive: true
       }
     ],
@@ -3144,7 +3144,7 @@ test("wechat desktop pack requires vision analysis to detect unread conversation
   const initialWorldState = {
     version: 1,
     surface: "desktop",
-    workspaceId: "workspace-wechat-ocr",
+    workspaceId: "workspace-wechat-screen",
     appContext: {
       appName: "WeChat",
       windows: [
@@ -3157,34 +3157,34 @@ test("wechat desktop pack requires vision analysis to detect unread conversation
       accessibilityCandidateCount: 0
     },
     capture: null,
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [
       {
-        id: "ocr-badge-lisi",
+        id: "screen-badge-lisi",
         surface: "desktop",
         kind: "text",
         text: "1",
         role: "text",
         bounds: { x: 36, y: 140, width: 18, height: 18, centerX: 45, centerY: 149 },
         confidence: 0.94,
-        sourceHints: { source: "ocr" },
+        sourceHints: { source: "screen" },
         isInteractive: true
       },
       {
-        id: "ocr-thread-lisi",
+        id: "screen-thread-lisi",
         surface: "desktop",
         kind: "text",
         text: "李四",
         role: "text",
         bounds: { x: 80, y: 140, width: 120, height: 30, centerX: 140, centerY: 155 },
         confidence: 0.94,
-        sourceHints: { source: "ocr" },
+        sourceHints: { source: "screen" },
         isInteractive: true
       }
     ],
     visibleText: "微信\n最近聊天\n未读\n李四\n客户: 方便的话回个电话\n",
     recentActions: [],
-    summary: "WeChat OCR unread list",
+    summary: "WeChat screen text unread list",
     timestamp: new Date().toISOString()
   };
   const fakeSurface = {
@@ -3209,7 +3209,7 @@ test("wechat desktop pack requires vision analysis to detect unread conversation
   });
   const pack = registry.get("wechat-desktop");
   const rule: WatchRule = {
-    id: "watch-wechat-desktop-ocr",
+    id: "watch-wechat-desktop-screen",
     goal: "Always watch WeChat and reply to unread conversations",
     enabled: true,
     status: "watching",
@@ -3229,7 +3229,7 @@ test("wechat desktop pack requires vision analysis to detect unread conversation
     updatedAt: new Date().toISOString()
   };
   const workspace: WorkspaceProfile = {
-    id: "profile-wechat-ocr",
+    id: "profile-wechat-screen",
     name: "wechat-desktop-main",
     rootPath: "/tmp/wechat-desktop-main",
     profilePath: "/tmp/wechat-desktop-main/profile",
@@ -3277,7 +3277,7 @@ test("wechat desktop pack can use visual model analysis to identify unread threa
       metadata: {},
       createdAt: new Date().toISOString()
     },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [
       {
         id: "thread-wechat-pay",
@@ -3287,7 +3287,7 @@ test("wechat desktop pack can use visual model analysis to identify unread threa
         role: "text",
         bounds: { x: 210, y: 398, width: 120, height: 24, centerX: 270, centerY: 410 },
         confidence: 0.9,
-        sourceHints: { source: "ocr-wechat-list" },
+        sourceHints: { source: "screen-wechat-list" },
         isInteractive: true
       }
     ],
@@ -3408,7 +3408,7 @@ test("wechat desktop pack skips noisy group threads and prefers reply-worthy dir
       metadata: {},
       createdAt: new Date().toISOString()
     },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [],
     visibleText: "WeChat\n硅谷 AI+ 和 TA 的朋友们 (499)\nTan",
     recentActions: [],
@@ -3528,7 +3528,7 @@ test("wechat desktop pack can scroll the conversation list to find unread thread
       ]
     },
     capture: { path: "/tmp/wechat-scroll-initial.png" },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [],
     visibleText: "WeChat\n清华互助群\nOfficial Accounts",
     recentActions: [],
@@ -3690,7 +3690,7 @@ test("wechat desktop pack clamps vision unread click targets back into the left 
       metadata: {},
       createdAt: new Date().toISOString()
     },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [],
     visibleText: "WeChat\nTan",
     recentActions: [],
@@ -3796,7 +3796,7 @@ test("wechat desktop pack prefers target-specific vision grounding for the click
       metadata: {},
       createdAt: new Date().toISOString()
     },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [],
     visibleText: "WeChat\nTan",
     recentActions: [],
@@ -3922,7 +3922,7 @@ test("wechat desktop pack maps vision click targets into on-screen window coordi
       metadata: { windowNumber: 88 },
       createdAt: new Date().toISOString()
     },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [],
     visibleText: "WeChat\nTan",
     recentActions: [],
@@ -4045,7 +4045,7 @@ test("wechat desktop pack normalizes pixel-based thread grounding output from vi
       metadata: { windowNumber: 88 },
       createdAt: new Date().toISOString()
     },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [],
     visibleText: "WeChat\n徐畅",
     recentActions: [],
@@ -4172,7 +4172,7 @@ test("wechat desktop pack falls back to the first-pass unread row point when thr
       metadata: {},
       createdAt: new Date().toISOString()
     },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [],
     visibleText: "WeChat\n徐畅",
     recentActions: [],
@@ -4282,7 +4282,7 @@ test("wechat desktop vision analysis can ignore timestamps and URL snippets in t
   });
   const pack = registry.get("wechat-desktop");
   const rule: WatchRule = {
-    id: "watch-wechat-desktop-ocr-ranking",
+    id: "watch-wechat-desktop-screen-ranking",
     goal: "Always watch WeChat and reply to unread conversations",
     enabled: true,
     status: "watching",
@@ -4302,7 +4302,7 @@ test("wechat desktop vision analysis can ignore timestamps and URL snippets in t
     updatedAt: new Date().toISOString()
   };
   const workspace: WorkspaceProfile = {
-    id: "profile-wechat-ocr-ranking",
+    id: "profile-wechat-screen-ranking",
     name: "wechat-desktop-main",
     rootPath: "/tmp/wechat-desktop-main",
     profilePath: "/tmp/wechat-desktop-main/profile",
@@ -4316,7 +4316,7 @@ test("wechat desktop vision analysis can ignore timestamps and URL snippets in t
   const worldState = {
     version: 1,
     surface: "desktop",
-    workspaceId: "workspace-wechat-ocr-ranking",
+    workspaceId: "workspace-wechat-screen-ranking",
     appContext: {
       appName: "WeChat",
       captureWindowNumber: 7,
@@ -4331,56 +4331,56 @@ test("wechat desktop vision analysis can ignore timestamps and URL snippets in t
       accessibilityCandidateCount: 0
     },
     capture: { path: "/tmp/wechat-vision-ranking.png" },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [
       {
-        id: "ocr-badge-official-accounts",
+        id: "screen-badge-official-accounts",
         surface: "desktop",
         kind: "text",
         text: "2",
         role: "text",
         bounds: { x: 80, y: 120, width: 18, height: 18, centerX: 89, centerY: 129 },
         confidence: 0.95,
-        sourceHints: { source: "ocr" },
+        sourceHints: { source: "screen" },
         isInteractive: true
       },
       {
-        id: "ocr-thread-official-accounts",
+        id: "screen-thread-official-accounts",
         surface: "desktop",
         kind: "text",
         text: "Official Accounts",
         role: "text",
         bounds: { x: 120, y: 120, width: 180, height: 28, centerX: 210, centerY: 134 },
         confidence: 0.95,
-        sourceHints: { source: "ocr" },
+        sourceHints: { source: "screen" },
         isInteractive: true
       },
       {
-        id: "ocr-date",
+        id: "screen-date",
         surface: "desktop",
         kind: "text",
         text: "03/11",
         role: "text",
         bounds: { x: 360, y: 120, width: 60, height: 24, centerX: 390, centerY: 132 },
         confidence: 0.98,
-        sourceHints: { source: "ocr" },
+        sourceHints: { source: "screen" },
         isInteractive: true
       },
       {
-        id: "ocr-url",
+        id: "screen-url",
         surface: "desktop",
         kind: "text",
         text: "https://apps.apple.co..",
         role: "text",
         bounds: { x: 140, y: 160, width: 240, height: 24, centerX: 260, centerY: 172 },
         confidence: 0.95,
-        sourceHints: { source: "ocr" },
+        sourceHints: { source: "screen" },
         isInteractive: true
       }
     ],
     visibleText: "未读\nOfficial Accounts\n03/11\nhttps://apps.apple.co..\n",
     recentActions: [],
-    summary: "WeChat OCR capture",
+    summary: "WeChat screen text capture",
     timestamp: new Date().toISOString()
   };
 
@@ -4426,7 +4426,7 @@ test("wechat desktop vision analysis does not confuse body text for unread conve
   });
   const pack = registry.get("wechat-desktop");
   const rule: WatchRule = {
-    id: "watch-wechat-desktop-ocr-region-ranking",
+    id: "watch-wechat-desktop-screen-region-ranking",
     goal: "Always watch WeChat and reply to unread conversations",
     enabled: true,
     status: "watching",
@@ -4446,7 +4446,7 @@ test("wechat desktop vision analysis does not confuse body text for unread conve
     updatedAt: new Date().toISOString()
   };
   const workspace: WorkspaceProfile = {
-    id: "profile-wechat-ocr-region-ranking",
+    id: "profile-wechat-screen-region-ranking",
     name: "wechat-desktop-main",
     rootPath: "/tmp/wechat-desktop-main",
     profilePath: "/tmp/wechat-desktop-main/profile",
@@ -4460,7 +4460,7 @@ test("wechat desktop vision analysis does not confuse body text for unread conve
   const worldState = {
     version: 1,
     surface: "desktop",
-    workspaceId: "workspace-wechat-ocr-region-ranking",
+    workspaceId: "workspace-wechat-screen-region-ranking",
     appContext: {
       appName: "WeChat",
       captureWindowNumber: 11,
@@ -4475,45 +4475,45 @@ test("wechat desktop vision analysis does not confuse body text for unread conve
       accessibilityCandidateCount: 0
     },
     capture: { path: "/tmp/wechat-vision-region-ranking.png" },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [
       {
-        id: "ocr-badge-official-accounts",
+        id: "screen-badge-official-accounts",
         surface: "desktop",
         kind: "text",
         text: "1",
         role: "text",
         bounds: { x: 150, y: 140, width: 18, height: 18, centerX: 159, centerY: 149 },
         confidence: 0.95,
-        sourceHints: { source: "ocr" },
+        sourceHints: { source: "screen" },
         isInteractive: true
       },
       {
-        id: "ocr-thread-official-accounts",
+        id: "screen-thread-official-accounts",
         surface: "desktop",
         kind: "text",
         text: "Official Accounts",
         role: "text",
         bounds: { x: 210, y: 140, width: 180, height: 28, centerX: 210, centerY: 140 },
         confidence: 0.95,
-        sourceHints: { source: "ocr-wechat-list" },
+        sourceHints: { source: "screen-wechat-list" },
         isInteractive: true
       },
       {
-        id: "ocr-compose-input",
+        id: "screen-compose-input",
         surface: "desktop",
         kind: "text",
         text: "输入",
         role: "text",
         bounds: { x: 560, y: 610, width: 100, height: 30, centerX: 560, centerY: 610 },
         confidence: 0.93,
-        sourceHints: { source: "ocr-wechat-compose" },
+        sourceHints: { source: "screen-wechat-compose" },
         isInteractive: true
       }
     ],
     visibleText: "未读\nOfficial Accounts\n输入\n",
     recentActions: [],
-    summary: "WeChat OCR capture",
+    summary: "WeChat screen text capture",
     timestamp: new Date().toISOString()
   };
 
@@ -4568,7 +4568,7 @@ test("wechat desktop pack returns null when vision sees no visible unread conver
       accessibilityCandidateCount: 0
     },
     capture: null,
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [],
     visibleText: "微信\n最近聊天\n文件传输助手\n工作群\n",
     recentActions: [],
@@ -4669,7 +4669,7 @@ test("wechat desktop pack ignores standalone badge numbers as unread thread name
       metadata: {},
       createdAt: new Date().toISOString()
     },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [],
     visibleText: "WeChat\n33\nL",
     recentActions: [],
@@ -4811,7 +4811,7 @@ test("wechat desktop pack ignores detections when WeChat is not the foreground a
         windows: [{ title: "Terminal" }]
       },
       capture: null,
-      ocrBlocks: [],
+      screenTextBlocks: [],
       interactionCandidates: [
         {
           id: "thread-zhangsan",
@@ -4860,7 +4860,7 @@ test("wechat desktop pack can continue observing even when accessibility candida
           windows: [{ title: "WeChat" }]
         },
         capture: null,
-        ocrBlocks: [],
+        screenTextBlocks: [],
         interactionCandidates: [],
         visibleText: "微信",
         recentActions: [],
@@ -4944,7 +4944,7 @@ test("wechat desktop pack derives the default app target when a saved rule omits
           accessibilityCandidateCount: 0
         },
         capture: null,
-        ocrBlocks: [],
+        screenTextBlocks: [],
         interactionCandidates: [],
         visibleText: "微信",
         recentActions: [],
@@ -5017,7 +5017,7 @@ test("outlook desktop pack can detect unread mail and build reply steps from a d
       windows: [{ title: "Inbox - Microsoft Outlook" }]
     },
     capture: null,
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [
       {
         id: "thread-project-update",
@@ -5204,7 +5204,7 @@ test("outlook desktop analysis does not treat a generic reading-pane textbox as 
       windows: [{ title: "Inbox - Microsoft Outlook" }]
     },
     capture: null,
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [
       {
         id: "thread-project-update-open",
@@ -5265,7 +5265,7 @@ test("outlook desktop analysis can synthesize a compose candidate from visible c
       ]
     },
     capture: null,
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [],
     visibleText: "Outlook\nSend\nFrom:\nTo:\nSubject:\nRe: credibility guide for Tan",
     recentActions: [],
@@ -5298,7 +5298,7 @@ test("outlook desktop pack does not discard a visible unread row just because th
       ]
     },
     capture: { path: capturePath },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [],
     visibleText: "Outlook\nInbox\nNP\nBug 报告: 创建汇报总账...",
     recentActions: [],
@@ -5436,7 +5436,7 @@ test("outlook desktop visual analysis prefers the currently open thread title ov
       ]
     },
     capture: { path: capturePath },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [],
     visibleText: "Outlook\nSubject:\nRe: credibility guide for Tan",
     recentActions: [],
@@ -5545,7 +5545,7 @@ test("outlook desktop pack ignores detections when Outlook is not the foreground
         windows: [{ title: "Terminal" }]
       },
       capture: null,
-      ocrBlocks: [],
+      screenTextBlocks: [],
       interactionCandidates: [
         {
           id: "thread-project-update",
@@ -5573,13 +5573,13 @@ test("outlook desktop pack ignores detections when Outlook is not the foreground
   assert.equal(detection, null);
 });
 
-test("outlook desktop pack ignores OCR-only detections when no accessibility candidates are available", async () => {
+test("outlook desktop pack ignores screen text-only detections when no accessibility candidates are available", async () => {
   const registry = new LivePackRegistry({
     surfaceRegistry: new SurfaceRegistry({})
   });
   const pack = registry.get("outlook-desktop");
   const rule: WatchRule = {
-    id: "watch-outlook-ocr-only",
+    id: "watch-outlook-screen-only",
     goal: "Always watch Outlook and prefill replies for unread mail",
     enabled: true,
     status: "watching",
@@ -5599,7 +5599,7 @@ test("outlook desktop pack ignores OCR-only detections when no accessibility can
     updatedAt: new Date().toISOString()
   };
   const workspace: WorkspaceProfile = {
-    id: "profile-outlook-ocr-only",
+    id: "profile-outlook-screen-only",
     name: "outlook-desktop-main",
     rootPath: "/tmp/outlook-desktop-main",
     profilePath: "/tmp/outlook-desktop-main/profile",
@@ -5616,29 +5616,29 @@ test("outlook desktop pack ignores OCR-only detections when no accessibility can
     worldState: {
       version: 1,
       surface: "desktop",
-      workspaceId: "workspace-outlook-ocr-only",
+      workspaceId: "workspace-outlook-screen-only",
       appContext: {
         appName: "Microsoft Outlook",
         windows: [{ title: "Inbox - Microsoft Outlook" }]
       },
       capture: null,
-      ocrBlocks: [],
+      screenTextBlocks: [],
       interactionCandidates: [
         {
-          id: "ocr-thread",
+          id: "screen-thread",
           surface: "desktop",
           kind: "text",
           text: "Project update",
           role: "row",
           bounds: { x: 10, y: 10, width: 220, height: 28, centerX: 120, centerY: 24 },
           confidence: 0.84,
-          sourceHints: { source: "ocr" },
+          sourceHints: { source: "screen" },
           isInteractive: true
         }
       ],
       visibleText: "Outlook\nProject update",
       recentActions: [],
-      summary: "Microsoft Outlook with 0 accessibility candidates and 1 OCR observations",
+      summary: "Microsoft Outlook with 0 accessibility candidates and 1 screen text observations",
       timestamp: new Date().toISOString()
     } as never,
     dedupeState: {},
@@ -5661,7 +5661,7 @@ test("outlook desktop pack skips reply context extraction when composer is missi
       windows: [{ title: "Inbox - Microsoft Outlook" }]
     },
     capture: null,
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [
       {
         id: "thread-project-update",
@@ -5781,7 +5781,7 @@ test("outlook desktop pack does not use a keyboard shortcut fallback when reply 
       windows: [{ title: "Inbox - Microsoft Outlook" }]
     },
     capture: null,
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [
       {
         id: "thread-project-update",
@@ -5921,7 +5921,7 @@ test("outlook desktop pack can use visual model analysis to build a prefill task
       metadata: {},
       createdAt: new Date().toISOString()
     },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [],
     visibleText: "Outlook\nInbox\nUnread\nAlice - Need your review",
     recentActions: [],
@@ -6031,7 +6031,7 @@ test("outlook desktop pack waits for a reply button click to reveal the composer
       windows: [{ title: "Inbox - Microsoft Outlook" }]
     },
     capture: null,
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [
       {
         id: "thread-project-update",
@@ -6206,7 +6206,7 @@ test("outlook desktop pack retries the reply button when the composer is not vis
       windows: [{ title: "Inbox - Microsoft Outlook" }]
     },
     capture: null,
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [
       {
         id: "thread-project-update",
@@ -6393,7 +6393,7 @@ test("outlook desktop pack can visually ground a reply control when AX reply con
       metadata: {},
       createdAt: new Date().toISOString()
     },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [
       {
         id: "thread-project-update",
@@ -6624,7 +6624,7 @@ test("outlook desktop pack refuses to reuse a visible composer that already cont
       metadata: {},
       createdAt: new Date().toISOString()
     },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [],
     visibleText: "Outlook\nRe: Project update\nExisting draft reply",
     recentActions: [],
@@ -6770,15 +6770,15 @@ test("outlook desktop pack does not mistake a quoted original message for author
       metadata: {},
       createdAt: new Date().toISOString()
     },
-    ocrBlocks: [
+    screenTextBlocks: [
       {
-        id: "ocr-quoted-marker",
+        id: "screen-quoted-marker",
         text: "On 1/22/26, 17:35, Lazaro Waters wrote:",
         confidence: 0.92,
         bounds: { x: 550, y: 320, width: 420, height: 28, centerX: 760, centerY: 334 }
       },
       {
-        id: "ocr-quoted-body",
+        id: "screen-quoted-body",
         text: "Should i share info?",
         confidence: 0.9,
         bounds: { x: 560, y: 360, width: 220, height: 24, centerX: 670, centerY: 372 }
@@ -7006,7 +7006,7 @@ test("outlook desktop pack can use model-backed semantic facts from a visible un
         path: "/tmp/outlook-semantic-detect.png",
         metadata: {}
       },
-      ocrBlocks: [],
+      screenTextBlocks: [],
       interactionCandidates: [
         {
           id: "outlook-row",
@@ -7157,7 +7157,7 @@ test("outlook desktop pack does not retry opening a newly selected thread just b
       windows: [{ title: "Inbox - Microsoft Outlook" }]
     },
     capture: null,
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [
       {
         id: "outlook-row-lazaro",
@@ -7421,7 +7421,7 @@ test("outlook desktop pack keeps retry target queries pinned to the sender row i
       windows: [{ title: "Inbox - Microsoft Outlook" }]
     },
     capture: null,
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [],
     visibleText: "Outlook\nInbox\nUnread\nLazaro Waters\nextend run...",
     recentActions: [],
@@ -7576,7 +7576,7 @@ test("outlook desktop pack does not reopen the message list when a transient vis
       windows: [{ title: "Inbox - Microsoft Outlook" }]
     },
     capture: null,
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [],
     visibleText: "Outlook\nInbox\nUnread\nnew PIO",
     recentActions: [],
@@ -7785,7 +7785,7 @@ test("outlook desktop pack does not reopen the message list when a transient vis
   await fs.unlink(composeCapturePath).catch(() => {});
 });
 
-test("outlook desktop pack does not fall back to OCR candidates when vision finds no reply-worthy threads", async () => {
+test("outlook desktop pack does not fall back to screen text candidates when vision finds no reply-worthy threads", async () => {
   const worldState = {
     version: 1,
     surface: "desktop",
@@ -7810,17 +7810,17 @@ test("outlook desktop pack does not fall back to OCR candidates when vision find
       metadata: {},
       createdAt: new Date().toISOString()
     },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [
       {
-        id: "ocr-mail-row",
+        id: "screen-mail-row",
         surface: "desktop",
         kind: "text",
         text: "TurboTax",
         role: "row",
         bounds: { x: 240, y: 220, width: 280, height: 40, centerX: 380, centerY: 240 },
         confidence: 0.91,
-        sourceHints: { source: "ocr", unread: true },
+        sourceHints: { source: "screen", unread: true },
         isInteractive: true
       }
     ],
@@ -7932,7 +7932,7 @@ test("outlook desktop pack fails closed when desktop scan drifts away from Outlo
       metadata: {},
       createdAt: new Date().toISOString()
     },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [],
     visibleText: "Outlook\nInbox\nNo unread reply rows on the first screen",
     recentActions: [],
@@ -8057,7 +8057,7 @@ test("outlook desktop pack does not fall back to Cmd+R when composer grounding f
       metadata: {},
       createdAt: new Date().toISOString()
     },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [
       {
         id: "mail-row",
@@ -8179,7 +8179,7 @@ test("outlook desktop pack can use Cmd+R after the thread is visually confirmed 
       ]
     },
     capture: null,
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [],
     visibleText: "Outlook\nUnread\n李伟",
     recentActions: [],
@@ -8397,7 +8397,7 @@ test("outlook desktop pack can use Cmd+R when the opened thread matches the unre
       ]
     },
     capture: null,
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [],
     visibleText: "Outlook\nUnread\nRaghav Bansal\nFor Payinone",
     recentActions: [],
@@ -8620,7 +8620,7 @@ test("outlook desktop pack waits for a delayed composer after Cmd+R and uses the
       ]
     },
     capture: null,
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [],
     visibleText: "Outlook\nUnread\nJin Wang",
     recentActions: [],
@@ -8851,7 +8851,7 @@ test("outlook desktop pack treats a truncated subject cue as an already opened t
       metadata: {},
       createdAt: new Date().toISOString()
     },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [],
     visibleText: "Outlook\nRe: credibility guide for Tan\nCan I send it over?",
     recentActions: [],
@@ -9068,7 +9068,7 @@ test("outlook desktop pack treats a target unread row disappearing after selecti
               metadata: {},
               createdAt: new Date().toISOString()
             },
-            ocrBlocks: [],
+            screenTextBlocks: [],
             interactionCandidates: [],
             visibleText: "Outlook\nRe: For Payinone\nInline reply editor\nSend",
             recentActions: [],
@@ -9099,7 +9099,7 @@ test("outlook desktop pack treats a target unread row disappearing after selecti
               metadata: {},
               createdAt: new Date().toISOString()
             },
-            ocrBlocks: [],
+            screenTextBlocks: [],
             interactionCandidates: [],
             visibleText: threadOpened
               ? "Outlook\nRe: For Payinone\nCurrent thread"
@@ -9175,7 +9175,7 @@ test("outlook desktop pack treats a target unread row disappearing after selecti
         ]
       },
       capture: null,
-      ocrBlocks: [],
+      screenTextBlocks: [],
       interactionCandidates: [],
       visibleText: "Outlook\nUnread\nzhangbei",
       recentActions: [],
@@ -9323,7 +9323,7 @@ test("outlook desktop pack treats a selected row that starts with the target sen
       ]
     },
     capture: null,
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [],
     visibleText: "Outlook\nUnread\n杜军奋",
     recentActions: [],
@@ -9553,7 +9553,7 @@ test("outlook desktop pack falls back to a body-safe composer point when the vis
       metadata: {},
       createdAt: new Date().toISOString()
     },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [],
     visibleText: "Outlook\nRe: Project update\nSend",
     recentActions: [],
@@ -9706,7 +9706,7 @@ test("outlook desktop pack recovers to a visible inbox row before scanning for u
       ]
     },
     capture: { path: "/tmp/outlook-archive.png" },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [],
     visibleText: "Outlook\nArchive\nInbox 4\nGemini Hsieh",
     recentActions: [],
@@ -9862,7 +9862,7 @@ test("outlook desktop pack can recover an empty focused list via load more conve
       ]
     },
     capture: { path: "/tmp/outlook-empty-focused.png" },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [],
     visibleText: "Outlook\nInbox\nFocused\nOther\nLoad more conversations",
     recentActions: [],
@@ -10012,7 +10012,7 @@ test("outlook desktop pack prefers a visible Inbox row over load more when the c
       ]
     },
     capture: { path: "/tmp/outlook-sent-load-more.png" },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [
       {
         id: "folder-inbox-priority",
@@ -10022,7 +10022,7 @@ test("outlook desktop pack prefers a visible Inbox row over load more when the c
         role: "button",
         bounds: { x: 180, y: 260, width: 120, height: 28, centerX: 240, centerY: 274 },
         confidence: 0.9,
-        sourceHints: { source: "ocr" },
+        sourceHints: { source: "screen" },
         isInteractive: true
       }
     ],
@@ -10190,7 +10190,7 @@ test("outlook desktop pack offsets a visible Inbox recovery row into screen coor
       ]
     },
     capture: { path: capturePath },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [
       {
         id: "folder-inbox-offset",
@@ -10200,7 +10200,7 @@ test("outlook desktop pack offsets a visible Inbox recovery row into screen coor
         role: "button",
         bounds: { x: 180, y: 260, width: 120, height: 28, centerX: 240, centerY: 274 },
         confidence: 0.9,
-        sourceHints: { source: "ocr" },
+        sourceHints: { source: "screen" },
         isInteractive: true
       }
     ],
@@ -10372,7 +10372,7 @@ test("outlook desktop pack maps recovery controls against the captured main wind
       ]
     },
     capture: { path: capturePath },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [],
     visibleText: "Outlook\nSent\nInbox\nDrafts\nLoad more conversations",
     recentActions: [],
@@ -10565,7 +10565,7 @@ test("outlook desktop pack can ground a recovery control when the initial scene 
       ]
     },
     capture: { path: "/tmp/outlook-ground-recovery.png" },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [],
     visibleText: "Outlook\nInbox\nFocused\nOther\nLoad more conversations",
     recentActions: [],
@@ -10738,7 +10738,7 @@ test("outlook desktop pack dismisses a blocking modal before recovering to the i
       ]
     },
     capture: { path: modalCapturePath },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [],
     visibleText: "Outlook\nSent\nCancel\nInbox\nFocused",
     recentActions: [],
@@ -10971,7 +10971,7 @@ test("outlook desktop pack prefers a dedicated modal capture when grounding the 
       ]
     },
     capture: { path: mainCapturePath },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [],
     visibleText: "Outlook\nSent\nCancel\nInbox\nFocused",
     recentActions: [],
@@ -11204,7 +11204,7 @@ test("outlook desktop pack falls back to main-window grounding when a modal capt
       ]
     },
     capture: { path: mainCapturePath },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [],
     visibleText: "Outlook\nSent\nCancel\nInbox\nFocused",
     recentActions: [],
@@ -11417,7 +11417,7 @@ test("outlook desktop pack can fall back to a visible Inbox row when recovery gr
       ]
     },
     capture: { path: "/tmp/outlook-folder-recovery.png" },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [
       {
         id: "folder-deleted",
@@ -11427,7 +11427,7 @@ test("outlook desktop pack can fall back to a visible Inbox row when recovery gr
         role: "button",
         bounds: { x: 180, y: 210, width: 180, height: 28, centerX: 270, centerY: 224 },
         confidence: 0.9,
-        sourceHints: { source: "ocr" },
+        sourceHints: { source: "screen" },
         isInteractive: true
       },
       {
@@ -11438,7 +11438,7 @@ test("outlook desktop pack can fall back to a visible Inbox row when recovery gr
         role: "button",
         bounds: { x: 180, y: 640, width: 120, height: 28, centerX: 240, centerY: 654 },
         confidence: 0.9,
-        sourceHints: { source: "ocr" },
+        sourceHints: { source: "screen" },
         isInteractive: true
       }
     ],
@@ -11582,14 +11582,14 @@ test("outlook desktop pack can fall back to a visible Inbox row when recovery gr
   assert.deepEqual(recoveryClicks[0], { x: 240, y: 654 });
 });
 
-test("outlook desktop pack can fall back to an OCR Inbox row when recovery grounding returns no box", async () => {
+test("outlook desktop pack can fall back to an screen text Inbox row when recovery grounding returns no box", async () => {
   let recovered = false;
   const recoveryClicks: Array<{ x: number; y: number }> = [];
-  await fs.writeFile("/tmp/outlook-folder-recovery-ocr.png", createPngHeaderBuffer(3024, 1740));
+  await fs.writeFile("/tmp/outlook-folder-recovery-screen.png", createPngHeaderBuffer(3024, 1740));
   const folderWorldState = {
     version: 1,
     surface: "desktop",
-    workspaceId: "workspace-outlook-inbox-recovery-ocr",
+    workspaceId: "workspace-outlook-inbox-recovery-screen",
     appContext: {
       appName: "Microsoft Outlook",
       captureWindowNumber: 101,
@@ -11602,32 +11602,32 @@ test("outlook desktop pack can fall back to an OCR Inbox row when recovery groun
         }
       ]
     },
-    capture: { path: "/tmp/outlook-folder-recovery-ocr.png" },
-    ocrBlocks: [
+    capture: { path: "/tmp/outlook-folder-recovery-screen.png" },
+    screenTextBlocks: [
       {
-        id: "ocr-deleted-items",
+        id: "screen-deleted-items",
         text: "Deleted Items",
         bounds: { x: 250, y: 206, width: 158, height: 22, centerX: 329, centerY: 217 },
         confidence: 0.9,
-        source: "ocr"
+        source: "screen"
       },
       {
-        id: "ocr-inbox",
+        id: "screen-inbox",
         text: "Inbox",
         bounds: { x: 237, y: 641, width: 79, height: 22, centerX: 276.5, centerY: 652 },
         confidence: 0.94,
-        source: "ocr"
+        source: "screen"
       }
     ],
     interactionCandidates: [],
     visibleText: "Outlook\nDeleted Items\nJunk Email\ntan@xgenie.co\nInbox\nDrafts\nSent",
     recentActions: [],
-    summary: "Outlook showing a non-Inbox folder while Inbox is visible via OCR",
+    summary: "Outlook showing a non-Inbox folder while Inbox is visible via screen text",
     timestamp: new Date().toISOString()
   };
   const loadedWorldState = {
     ...folderWorldState,
-    capture: { path: "/tmp/outlook-folder-recovery-ocr-loaded.png" },
+    capture: { path: "/tmp/outlook-folder-recovery-screen-loaded.png" },
     visibleText: "Outlook\nInbox\nUnread\nGemini Hsieh\nRegulations",
     summary: "Outlook inbox with unread row"
   };
@@ -11653,7 +11653,7 @@ test("outlook desktop pack can fall back to an OCR Inbox row when recovery groun
   });
   const pack = registry.get("outlook-desktop");
   const rule: WatchRule = {
-    id: "watch-outlook-inbox-recovery-ocr",
+    id: "watch-outlook-inbox-recovery-screen",
     goal: "Always watch Outlook and prefill replies",
     enabled: true,
     status: "watching",
@@ -11673,7 +11673,7 @@ test("outlook desktop pack can fall back to an OCR Inbox row when recovery groun
     updatedAt: new Date().toISOString()
   };
   const workspace: WorkspaceProfile = {
-    id: "profile-outlook-inbox-recovery-ocr",
+    id: "profile-outlook-inbox-recovery-screen",
     name: "outlook-desktop-main",
     rootPath: "/tmp/outlook-desktop-main",
     profilePath: "/tmp/outlook-desktop-main/profile",
@@ -11778,7 +11778,7 @@ test("outlook desktop pack retries Inbox recovery when the first click leaves th
       ]
     },
     capture: { path: "/tmp/outlook-folder-recovery-retry.png" },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [
       {
         id: "folder-deleted",
@@ -11788,7 +11788,7 @@ test("outlook desktop pack retries Inbox recovery when the first click leaves th
         role: "button",
         bounds: { x: 180, y: 210, width: 180, height: 28, centerX: 270, centerY: 224 },
         confidence: 0.9,
-        sourceHints: { source: "ocr" },
+        sourceHints: { source: "screen" },
         isInteractive: true
       },
       {
@@ -11799,7 +11799,7 @@ test("outlook desktop pack retries Inbox recovery when the first click leaves th
         role: "button",
         bounds: { x: 180, y: 640, width: 120, height: 28, centerX: 240, centerY: 654 },
         confidence: 0.9,
-        sourceHints: { source: "ocr" },
+        sourceHints: { source: "screen" },
         isInteractive: true
       }
     ],
@@ -11957,13 +11957,13 @@ test("outlook desktop pack can recover to Inbox when vision times out but an Inb
       ]
     },
     capture: { path: "/tmp/outlook-inbox-vision-timeout-sidebar.png" },
-    ocrBlocks: [
+    screenTextBlocks: [
       {
-        id: "ocr-inbox",
+        id: "screen-inbox",
         text: "Inbox",
         bounds: { x: 246, y: 507, width: 75, height: 22, centerX: 283.5, centerY: 518 },
         confidence: 0.94,
-        source: "ocr"
+        source: "screen"
       }
     ],
     interactionCandidates: [],
@@ -12111,7 +12111,7 @@ test("outlook desktop pack prefers target-specific vision grounding for the clic
       metadata: {},
       createdAt: new Date().toISOString()
     },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [],
     visibleText: "Outlook\nCurrent thread\n严珊珊",
     recentActions: [],
@@ -12241,7 +12241,7 @@ test("outlook desktop pack falls back to the original unread row when target gro
       metadata: {},
       createdAt: new Date().toISOString()
     },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [],
     visibleText: "Outlook\nJin Wang\n系统优化需求: 审批详...\nJin Wang\nBug 报告: 需...",
     recentActions: [],
@@ -12364,7 +12364,7 @@ test("boss browser pack can extract candidate thread context and build approval-
         }
       }
     },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [
       {
         id: "boss-candidate",
@@ -12398,7 +12398,7 @@ test("boss browser pack can extract candidate thread context and build approval-
         role: "textbox",
         bounds: { x: 20, y: 18, width: 320, height: 28, centerX: 180, centerY: 32 },
         confidence: 0.95,
-        sourceHints: { source: "ocr" },
+        sourceHints: { source: "screen" },
         isInteractive: true
       },
       {
@@ -12544,7 +12544,7 @@ test("boss browser extractContext skips placeholder waits when vision grounds th
         }
       }
     },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [
       {
         id: "boss-candidate",
@@ -12707,7 +12707,7 @@ test("boss browser extractContext derives compose fallback bounds from a visible
         }
       }
     },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [
       {
         id: "boss-candidate",
@@ -12717,7 +12717,7 @@ test("boss browser extractContext derives compose fallback bounds from a visible
         role: "text",
         bounds: { x: 210, y: 200, width: 120, height: 32, centerX: 270, centerY: 216 },
         confidence: 0.9,
-        sourceHints: { source: "ocr-boss-list-names" },
+        sourceHints: { source: "screen-boss-list-names" },
         isInteractive: true
       }
     ],
@@ -12741,7 +12741,7 @@ test("boss browser extractContext derives compose fallback bounds from a visible
         role: "text",
         bounds: { x: 760, y: 140, width: 60, height: 24, centerX: 790, centerY: 152 },
         confidence: 0.95,
-        sourceHints: { source: "ocr-boss-thread" },
+        sourceHints: { source: "screen-boss-thread" },
         isInteractive: true
       },
       {
@@ -12752,7 +12752,7 @@ test("boss browser extractContext derives compose fallback bounds from a visible
         role: "text",
         bounds: { x: 780, y: 520, width: 260, height: 32, centerX: 910, centerY: 536 },
         confidence: 0.94,
-        sourceHints: { source: "ocr-boss-thread" },
+        sourceHints: { source: "screen-boss-thread" },
         isInteractive: true
       }
     ],
@@ -12866,7 +12866,7 @@ test("boss browser extractContext keeps the open step when the visible thread do
         }
       }
     },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [
       {
         id: "boss-candidate-yang",
@@ -12876,7 +12876,7 @@ test("boss browser extractContext keeps the open step when the visible thread do
         role: "text",
         bounds: { x: 210, y: 200, width: 120, height: 32, centerX: 270, centerY: 216 },
         confidence: 0.9,
-        sourceHints: { source: "ocr-boss-list-names" },
+        sourceHints: { source: "screen-boss-list-names" },
         isInteractive: true
       }
     ],
@@ -12900,7 +12900,7 @@ test("boss browser extractContext keeps the open step when the visible thread do
         role: "text",
         bounds: { x: 760, y: 140, width: 60, height: 24, centerX: 790, centerY: 152 },
         confidence: 0.95,
-        sourceHints: { source: "ocr-boss-thread" },
+        sourceHints: { source: "screen-boss-thread" },
         isInteractive: true
       }
     ],
@@ -12982,7 +12982,7 @@ test("boss browser extractContext keeps the open step when the visible thread do
   assert.equal(context?.taskSpec?.steps?.[1]?.action, "waitForTarget");
 });
 
-test("boss browser extractContext keeps the open step when thread OCR is low quality", async () => {
+test("boss browser extractContext keeps the open step when thread screen text is low quality", async () => {
   const initialWorldState = {
     version: 1,
     surface: "browser",
@@ -13004,7 +13004,7 @@ test("boss browser extractContext keeps the open step when thread OCR is low qua
         }
       }
     },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [
       {
         id: "boss-candidate-zhuang",
@@ -13014,7 +13014,7 @@ test("boss browser extractContext keeps the open step when thread OCR is low qua
         role: "text",
         bounds: { x: 210, y: 200, width: 180, height: 32, centerX: 300, centerY: 216 },
         confidence: 0.9,
-        sourceHints: { source: "ocr-boss-list-names" },
+        sourceHints: { source: "screen-boss-list-names" },
         isInteractive: true
       }
     ],
@@ -13038,7 +13038,7 @@ test("boss browser extractContext keeps the open step when thread OCR is low qua
         role: "text",
         bounds: { x: 760, y: 140, width: 60, height: 24, centerX: 790, centerY: 152 },
         confidence: 0.95,
-        sourceHints: { source: "ocr-boss-thread" },
+        sourceHints: { source: "screen-boss-thread" },
         isInteractive: true
       },
       {
@@ -13164,7 +13164,7 @@ test("boss browser extractContext preserves vision openCandidate bounds for quer
                 }
               }
             },
-            ocrBlocks: [],
+            screenTextBlocks: [],
             interactionCandidates: [],
             visibleText: "BOSS直聘\n杨安娜\n候选人: 你好，我对岗位很感兴趣。\n在线沟通",
             recentActions: [],
@@ -13246,7 +13246,7 @@ test("boss browser extractContext preserves vision openCandidate bounds for quer
   assert.equal(typeof (openCandidate?.bounds as { centerX?: unknown } | undefined)?.centerX, "number");
 });
 
-test("boss browser detectNewItems prefers OCR list bounds when vision finds the unread candidate name", async () => {
+test("boss browser detectNewItems prefers screen text list bounds when vision finds the unread candidate name", async () => {
   const registry = new LivePackRegistry({
     surfaceRegistry: new SurfaceRegistry({
       browser: {
@@ -13261,7 +13261,7 @@ test("boss browser detectNewItems prefers OCR list bounds when vision finds the 
   });
   const pack = registry.get("boss-browser");
   const rule: WatchRule = {
-    id: "watch-boss-browser-vision-ocr-open",
+    id: "watch-boss-browser-vision-screen-open",
     goal: "Always watch BOSS直聘 and reply to candidate messages",
     enabled: true,
     status: "watching",
@@ -13283,7 +13283,7 @@ test("boss browser detectNewItems prefers OCR list bounds when vision finds the 
     updatedAt: new Date().toISOString()
   };
   const workspace: WorkspaceProfile = {
-    id: "profile-boss-vision-ocr-open",
+    id: "profile-boss-vision-screen-open",
     name: "boss-browser-main",
     rootPath: "/tmp/boss-browser-main",
     profilePath: "/tmp/boss-browser-main/profile",
@@ -13297,13 +13297,13 @@ test("boss browser detectNewItems prefers OCR list bounds when vision finds the 
   const worldState = {
     version: 1,
     surface: "browser",
-    workspaceId: "workspace-boss-vision-ocr-open",
+    workspaceId: "workspace-boss-vision-screen-open",
     appContext: {
       title: "BOSS直聘",
       url: "https://www.zhipin.com/web/chat/index"
     },
     capture: {
-      path: "/tmp/boss-browser-main-vision-ocr-open.png",
+      path: "/tmp/boss-browser-main-vision-screen-open.png",
       metadata: {
         windowBounds: {
           x: 0,
@@ -13315,7 +13315,7 @@ test("boss browser detectNewItems prefers OCR list bounds when vision finds the 
         }
       }
     },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [
       {
         id: "boss-list-target",
@@ -13325,7 +13325,7 @@ test("boss browser detectNewItems prefers OCR list bounds when vision finds the 
         role: "text",
         bounds: { x: 220, y: 212, width: 180, height: 42, centerX: 310, centerY: 233 },
         confidence: 0.91,
-        sourceHints: { source: "ocr-boss-list-names" },
+        sourceHints: { source: "screen-boss-list-names" },
         isInteractive: true
       },
       {
@@ -13336,7 +13336,7 @@ test("boss browser detectNewItems prefers OCR list bounds when vision finds the 
         role: "text",
         bounds: { x: 220, y: 308, width: 180, height: 42, centerX: 310, centerY: 329 },
         confidence: 0.91,
-        sourceHints: { source: "ocr-boss-list-names" },
+        sourceHints: { source: "screen-boss-list-names" },
         isInteractive: true
       }
     ],
@@ -13391,7 +13391,7 @@ test("boss browser detectNewItems prefers OCR list bounds when vision finds the 
   assert.equal(detection?.summary, "王蕊 ai产品经理");
   assert.equal(Math.round(Number(openCandidate?.bounds?.centerX ?? 0)), 310);
   assert.equal(Math.round(Number(openCandidate?.bounds?.centerY ?? 0)), 233);
-  assert.equal(String(openCandidate?.sourceHints?.source ?? ""), "vision+ocr");
+  assert.equal(String(openCandidate?.sourceHints?.source ?? ""), "vision");
 });
 
 test("boss browser extractContext re-grounds the target row and opens it via clickAt in the main browser session", async () => {
@@ -13417,7 +13417,7 @@ test("boss browser extractContext re-grounds the target row and opens it via cli
         }
       }
     },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [],
     visibleText: "BOSS直聘\n杨安娜\n候选人: 你好，我对岗位很感兴趣。\nLeon\n候选人: 可以聊聊薪资吗？",
     recentActions: [],
@@ -13581,7 +13581,7 @@ test("boss browser extractContext dismisses the duplicate-login modal before gro
         }
       }
     },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [],
     visibleText: "BOSS直聘\n杨安娜\n候选人: 你好，我对岗位很感兴趣。",
     recentActions: [],
@@ -13758,7 +13758,7 @@ test("boss browser semantic facts can use model-backed unlabeled thread lines", 
         }
       }
     },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [
       {
         id: "boss-candidate-lazaro",
@@ -14333,7 +14333,7 @@ test("mail desktop pack can detect unread messages and build reply steps from a 
       windows: [{ title: "Inbox" }]
     },
     capture: null,
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [
       {
         id: "mail-thread",
@@ -14343,7 +14343,7 @@ test("mail desktop pack can detect unread messages and build reply steps from a 
         role: "text",
         bounds: { x: 10, y: 10, width: 180, height: 24, centerX: 100, centerY: 22 },
         confidence: 0.9,
-        sourceHints: { source: "ocr" },
+        sourceHints: { source: "screen" },
         isInteractive: true
       }
     ],
@@ -14363,7 +14363,7 @@ test("mail desktop pack can detect unread messages and build reply steps from a 
         role: "text",
         bounds: { x: 10, y: 10, width: 180, height: 24, centerX: 100, centerY: 22 },
         confidence: 0.9,
-        sourceHints: { source: "ocr" },
+        sourceHints: { source: "screen" },
         isInteractive: true
       },
       {
@@ -14374,7 +14374,7 @@ test("mail desktop pack can detect unread messages and build reply steps from a 
         role: "textbox",
         bounds: { x: 10, y: 210, width: 240, height: 32, centerX: 130, centerY: 226 },
         confidence: 0.84,
-        sourceHints: { source: "ocr", placeholder: "回复" },
+        sourceHints: { source: "screen", placeholder: "回复" },
         isInteractive: true
       },
       {
@@ -14385,7 +14385,7 @@ test("mail desktop pack can detect unread messages and build reply steps from a 
         role: "button",
         bounds: { x: 260, y: 210, width: 60, height: 32, centerX: 290, centerY: 226 },
         confidence: 0.84,
-        sourceHints: { source: "ocr" },
+        sourceHints: { source: "screen" },
         isInteractive: true
       }
     ],

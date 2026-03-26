@@ -157,7 +157,7 @@ function resolveDesktopNormalizedRegionBounds(
   };
 }
 
-function collectDesktopOcrLinesInRegion(
+function collectDesktopVisibleLinesInRegion(
   worldState: WorldState | null,
   appName: string,
   region: { x: number; y: number; width: number; height: number } | null | undefined
@@ -166,10 +166,10 @@ function collectDesktopOcrLinesInRegion(
   if (!bounds) {
     return [];
   }
-  return (Array.isArray(worldState?.ocrBlocks) ? worldState.ocrBlocks : [])
-    .filter((block) => {
-      const centerX = Number(block?.bounds?.centerX ?? NaN);
-      const centerY = Number(block?.bounds?.centerY ?? NaN);
+  return (Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [])
+    .filter((candidate) => {
+      const centerX = Number(candidate?.bounds?.centerX ?? NaN);
+      const centerY = Number(candidate?.bounds?.centerY ?? NaN);
       return (
         Number.isFinite(centerX)
         && Number.isFinite(centerY)
@@ -187,7 +187,7 @@ function collectDesktopOcrLinesInRegion(
       }
       return Number(left?.bounds?.centerX ?? 0) - Number(right?.bounds?.centerX ?? 0);
     })
-    .map((block) => String(block?.text ?? "").replace(/\s+/g, " ").trim())
+    .map((candidate) => String(candidate?.text ?? "").replace(/\s+/g, " ").trim())
     .filter(Boolean);
 }
 
@@ -216,7 +216,7 @@ export function reconcileOutlookVisualDraftState<T extends OutlookComposerStateL
     return vision;
   }
   const composeVerifyRegion = deriveOutlookComposerVerifyRegionFromVisual(vision.composer);
-  const composeLines = collectDesktopOcrLinesInRegion(worldState, "Microsoft Outlook", composeVerifyRegion);
+  const composeLines = collectDesktopVisibleLinesInRegion(worldState, "Microsoft Outlook", composeVerifyRegion);
   if (outlookComposerContainsAuthoredDraftText(composeLines)) {
     return vision;
   }

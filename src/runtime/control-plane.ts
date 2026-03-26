@@ -8,7 +8,6 @@ import { PolicyEngine } from "./policy-engine.js";
 import { OpenAICompatibleModelClient } from "./model-client.js";
 import { SurfaceRegistry } from "./surface-registry.js";
 import { BrowserSurfaceAdapter } from "./adapters/browser-surface.js";
-import { ChromeMainSessionSurfaceAdapter } from "./adapters/chrome-main-session-surface.js";
 import { DesktopSurfaceAdapter } from "./adapters/desktop-surface.js";
 import { SentinelAgent } from "./agents/sentinel.js";
 import { PlannerAgent } from "./agents/planner.js";
@@ -150,17 +149,14 @@ export class ControlPlane {
     this.licenseService = new LicenseService(config);
     this.groundingEngine = new GroundingEngine({ traceStore: this.traceStore });
     this.surfaceRegistry = new SurfaceRegistry({
-      browser:
-        config.browserMode === "main_chrome" && process.platform === "darwin"
-          ? new ChromeMainSessionSurfaceAdapter({
-              artifactStore: this.artifactStore,
-              dataDir: config.dataDir
-            })
-          : new BrowserSurfaceAdapter({
-              artifactStore: this.artifactStore,
-              browserExecutable: config.browserExecutable,
-              headless: config.headless
-            }),
+      browser: new BrowserSurfaceAdapter({
+        artifactStore: this.artifactStore,
+        browserMode: config.browserMode,
+        browserExecutable: config.browserExecutable,
+        browserCdpUrl: config.browserCdpUrl,
+        modelConfig: config.model,
+        headless: config.headless
+      }),
       desktop: new DesktopSurfaceAdapter({
         artifactStore: this.artifactStore,
         dataDir: config.dataDir,
@@ -171,8 +167,7 @@ export class ControlPlane {
     this.surfaceCoordinator = new SurfaceCoordinator({
       surfaceRegistry: this.surfaceRegistry,
       surfaceScheduler: this.surfaceScheduler,
-      eventBus: this.eventBus,
-      browserMode: config.browserMode
+      eventBus: this.eventBus
     });
     this.sentinel = new SentinelAgent();
     this.planner = new PlannerAgent({

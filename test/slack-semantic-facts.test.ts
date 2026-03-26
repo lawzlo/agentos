@@ -14,7 +14,7 @@ function buildSlackWorldState(visibleText: string): WorldState {
       windows: [{ title: "Slack" }]
     },
     capture: null,
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [],
     visibleText,
     recentActions: [],

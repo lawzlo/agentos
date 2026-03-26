@@ -35,9 +35,6 @@ test("collectSurfaceState reports a ready desktop conversation surface with cand
         windowCount: 1,
         accessibilityElementCount: 0,
         accessibilityCandidateCount: 0,
-        ocrBlockCount: 3,
-        ocrAvailable: true,
-        ocrError: null,
         capturePath: "/tmp/wechat-state.png",
         visibleTextPreview: ["微信", "Official Accounts", "输入"],
         topCandidates: [],
@@ -50,7 +47,7 @@ test("collectSurfaceState reports a ready desktop conversation surface with cand
             text: "Official Accounts",
             role: "text",
             interactive: true,
-            source: "ocr-wechat-list",
+            source: "screen-wechat-list",
             score: 31,
             hints: []
           },
@@ -59,7 +56,7 @@ test("collectSurfaceState reports a ready desktop conversation surface with cand
             text: "输入",
             role: "text",
             interactive: true,
-            source: "ocr-wechat-compose",
+            source: "screen-wechat-compose",
             score: 14,
             hints: []
           },
@@ -70,7 +67,7 @@ test("collectSurfaceState reports a ready desktop conversation surface with cand
               text: "Official Accounts",
               role: "text",
               interactive: true,
-              source: "ocr-wechat-list",
+              source: "screen-wechat-list",
               score: 31,
               hints: []
             }
@@ -120,7 +117,7 @@ test("collectSurfaceState maps browser sign-in pages into explicit blockers", as
             url: "https://app.slack.com/client"
           },
           capture: null,
-          ocrBlocks: [],
+          screenTextBlocks: [],
           interactionCandidates: [],
           visibleText: "Slack\nSign in to Slack\nContinue with Google",
           recentActions: [],
@@ -173,7 +170,7 @@ test("collectSurfaceState uses pack defaults to open browser workspaces and clas
             url: "https://app.slack.com/workspace-signin?redir=%2Fclient"
           },
           capture: null,
-          ocrBlocks: [],
+          screenTextBlocks: [],
           interactionCandidates: [],
           visibleText: "",
           recentActions: [],
@@ -222,7 +219,7 @@ test("collectSurfaceState opens boss chat by default and treats expired sessions
             url: "https://www.zhipin.com/web/geek/chat"
           },
           capture: null,
-          ocrBlocks: [],
+          screenTextBlocks: [],
           interactionCandidates: [],
           visibleText: "全部\n未读\n当前暂无消息\n当前登录状态已失效",
           recentActions: [],
@@ -271,7 +268,7 @@ test("collectSurfaceState treats empty browser shells as needs_takeover instead 
             url: "https://outlook.office.com/mail/"
           },
           capture: null,
-          ocrBlocks: [],
+          screenTextBlocks: [],
           interactionCandidates: [],
           visibleText: "",
           recentActions: [],

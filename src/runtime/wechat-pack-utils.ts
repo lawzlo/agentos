@@ -91,8 +91,8 @@ function symbolNoiseRatio(value: string): number {
   return Math.max(0, normalized.length - signalCount) / normalized.length;
 }
 
-function isOcrSource(value: unknown) {
-  return String(value ?? "").trim().toLowerCase().startsWith("ocr");
+function isScreenSource(value: unknown) {
+  return String(value ?? "").trim().toLowerCase().startsWith("screen");
 }
 
 export function findWeChatWindowGeometry(worldState: WorldState | null): {
@@ -230,13 +230,13 @@ export function scoreWeChatCandidate({
   if (source === "accessibility") {
     score += 12;
   }
-  if (isOcrSource(source)) {
+  if (isScreenSource(source)) {
     score += 6;
   }
-  if (source.includes("ocr-wechat-list")) {
+  if (source.includes("screen-wechat-list")) {
     score += 18;
   }
-  if (source.includes("ocr-wechat-compose")) {
+  if (source.includes("screen-wechat-compose")) {
     score -= 32;
   }
   const unreadEvidence = hasWeChatUnreadEvidence(candidate, worldState);
@@ -281,7 +281,7 @@ export function scoreWeChatCandidate({
   if (/[\p{L}\u4e00-\u9fff]/u.test(summary) && !looksLikeUrlOrDomainToken(summary) && !looksLikeDateOrTimeToken(summary)) {
     score += 6;
   }
-  if (isOcrSource(source)) {
+  if (isScreenSource(source)) {
     const appContext = (worldState?.appContext ?? null) as Record<string, unknown> | null;
     const windows = Array.isArray(appContext?.windows)
       ? (appContext.windows as Array<Record<string, unknown>>).filter((entry) => {
@@ -420,7 +420,7 @@ export function findWeChatComposeCandidate(worldState: WorldState | null): Inter
       const inComposeRegion = isWeChatCandidateInComposeRegion(candidate, worldState);
       const placeholderSignal =
         looksLikeWeChatComposePlaceholder(hintText) || looksLikeWeChatComposePlaceholder(candidate.text);
-      const sourceIsComposeRegion = source.includes("ocr-wechat-compose");
+      const sourceIsComposeRegion = source.includes("screen-wechat-compose");
       if (looksLikeWeChatComposeNoise(hintText) || looksLikeWeChatComposeNoise(candidate.text)) {
         return false;
       }
@@ -454,7 +454,7 @@ export function findWeChatSendCandidate(worldState: WorldState | null): Interact
       const hintText = candidateHintText(candidate);
       const source = String((candidate.sourceHints ?? {}).source ?? "").toLowerCase();
       return (
-        (candidate.role === "button" || isOcrSource(source)) &&
+        (candidate.role === "button" || isScreenSource(source)) &&
         (SEND_PATTERN.test(hintText) || SEND_PATTERN.test(candidate.text))
       );
     }) ?? null

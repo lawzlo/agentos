@@ -5,11 +5,8 @@ import { NativeSidecarClient } from "../native-sidecar.js";
 import { defaultDataDir } from "../../config.js";
 import type {
   SidecarAccessibilitySnapshotResult,
-  SidecarFindTextResult,
   SidecarHealthResult,
   SidecarListWindowsResult,
-  SidecarOcrOptions,
-  SidecarOcrResult,
   SidecarPermissionsResult
 } from "../../types/native-sidecar.js";
 
@@ -213,154 +210,6 @@ function isUsableFrontmostApp(payload: { appName?: string; bundleIdentifier?: st
   return true;
 }
 
-function buildOcrSwiftScript(filePath: string, options: SidecarOcrOptions = {}) {
-  const normalizedPath = JSON.stringify(String(filePath ?? "").trim());
-  const region = options.region ?? null;
-  const scale = Number(options.scale ?? 0);
-  return `
-import Foundation
-import Vision
-import ImageIO
-import CoreGraphics
-
-let filePath = ${normalizedPath}
-let cropX = CGFloat(${Number(region?.x ?? -1)})
-let cropY = CGFloat(${Number(region?.y ?? -1)})
-let cropWidth = CGFloat(${Number(region?.width ?? -1)})
-let cropHeight = CGFloat(${Number(region?.height ?? -1)})
-let requestedScale = CGFloat(${Number.isFinite(scale) && scale > 0 ? scale : 1})
-
-func boxDictionary(_ box: CGRect, width: CGFloat, height: CGFloat, offsetX: CGFloat, offsetY: CGFloat, scale: CGFloat) -> [String: Double] {
-  let effectiveScale = scale > 0 ? scale : 1
-  let rect = CGRect(
-    x: offsetX + ((box.origin.x * width) / effectiveScale),
-    y: offsetY + (((1 - box.origin.y - box.size.height) * height) / effectiveScale),
-    width: (box.size.width * width) / effectiveScale,
-    height: (box.size.height * height) / effectiveScale
-  )
-  return [
-    "x": Double(rect.origin.x),
-    "y": Double(rect.origin.y),
-    "width": Double(rect.size.width),
-    "height": Double(rect.size.height),
-    "centerX": Double(rect.midX),
-    "centerY": Double(rect.midY)
-  ]
-}
-
-func cropImage(_ image: CGImage, region: CGRect) -> CGImage? {
-  let width = CGFloat(image.width)
-  let height = CGFloat(image.height)
-  var cropRect = CGRect(
-    x: max(0, min(width - 1, region.origin.x * width)),
-    y: max(0, min(height - 1, region.origin.y * height)),
-    width: max(1, min(width, region.size.width * width)),
-    height: max(1, min(height, region.size.height * height))
-  )
-  cropRect.origin.x = min(cropRect.origin.x, width - cropRect.size.width)
-  cropRect.origin.y = min(cropRect.origin.y, height - cropRect.size.height)
-  return image.cropping(to: cropRect)
-}
-
-func scaleImage(_ image: CGImage, scale: CGFloat) -> CGImage? {
-  if scale <= 1.01 {
-    return image
-  }
-  let width = max(1, Int(CGFloat(image.width) * scale))
-  let height = max(1, Int(CGFloat(image.height) * scale))
-  guard
-    let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
-    let context = CGContext(
-      data: nil,
-      width: width,
-      height: height,
-      bitsPerComponent: 8,
-      bytesPerRow: 0,
-      space: colorSpace,
-      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-    )
-  else {
-    return image
-  }
-  context.interpolationQuality = .high
-  context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
-  return context.makeImage()
-}
-
-let url = URL(fileURLWithPath: filePath)
-guard let source = CGImageSourceCreateWithURL(url as CFURL, nil), let baseImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
-  let data = try JSONSerialization.data(withJSONObject: ["observations": []], options: [])
-  FileHandle.standardOutput.write(data)
-  exit(0)
-}
-
-var workingImage = baseImage
-var offsetX: CGFloat = 0
-var offsetY: CGFloat = 0
-let scaleFactor = max(CGFloat(1), requestedScale)
-
-if cropWidth > 0 && cropHeight > 0 {
-  var normalized = CGRect(
-    x: max(CGFloat(0), min(CGFloat(1), cropX)),
-    y: max(CGFloat(0), min(CGFloat(1), cropY)),
-    width: max(CGFloat(0.01), min(CGFloat(1), cropWidth)),
-    height: max(CGFloat(0.01), min(CGFloat(1), cropHeight))
-  )
-  if normalized.origin.x + normalized.size.width > 1 {
-    normalized.size.width = max(CGFloat(0.01), CGFloat(1) - normalized.origin.x)
-  }
-  if normalized.origin.y + normalized.size.height > 1 {
-    normalized.size.height = max(CGFloat(0.01), CGFloat(1) - normalized.origin.y)
-  }
-  offsetX = normalized.origin.x * CGFloat(baseImage.width)
-  offsetY = normalized.origin.y * CGFloat(baseImage.height)
-  if let cropped = cropImage(baseImage, region: normalized) {
-    workingImage = cropped
-  }
-}
-
-if let scaled = scaleImage(workingImage, scale: scaleFactor) {
-  workingImage = scaled
-}
-
-let request = VNRecognizeTextRequest()
-request.recognitionLevel = .accurate
-request.usesLanguageCorrection = true
-let handler = VNImageRequestHandler(cgImage: workingImage, options: [:])
-do {
-  try handler.perform([request])
-} catch {
-  let data = try JSONSerialization.data(withJSONObject: ["observations": []], options: [])
-  FileHandle.standardOutput.write(data)
-  exit(0)
-}
-
-let width = CGFloat(workingImage.width)
-let height = CGFloat(workingImage.height)
-let observations = (request.results ?? []).compactMap { observation -> [String: Any]? in
-  guard let candidate = observation.topCandidates(1).first else {
-    return nil
-  }
-  return [
-    "text": candidate.string,
-    "confidence": candidate.confidence,
-    "box": boxDictionary(
-      observation.boundingBox,
-      width: width,
-      height: height,
-      offsetX: offsetX,
-      offsetY: offsetY,
-      scale: scaleFactor
-    )
-  ]
-}
-
-let payload: [String: Any] = ["observations": observations]
-let data = try JSONSerialization.data(withJSONObject: payload, options: [])
-FileHandle.standardOutput.write(data)
-`.trim();
-}
-
 export interface MacOSHostBridgeOptions {
   dataDir?: string;
   sidecarExecutablePath?: string | null;
@@ -552,33 +401,6 @@ export class MacOSHostBridge {
 
   async scroll(dx: number, dy: number): Promise<unknown> {
     return this.#requestSidecar("scroll", { dx, dy }, null);
-  }
-
-  async ocrImage(filePath: string, options: SidecarOcrOptions = {}): Promise<SidecarOcrResult> {
-    const region = options.region ?? null;
-    const scale = Number(options.scale ?? 0);
-    return this.#requestSidecar<SidecarOcrResult>(
-      "ocr_image",
-      {
-        filePath,
-        ...(region ? { region } : {}),
-        ...(Number.isFinite(scale) && scale > 0 ? { scale } : {})
-      },
-      async () => {
-        const { stdout } = await execFileAsync("swift", ["-e", buildOcrSwiftScript(filePath, options)], {
-          maxBuffer: 1024 * 1024 * 8
-        });
-        const payload = JSON.parse(stdout.trim() || "{}") as Partial<SidecarOcrResult>;
-        return {
-          observations: Array.isArray(payload.observations) ? payload.observations : []
-        };
-      },
-      { timeoutMs: 3500 }
-    );
-  }
-
-  async findText(filePath: string, query: string): Promise<SidecarFindTextResult> {
-    return this.#requestSidecar<SidecarFindTextResult>("find_text", { filePath, query }, null, { timeoutMs: 2500 });
   }
 
   async sidecarHealth(): Promise<SidecarHealthResult> {

@@ -60,7 +60,7 @@ function collectVisibleLines(worldState: WorldState | null): string[] {
     }
   }
 
-  for (const block of Array.isArray(worldState?.ocrBlocks) ? worldState.ocrBlocks : []) {
+  for (const block of Array.isArray(worldState?.screenTextBlocks) ? worldState.screenTextBlocks : []) {
     const text = String((block as { text?: unknown } | null)?.text ?? "").trim();
     if (text) {
       lines.push(text);
@@ -359,7 +359,8 @@ export async function inferBossSemanticFacts({
   preferredLatestSnippet = null,
   threadSummary = null,
   trailingWindow = 6,
-  excludeComposeChrome = false
+  excludeComposeChrome = false,
+  timeoutMs = null
 }: {
   modelClient: BossSemanticModelClient;
   worldState: WorldState | null;
@@ -368,6 +369,7 @@ export async function inferBossSemanticFacts({
   threadSummary?: string | null;
   trailingWindow?: number;
   excludeComposeChrome?: boolean;
+  timeoutMs?: number | null;
 }): Promise<BossSemanticFacts> {
   const fallback = buildFallbackBossSemanticFacts({
     worldState,
@@ -395,7 +397,7 @@ export async function inferBossSemanticFacts({
   }
 
   try {
-    const result = await modelClient.completeJson<
+    const request = modelClient.completeJson<
       {
         summary: string;
         threadSummary: string | null;
@@ -448,6 +450,21 @@ export async function inferBossSemanticFacts({
       },
       temperature: 0
     });
+    let timeoutHandle: NodeJS.Timeout | null = null;
+    const result = Number.isFinite(Number(timeoutMs)) && Number(timeoutMs) > 0
+      ? await Promise.race([
+          request,
+          new Promise<never>((_, reject) => {
+            timeoutHandle = setTimeout(() => {
+              reject(new Error(`Boss semantic facts timed out after ${Number(timeoutMs)}ms`));
+            }, Number(timeoutMs));
+          })
+        ]).finally(() => {
+          if (timeoutHandle) {
+            clearTimeout(timeoutHandle);
+          }
+        })
+      : await request;
 
     const latestInboundMessage = canonicalizeBossSemanticLine(String(result.latestInboundMessage ?? ""), visibleConversationLines);
     const salientContext = uniqueStrings(

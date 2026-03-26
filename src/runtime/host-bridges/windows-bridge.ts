@@ -4,7 +4,7 @@ import { promisify } from "node:util";
 
 import { NativeSidecarClient } from "../native-sidecar.js";
 import { defaultDataDir } from "../../config.js";
-import type { SidecarFindTextResult, SidecarListWindowsResult, SidecarOcrOptions, SidecarOcrResult, SidecarPermissionsResult } from "../../types/native-sidecar.js";
+import type { SidecarListWindowsResult, SidecarPermissionsResult } from "../../types/native-sidecar.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -107,42 +107,6 @@ function normalizeModifierPrefix(modifiers: string[] = []): string {
       }
     })
     .join("");
-}
-
-function createWindowsOcrScript(filePath: string): string {
-  const escapedPath = escapePowerShellString(filePath);
-  return `
-Add-Type -AssemblyName System.Runtime.WindowsRuntime
-$null = [Windows.Storage.StorageFile, Windows.Storage, ContentType = WindowsRuntime]
-$null = [Windows.Storage.FileAccessMode, Windows.Storage, ContentType = WindowsRuntime]
-$null = [Windows.Graphics.Imaging.BitmapDecoder, Windows.Graphics.Imaging, ContentType = WindowsRuntime]
-$null = [Windows.Media.Ocr.OcrEngine, Windows.Media.Ocr, ContentType = WindowsRuntime]
-function Await($operation) { [System.WindowsRuntimeSystemExtensions]::AsTask($operation).GetAwaiter().GetResult() }
-$file = Await([Windows.Storage.StorageFile]::GetFileFromPathAsync('${escapedPath}'))
-$stream = Await($file.OpenAsync([Windows.Storage.FileAccessMode]::Read))
-$decoder = Await([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream))
-$bitmap = Await($decoder.GetSoftwareBitmapAsync())
-$engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
-$result = Await($engine.RecognizeAsync($bitmap))
-$observations = foreach ($line in $result.Lines) {
-  foreach ($word in $line.Words) {
-    $bounds = $word.BoundingRect
-    [pscustomobject]@{
-      text = $word.Text
-      confidence = 0.8
-      box = [pscustomobject]@{
-        x = [double]$bounds.X
-        y = [double]$bounds.Y
-        width = [double]$bounds.Width
-        height = [double]$bounds.Height
-        centerX = [double]($bounds.X + ($bounds.Width / 2))
-        centerY = [double]($bounds.Y + ($bounds.Height / 2))
-      }
-    }
-  }
-}
-@{ observations = @($observations) } | ConvertTo-Json -Compress -Depth 8
-`;
 }
 
 export interface WindowsHostBridgeOptions {
@@ -448,55 +412,6 @@ public static class AgentOSMouse {
 @{ ok = $true; dx = ${Math.round(dx)}; dy = ${Math.round(dy)} } | ConvertTo-Json -Compress
 `)
     );
-  }
-
-  async ocrImage(filePath: string, _options: SidecarOcrOptions = {}): Promise<SidecarOcrResult> {
-    this.#assertSupported();
-    return this.#requestSidecar<SidecarOcrResult>("ocr_image", { filePath }, () =>
-      this.#runJson(createWindowsOcrScript(filePath))
-    );
-  }
-
-  async findText(filePath: string, query: string): Promise<SidecarFindTextResult | Record<string, unknown>> {
-    this.#assertSupported();
-    return this.#requestSidecar<SidecarFindTextResult>("find_text", { filePath, query }, async () => {
-      const ocr = await this.ocrImage(filePath);
-      const observations = Array.isArray(ocr.observations) ? ocr.observations : [];
-      const queryLower = String(query ?? "").toLowerCase();
-      const ranked = observations
-        .map((observation) => {
-          const candidate = observation as unknown as Record<string, unknown>;
-          const text = String(candidate.text ?? "");
-          const lowered = text.toLowerCase();
-          let score = 0;
-          if (lowered === queryLower) {
-            score = 2;
-          } else if (lowered.includes(queryLower)) {
-            score = 1;
-          }
-
-          return { score, observation };
-        })
-        .filter((entry) => entry.score > 0)
-        .sort((left, right) => {
-          if (left.score !== right.score) {
-            return right.score - left.score;
-          }
-          const leftConfidence = Number((left.observation as unknown as Record<string, unknown>).confidence ?? 0);
-          const rightConfidence = Number((right.observation as unknown as Record<string, unknown>).confidence ?? 0);
-          return rightConfidence - leftConfidence;
-        });
-
-      if (!ranked.length) {
-        return { found: false, count: observations.length };
-      }
-
-      return {
-        found: true,
-        match: ranked[0].observation,
-        count: observations.length
-      };
-    });
   }
 
   async runCommand(command: string, cwd = process.cwd()): Promise<PowerShellResult> {

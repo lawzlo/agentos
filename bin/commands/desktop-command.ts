@@ -58,9 +58,6 @@ export interface DesktopProbeReport {
   windowCount: number;
   accessibilityElementCount: number;
   accessibilityCandidateCount: number;
-  ocrBlockCount: number;
-  ocrAvailable: boolean;
-  ocrError: string | null;
   capturePath: string | null;
   visibleTextPreview: string[];
   topCandidates: DesktopProbeCandidateSummary[];
@@ -183,7 +180,6 @@ function createProbeTimeouts(request: DesktopProbeRequest): Partial<DesktopSurfa
     focusMs: Math.min(2000, baseTimeoutMs),
     frontmostMs: Math.min(1800, baseTimeoutMs),
     captureMs: Math.max(1200, Math.min(5000, baseTimeoutMs)),
-    ocrMs: Math.max(1200, Math.min(5000, baseTimeoutMs)),
     windowsMs: Math.min(1800, baseTimeoutMs),
     permissionsMs: Math.min(1500, baseTimeoutMs),
     accessibilityMs: Math.min(2200, baseTimeoutMs)
@@ -241,11 +237,8 @@ function renderDesktopProbe(report: DesktopProbeReport) {
   }
   lines.push(
     `World state: windows=${report.windowCount}, AX elements=${report.accessibilityElementCount},`
-      + ` AX candidates=${report.accessibilityCandidateCount}, OCR blocks=${report.ocrBlockCount}`
+      + ` AX candidates=${report.accessibilityCandidateCount}`
   );
-  if (!report.ocrAvailable) {
-    lines.push(`OCR: unavailable (${report.ocrError ?? "unknown error"})`);
-  }
   if (report.capturePath) {
     lines.push(`Capture: ${report.capturePath}`);
   }
@@ -368,7 +361,6 @@ export async function collectDesktopProbe(request: DesktopProbeRequest, deps: De
                 ? targetInspection.interactionCandidates
                 : worldState.interactionCandidates,
             visibleText: String(targetInspection.visibleText ?? "").trim() || String(worldState.visibleText ?? ""),
-            ocrBlocks: Array.isArray(worldState.ocrBlocks) ? worldState.ocrBlocks : [],
             capture: worldState.capture
           } as WorldState)
         : worldState;
@@ -401,9 +393,6 @@ export async function collectDesktopProbe(request: DesktopProbeRequest, deps: De
       windowCount: Array.isArray(appContext.windows) ? appContext.windows.length : 0,
       accessibilityElementCount: Array.isArray(accessibility?.elements) ? accessibility.elements.length : 0,
       accessibilityCandidateCount: Number(appContext.accessibilityCandidateCount ?? 0),
-      ocrBlockCount: Array.isArray(worldState.ocrBlocks) ? worldState.ocrBlocks.length : 0,
-      ocrAvailable: appContext.ocrAvailable !== false,
-      ocrError: typeof appContext.ocrError === "string" ? appContext.ocrError : null,
       capturePath: typeof worldState.capture?.path === "string" ? worldState.capture.path : null,
       visibleTextPreview,
       topCandidates,

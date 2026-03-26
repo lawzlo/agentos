@@ -12,49 +12,26 @@ import {
   normalizeDocsSummary
 } from "./browser-pack-utils.js";
 import {
+  BROWSER_CONVERSATION_DETECTION_SCHEMA,
+  buildConversationDetectionInstruction,
+  buildConversationPrefillInstruction
+} from "./browser-runtime-prompts.js";
+import {
   isExpectedDesktopForeground,
   isOutlookDesktopForeground,
   isSlackDesktopForeground,
   isWeChatDesktopForeground
 } from "./desktop-foreground-utils.js";
 import {
-  bossSnippetLooksLikeCandidateName,
-  bossSnippetLooksLikeProfileMetadata,
-  bossSnippetLooksUsable,
-  inferBossSemanticFacts,
   normalizeBossSummary,
-  sanitizeBossReplySnippet,
-  type BossSemanticFacts
+  sanitizeBossReplySnippet
 } from "./boss-semantic-facts.js";
 import {
-  deriveBossComposeFallbackBounds,
-  deriveBossComposeFallbackPoint,
-  deriveBossOpenTarget,
-  deriveBossTopVisibleRowPoint,
-  deriveBossVisionRowPoint,
-  extractBossContext,
-  extractBossThreadContext,
-  findBossCandidate,
-  findBossComposeCandidate,
-  findBossDuplicateLoginConfirmCandidate,
-  findBossListCandidateByTarget,
-  findBossSendCandidate,
-  hasBossDuplicateLoginModal,
-  isBossLikelyMidListCandidate,
-  isLowQualityBossSummary,
-  isBossSiteAlertConfirmModal,
   isBossUiChrome,
-  isBrowserUiChrome,
-  pickBossComposeQuery,
-  pickBossSendQuery,
-  pickBossThreadName,
-  scoreBossCandidate,
-  scoreBossTargetNameMatch,
-  sanitizeBossOpenCandidate
+  isBrowserUiChrome
 } from "./boss-pack-utils.js";
 import { draftPackReply as draftPackReplyInternal } from "./live-pack-drafting.js";
 import {
-  buildBossReplySteps,
   buildMailReplySteps,
   buildOutlookDesktopComposePrefillSteps,
   buildOutlookDesktopVisualReplySteps,
@@ -217,6 +194,19 @@ export interface DesktopConversationPackAnalysis {
   selectedTarget?: string | null;
   skipReasons?: string[];
   recoveryAction?: SurfaceRecoveryAction | null;
+}
+
+interface BrowserConversationDetectionPayload {
+  hasUnreadConversation: boolean;
+  summary: string | null;
+  senderName: string | null;
+  latestInboundMessage: string | null;
+  salientContext: string[];
+  threadSummary: string | null;
+  replyable: boolean;
+  pageState: string | null;
+  blocker: string | null;
+  rationale: string | null;
 }
 
 interface WeChatVisualThreadSummary {
@@ -3941,134 +3931,6 @@ async function deriveWeChatVisualComposerFallback(
 function wantsBossReplyWorkflow(goal: string): boolean {
   return /(reply|respond|contact|message|chat|follow up|outreach|沟通|回复|联系|跟进|发消息)/iu.test(String(goal ?? ""));
 }
-async function dismissBossDuplicateLoginModalIfPresent({
-  rule,
-  workspace,
-  surfaceRegistry,
-  worldState
-}: {
-  rule: WatchRule;
-  workspace: WorkspaceProfile;
-  surfaceRegistry: SurfaceRegistry;
-  worldState: WorldState | null;
-}): Promise<WorldState | null> {
-  if (!hasBossDuplicateLoginModal(worldState)) {
-    return worldState;
-  }
-
-  const adapter = surfaceRegistry.get("browser");
-  if (!adapter) {
-    return worldState;
-  }
-
-  if (isBossSiteAlertConfirmModal(worldState)) {
-    try {
-      await adapter.act({
-        task: createWatchTask(rule),
-        step: {
-          id: `boss-dismiss-site-alert-${rule.id}`,
-          label: "Confirm BOSS site alert",
-          surface: "browser",
-          action: "press",
-          params: {
-            key: "enter"
-          }
-        },
-        workspace: profileAsWorkspace(rule, workspace),
-        traceId: null,
-        outputs: {}
-      });
-      await adapter
-        .act({
-          task: createWatchTask(rule),
-          step: {
-            id: `boss-dismiss-site-alert-wait-${rule.id}`,
-            label: "Wait for BOSS site alert to close",
-            surface: "browser",
-            action: "wait",
-            params: { ms: 700 }
-          },
-          workspace: profileAsWorkspace(rule, workspace),
-          traceId: null,
-          outputs: {}
-        })
-        .catch(() => null);
-      const dismissedState = await observeWatchSurface({
-        rule,
-        workspace,
-        surfaceRegistry,
-        controlPlane: {} as LivePackControlPlane,
-        surface: "browser"
-      });
-      if (!hasBossDuplicateLoginModal(dismissedState)) {
-        return dismissedState;
-      }
-    } catch {
-      // Fall back to explicit button grounding below.
-    }
-  }
-
-  const confirmCandidate = findBossDuplicateLoginConfirmCandidate(worldState);
-  const confirmQueries = uniqueStrings([
-    String(confirmCandidate?.text ?? "").trim(),
-    "OK",
-    "确定"
-  ]);
-
-  let dismissed = false;
-  for (const query of confirmQueries) {
-    try {
-      await adapter.act({
-        task: createWatchTask(rule),
-        step: {
-          id: `boss-dismiss-duplicate-login-${rule.id}`,
-          label: "Dismiss BOSS duplicate-login modal",
-          surface: "browser",
-          action: "clickTarget",
-          params: {
-            targetQuery: query,
-            ...(confirmCandidate ? { target: confirmCandidate } : {})
-          }
-        },
-        workspace: profileAsWorkspace(rule, workspace),
-        traceId: null,
-        outputs: {}
-      });
-      dismissed = true;
-      break;
-    } catch {
-      continue;
-    }
-  }
-
-  if (!dismissed) {
-    return worldState;
-  }
-
-  await adapter
-    .act({
-      task: createWatchTask(rule),
-      step: {
-        id: `boss-dismiss-duplicate-login-wait-${rule.id}`,
-        label: "Wait for BOSS duplicate-login modal to close",
-        surface: "browser",
-        action: "wait",
-        params: { ms: 500 }
-      },
-      workspace: profileAsWorkspace(rule, workspace),
-      traceId: null,
-      outputs: {}
-    })
-    .catch(() => null);
-
-  return observeWatchSurface({
-    rule,
-    workspace,
-    surfaceRegistry,
-    controlPlane: {} as LivePackControlPlane,
-    surface: "browser"
-  });
-}
 
 export function analyzeConversationPack(
   packName: string,
@@ -4157,14 +4019,17 @@ export function analyzeConversationPack(
   }
 
   if (normalizedPackName === "boss-browser") {
-    const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
+    const candidates = conversationCandidates(worldState);
     return withAnalysisSemantics({
       packName: normalizedPackName,
       foreground: true,
-      unreadCandidate: summarizeProbeCandidate(findBossCandidate(worldState)),
+      unreadCandidate: summarizeProbeCandidate(candidates[0] ?? null),
       composeCandidate: null,
       sendCandidate: null,
-      topUnreadCandidates: rankProbeCandidates(worldState, scoreBossCandidate, candidates)
+      topUnreadCandidates: candidates
+        .slice(0, 5)
+        .map((candidate) => summarizeProbeCandidate(candidate))
+        .filter((entry): entry is DesktopProbeCandidateSummary => Boolean(entry))
     });
   }
 
@@ -4735,6 +4600,65 @@ async function observeWatchSurface({
     label: `watch-${rule.id}`,
     ...(effectiveDesktopAppTarget ? { targetAppName: effectiveDesktopAppTarget } : {})
   })) as WorldState;
+}
+
+async function extractBrowserConversationDetection({
+  rule,
+  workspace,
+  surfaceRegistry,
+  instruction,
+  timeoutMs = 8000
+}: {
+  rule: WatchRule;
+  workspace: WorkspaceProfile;
+  surfaceRegistry: SurfaceRegistry;
+  instruction: string;
+  timeoutMs?: number;
+}): Promise<BrowserConversationDetectionPayload | null> {
+  const adapter = surfaceRegistry.get("browser");
+  if (!adapter) {
+    return null;
+  }
+
+  const result = (await adapter.act({
+    task: createWatchTask(rule),
+    step: {
+      id: `browser-extract-${rule.id}`,
+      label: "Extract browser conversation facts",
+      surface: "browser",
+      action: "browserExtract",
+      params: {
+        instruction,
+        schema: BROWSER_CONVERSATION_DETECTION_SCHEMA,
+        timeoutMs
+      }
+    },
+    workspace: profileAsWorkspace(rule, workspace),
+    traceId: null,
+    outputs: {}
+  } as never)) as { extracted?: Record<string, unknown> | null };
+
+  const extracted = result?.extracted;
+  if (!extracted || typeof extracted !== "object") {
+    return null;
+  }
+
+  return {
+    hasUnreadConversation: Boolean(extracted.hasUnreadConversation),
+    summary: String(extracted.summary ?? "").trim() || null,
+    senderName: String(extracted.senderName ?? "").trim() || null,
+    latestInboundMessage: String(extracted.latestInboundMessage ?? "").trim() || null,
+    salientContext: uniqueStrings(
+      Array.isArray(extracted.salientContext)
+        ? extracted.salientContext.map((entry) => String(entry ?? "").trim())
+        : []
+    ).filter(Boolean),
+    threadSummary: String(extracted.threadSummary ?? "").trim() || null,
+    replyable: extracted.replyable !== false,
+    pageState: String(extracted.pageState ?? "").trim() || null,
+    blocker: String(extracted.blocker ?? "").trim() || null,
+    rationale: String(extracted.rationale ?? "").trim() || null
+  };
 }
 
 async function openSlackThreadForContext({
@@ -6345,208 +6269,6 @@ async function openMailThreadForContext({
   return threadState;
 }
 
-async function openBossCandidateForContext({
-  rule,
-  workspace,
-  surfaceRegistry,
-  controlPlane,
-  detection,
-  worldState
-}: LivePackExtractContextArgs): Promise<{
-  worldState: WorldState | null;
-  openCandidate: Record<string, unknown> | null;
-}> {
-  const adapter = surfaceRegistry.get("browser");
-  if (!adapter) {
-    return { worldState: null, openCandidate: null };
-  }
-
-  const openTarget = String(detection.inputs?.openTarget ?? detection.summary ?? "").trim();
-  if (!openTarget) {
-    return { worldState: null, openCandidate: null };
-  }
-
-  let effectiveWorldState =
-    (await dismissBossDuplicateLoginModalIfPresent({
-      rule,
-      workspace,
-      surfaceRegistry,
-      worldState
-    }).catch(() => worldState)) ?? worldState;
-
-  const openCandidate = (detection.metadata?.openCandidate ?? null) as Record<string, unknown> | null;
-  const matchedListCandidate = findBossListCandidateByTarget(effectiveWorldState, openTarget);
-  const preferTopVisibleRow = Boolean(detection.metadata?.preferTopVisibleRow);
-  const visualThread = (detection.metadata?.visualThread ?? null) as DesktopVisualThreadSummary | null;
-  const targetSnippet = String(
-    ((visualThread as { latestSnippet?: unknown; subjectCue?: unknown } | null)?.latestSnippet
-      ?? (visualThread as { latestSnippet?: unknown; subjectCue?: unknown } | null)?.subjectCue
-      ?? detection.context?.[0]
-      ?? "")
-  ).trim() || null;
-  const groundedTarget = preferTopVisibleRow
-    ? null
-    : await groundBossTargetThreadClickPoint({
-        modelClient: controlPlane.modelClient,
-        worldState: effectiveWorldState,
-        targetThread: openTarget,
-        targetSnippet
-      }).catch(() => null);
-  const browserFrame = await resolveBrowserVisionFrame(effectiveWorldState);
-  const groundedRowBounds = await resolveBrowserVisionCandidateBounds(
-    effectiveWorldState,
-    groundedTarget?.targetVisible && groundedTarget.rowBox ? groundedTarget.rowBox : null
-  );
-  const topVisibleRowBounds = preferTopVisibleRow
-    ? buildBrowserPointBounds(effectiveWorldState, deriveBossTopVisibleRowPoint(effectiveWorldState), 24)
-    : null;
-  const visionRowBounds =
-    !matchedListCandidate?.bounds
-      ? buildBrowserPointBounds(effectiveWorldState, deriveBossVisionRowPoint(visualThread), 24)
-      : null;
-  const fallbackOpenPoint = preferTopVisibleRow
-    ? boundsCenter(topVisibleRowBounds)
-    : matchedListCandidate?.bounds
-      ? boundsCenter(matchedListCandidate.bounds)
-      : visionRowBounds
-        ? boundsCenter(visionRowBounds)
-        : boundsCenter(
-            ((sanitizeBossOpenCandidate(openCandidate)?.bounds ?? null) as InteractionCandidate["bounds"] | null) ?? null
-          );
-  const openPoint = resolveBossGroundedOpenPoint(browserFrame, groundedTarget, fallbackOpenPoint);
-  const resolvedOpenCandidate =
-    groundedRowBounds
-      ? {
-          ...(sanitizeBossOpenCandidate(openCandidate) ?? {
-            id: "boss-open-target",
-            surface: "browser",
-            kind: "text",
-            text: openTarget,
-            role: "text",
-            isInteractive: true
-          }),
-          bounds: groundedRowBounds
-        }
-      : matchedListCandidate?.bounds
-        ? {
-            ...(sanitizeBossOpenCandidate(openCandidate) ?? {
-              id: "boss-open-target",
-              surface: "browser",
-              kind: "text",
-              text: openTarget,
-              role: "text",
-              isInteractive: true
-            }),
-            bounds: matchedListCandidate.bounds,
-            sourceHints: {
-              ...(((sanitizeBossOpenCandidate(openCandidate)?.sourceHints ?? null) as Record<string, unknown> | null) ?? {}),
-              ...(((matchedListCandidate.sourceHints ?? null) as Record<string, unknown> | null) ?? {})
-            }
-          }
-        : visionRowBounds
-          ? {
-              ...(sanitizeBossOpenCandidate(openCandidate) ?? {
-                id: "boss-open-target",
-                surface: "browser",
-                kind: "text",
-                text: openTarget,
-                role: "text",
-                isInteractive: true
-              }),
-              bounds: visionRowBounds
-            }
-          : (topVisibleRowBounds
-              ? {
-                  ...(sanitizeBossOpenCandidate(openCandidate) ?? {
-                    id: "boss-open-target",
-                    surface: "browser",
-                    kind: "text",
-                    text: openTarget,
-                    role: "text",
-                    isInteractive: true
-                  }),
-                  bounds: topVisibleRowBounds
-                }
-              : sanitizeBossOpenCandidate(openCandidate));
-  await adapter.act({
-    task: createWatchTask(rule),
-    step: {
-      id: `boss-open-${rule.id}`,
-      label: "Open BOSS candidate detail",
-      surface: "browser",
-      action: openPoint ? "clickAt" : "clickTarget",
-      params: openPoint
-        ? {
-            x: openPoint.x,
-            y: openPoint.y,
-            targetQuery: openTarget,
-            ...(resolvedOpenCandidate ? { target: resolvedOpenCandidate } : {})
-          }
-        : {
-            targetQuery: openTarget,
-            ...(resolvedOpenCandidate ? { target: resolvedOpenCandidate } : {})
-          }
-    },
-    workspace: profileAsWorkspace(rule, workspace),
-    traceId: null,
-    outputs: {}
-  });
-
-  await adapter.act({
-    task: createWatchTask(rule),
-    step: {
-      id: `boss-open-settle-${rule.id}`,
-      label: "Wait for BOSS thread selection to settle",
-      surface: "browser",
-      action: "wait",
-      params: { ms: 500 }
-    },
-    workspace: profileAsWorkspace(rule, workspace),
-    traceId: null,
-    outputs: {}
-  });
-
-  const detailReadyTarget = String(detection.inputs?.detailReadyTarget ?? rule.taskInputs?.detailReadyTarget ?? "").trim();
-  if (detailReadyTarget) {
-    await adapter.act({
-      task: createWatchTask(rule),
-      step: {
-        id: `boss-open-wait-${rule.id}`,
-        label: "Wait for BOSS candidate detail",
-        surface: "browser",
-        action: "waitFor",
-        params: {
-          text: detailReadyTarget,
-          timeoutMs: 3000
-        }
-      },
-      workspace: profileAsWorkspace(rule, workspace),
-      traceId: null,
-      outputs: {}
-    }).catch(() => null);
-  }
-
-  effectiveWorldState = await observeWatchSurface({
-    rule,
-    workspace,
-    surfaceRegistry,
-    controlPlane: {} as LivePackControlPlane,
-    surface: "browser"
-  });
-  effectiveWorldState =
-    (await dismissBossDuplicateLoginModalIfPresent({
-      rule,
-      workspace,
-      surfaceRegistry,
-      worldState: effectiveWorldState
-    }).catch(() => effectiveWorldState)) ?? effectiveWorldState;
-
-  return {
-    worldState: effectiveWorldState,
-    openCandidate: resolvedOpenCandidate ?? null
-  };
-}
-
 function createMailPack({
   name,
   surface,
@@ -7508,17 +7230,10 @@ function createBossPack(): LivePack {
     async observeInbox(args) {
       return observeWatchSurface({ ...args, surface: "browser" });
     },
-    async detectNewItems({ rule, worldState, dedupeState = {}, controlPlane, workspace, surfaceRegistry }) {
-      const effectiveWorldState =
-        (await dismissBossDuplicateLoginModalIfPresent({
-          rule,
-          workspace,
-          surfaceRegistry,
-          worldState
-        }).catch(() => worldState)) ?? worldState;
+    async detectNewItems({ rule, worldState, dedupeState = {}, workspace, surfaceRegistry }) {
       const manualIntervention = detectBrowserManualIntervention({
         packName: "boss-browser",
-        worldState: effectiveWorldState,
+        worldState,
         rule,
         dedupeState
       });
@@ -7526,80 +7241,26 @@ function createBossPack(): LivePack {
         return manualIntervention;
       }
 
-      let candidate = findBossCandidate(effectiveWorldState);
-      let vision: DesktopVisualAnalysis | null = null;
-      let visualThread: DesktopVisualThreadSummary | null = null;
-      const ocrSummary = normalizeBossSummary(candidate?.text || candidateHintText(candidate));
-      const supportsBossVision = Boolean(controlPlane.modelClient?.supportsImageJson?.());
-      const needsVisionFallback =
-        !candidate
-        || !ocrSummary
-        || isLowQualityBossSummary(ocrSummary)
-        || isBossUiChrome(ocrSummary)
-        || /(zhipin\.com|boss直聘注册登录|web\/chat\/index)/iu.test(String(candidate?.text ?? ""));
-      if (supportsBossVision || needsVisionFallback) {
-        vision = await analyzeBossBrowserVisualState({
-          modelClient: controlPlane.modelClient,
-          worldState: effectiveWorldState
-        }).catch(() => null);
-        visualThread = pickDesktopVisualUnreadThread(vision);
-        const matchedListCandidate = visualThread
-          ? findBossListCandidateByTarget(
-              effectiveWorldState,
-              deriveBossOpenTarget(visualThread.name) || visualThread.name
-            )
-          : null;
-        const visualOpenBounds = await resolveBrowserVisionCandidateBounds(effectiveWorldState, visualThread?.approxBox ?? null);
-        if (visualThread && matchedListCandidate?.bounds) {
-          candidate = {
-            ...matchedListCandidate,
-            text: visualThread.name,
-            confidence: Math.max(Number(matchedListCandidate.confidence ?? 0.75), 0.82),
-            sourceHints: {
-              ...((matchedListCandidate.sourceHints ?? {}) as Record<string, unknown>),
-              source: "vision+ocr",
-              latestSnippet: visualThread.latestSnippet
-            }
-          } satisfies InteractionCandidate;
-        } else if (visualThread && visualOpenBounds) {
-          candidate = {
-            id: "boss-vision-unread",
-            surface: "browser",
-            kind: "text",
-            text: visualThread.name,
-            role: "text",
-            bounds: visualOpenBounds,
-            confidence: 0.8,
-            sourceHints: {
-              source: "vision",
-              latestSnippet: visualThread.latestSnippet
-            },
-            isInteractive: true
-          } satisfies InteractionCandidate;
-        }
-      }
-      if (!candidate) {
+      const extracted = await extractBrowserConversationDetection({
+        rule,
+        workspace,
+        surfaceRegistry,
+        instruction: buildConversationDetectionInstruction(rule.goal),
+        timeoutMs: 8000
+      });
+      if (!extracted?.hasUnreadConversation || !extracted.replyable) {
         return null;
       }
 
-      const summary = normalizeBossSummary(candidate.text || candidateHintText(candidate));
+      const summary = String(extracted.summary ?? extracted.threadSummary ?? "").trim();
       if (!summary) {
         return null;
       }
 
-      const semanticFacts = await inferBossSemanticFacts({
-        modelClient: controlPlane.modelClient,
-        worldState: effectiveWorldState,
-        summary: candidate.text || summary,
-        preferredLatestSnippet: String(visualThread?.latestSnippet ?? "").trim() || null,
-        threadSummary: summary,
-        trailingWindow: 5
-      });
       const context = uniqueStrings([
-        semanticFacts.latestInboundMessage,
-        String(visualThread?.replyReason ?? "").trim(),
-        ...semanticFacts.salientContext
-      ]).filter(Boolean).slice(0, 5);
+        extracted.latestInboundMessage,
+        ...extracted.salientContext
+      ]).filter(Boolean).slice(0, 6);
       const itemFingerprint = fingerprint(
         `boss-browser:${rule.workspaceName ?? "default"}:${summary}:${context.join("|")}`
       );
@@ -7607,7 +7268,8 @@ function createBossPack(): LivePack {
         return null;
       }
 
-      const startUrl = String(rule.taskInputs?.startUrl ?? rule.taskInputs?.url ?? inferBrowserPageUrl(effectiveWorldState) ?? "").trim();
+      const startUrl = String(rule.taskInputs?.startUrl ?? rule.taskInputs?.url ?? inferBrowserPageUrl(worldState) ?? "").trim();
+      const openTarget = summary;
       return {
         fingerprint: itemFingerprint,
         summary,
@@ -7619,137 +7281,36 @@ function createBossPack(): LivePack {
           watchSummary: summary,
           watchContext: context.join("\n"),
           startUrl,
-          openTarget: deriveBossOpenTarget(String(candidate.text ?? summary)) || summary,
-          detailReadyTarget: String(rule.taskInputs?.detailReadyTarget ?? "在线沟通")
-        },
-        taskSpec: {
-          preferredSurface: "browser",
-          skillName: "boss-open-candidate",
-          executionMode: "planned"
+          openTarget
         },
         metadata: {
-          ...(
-            String(((candidate.sourceHints ?? {}) as Record<string, unknown>).source ?? "").trim().toLowerCase() === "vision"
-            || isBossLikelyMidListCandidate(candidate, effectiveWorldState)
-              ? { preferTopVisibleRow: true }
-              : {}
-          ),
-          ...(vision ? { visualAnalysis: vision } : {}),
-          ...(visualThread ? { visualThread } : {}),
           ...buildConversationMetadata({
             packName: "boss-browser",
             surface: "browser",
             summary,
             context,
-            openTarget: deriveBossOpenTarget(String(candidate.text ?? summary)) || summary,
-            candidate
+            openTarget,
+            candidate: null
           }),
-          ...(semanticFacts.speakerRole === "candidate"
-            ? {
-                sender: semanticFacts.senderName ?? (deriveBossOpenTarget(summary) || summary),
-                direction: "inbound"
-              }
-            : {}),
-          semanticFacts,
-          skillName: "boss-open-candidate"
+          ...(extracted.senderName ? { sender: extracted.senderName, direction: "inbound" as const } : {}),
+          latestInboundMessage: extracted.latestInboundMessage,
+          threadSummary: extracted.threadSummary,
+          browserPageState: extracted.pageState,
+          browserDetectionRationale: extracted.rationale
         }
       };
     },
     async extractContext(args) {
-      const { worldState: threadState, openCandidate: resolvedOpenCandidate } = await openBossCandidateForContext(args);
-      const visibleThreadSummary = pickBossThreadName(threadState, "");
-      const summary = visibleThreadSummary || String(args.detection.summary ?? "").trim();
-      const existingComposeCandidate = findBossComposeCandidate(threadState);
-      const existingSendCandidate = findBossSendCandidate(threadState);
-      const existingComposeSource = String(
-        ((existingComposeCandidate?.sourceHints ?? {}) as Record<string, unknown>).source ?? ""
-      ).toLowerCase();
-      const needsVisionComposerGrounding =
-        !existingComposeCandidate
-        || existingComposeSource.startsWith("ocr");
-      const vision = needsVisionComposerGrounding
-        ? await analyzeBossBrowserVisualState({
-            modelClient: args.controlPlane.modelClient,
-            worldState: threadState
-          }).catch(() => null)
-        : null;
-      const semanticFacts = await inferBossSemanticFacts({
-        modelClient: args.controlPlane.modelClient,
-        worldState: threadState,
+      const summary = String(args.detection.summary ?? "").trim();
+      const context = Array.isArray(args.detection.context) ? args.detection.context : [];
+      const openTarget = String(args.detection.inputs?.openTarget ?? summary).trim() || summary;
+      const browserInstruction = buildConversationPrefillInstruction({
+        goal: args.rule.goal,
         summary,
-        preferredLatestSnippet: String(pickDesktopVisualUnreadThread(vision)?.latestSnippet ?? "").trim() || null,
-        threadSummary: visibleThreadSummary || summary,
-        trailingWindow: 8,
-        excludeComposeChrome: true
+        senderName: String(args.detection.metadata?.sender ?? "").trim() || null,
+        latestInboundMessage: String(args.detection.metadata?.latestInboundMessage ?? "").trim() || null,
+        context
       });
-      const context = uniqueStrings([
-        semanticFacts.latestInboundMessage,
-        ...semanticFacts.salientContext
-      ]).filter(Boolean).slice(0, 6);
-      const replyWorkflow = wantsBossReplyWorkflow(args.rule.goal);
-      const detectedOpenTarget = String(args.detection.inputs?.openTarget ?? summary).trim() || summary;
-      const resolvedThreadNameIsUsable =
-        Boolean(visibleThreadSummary)
-        && !isLowQualityBossSummary(visibleThreadSummary)
-        && !isBossUiChrome(visibleThreadSummary);
-      const openTarget =
-        args.detection.metadata?.preferTopVisibleRow && resolvedThreadNameIsUsable
-          ? visibleThreadSummary
-          : detectedOpenTarget;
-      const composeQuery = pickBossComposeQuery(threadState);
-      const sendQuery = pickBossSendQuery(threadState);
-      const composeBounds = await resolveBrowserVisionCandidateBounds(threadState, vision?.composer.approxBox ?? null);
-      const composeRegionFallbackBounds = deriveBossComposeFallbackBounds(threadState);
-      const composeFallbackBounds =
-        composeBounds
-        ?? composeRegionFallbackBounds
-        ?? buildBrowserPointBounds(threadState, deriveBossComposeFallbackPoint(threadState), 22);
-      const openCandidate =
-        resolvedOpenCandidate
-        ?? sanitizeBossOpenCandidate((args.detection.metadata?.openCandidate ?? null) as Record<string, unknown> | null);
-      const composeTarget =
-        composeFallbackBounds
-          ? {
-              id: "boss-compose-vision",
-              text: String(vision?.composer.evidence ?? "发送消息").trim() || "发送消息",
-              role: "textbox",
-              bounds: composeFallbackBounds,
-              sourceHints: {
-                source:
-                  composeBounds
-                    ? "vision"
-                    : (composeRegionFallbackBounds ? "boss-compose-region-fallback" : "boss-compose-fallback")
-              }
-            }
-          : (existingComposeCandidate
-            ? { ...existingComposeCandidate }
-            : {
-                id: "boss-compose-fallback",
-                text: composeQuery,
-                role: "textbox",
-                sourceHints: {
-                  source: "fallback",
-                  placeholder: composeQuery
-                }
-              });
-      const sendTargetCandidate =
-        (existingSendCandidate
-          ? { ...existingSendCandidate }
-          : {
-              id: "boss-send-fallback",
-              text: sendQuery,
-              role: "button",
-              sourceHints: {
-                source: "fallback",
-                ariaLabel: sendQuery
-              }
-            });
-      const threadReadyForReply = Boolean(
-        threadState
-        && resolvedThreadNameIsUsable
-        && scoreBossTargetNameMatch(visibleThreadSummary, openTarget) != null
-        && (existingComposeCandidate || composeFallbackBounds)
-      );
 
       return {
         summary,
@@ -7757,17 +7318,7 @@ function createBossPack(): LivePack {
         inputs: {
           ...(args.detection.inputs ?? {}),
           watchContext: context.join("\n"),
-          openTarget,
-          openCandidate,
-          detailReadyTarget: String(args.detection.inputs?.detailReadyTarget ?? "在线沟通"),
-          ...(replyWorkflow
-            ? {
-                composeTarget,
-                typeTarget: composeTarget?.bounds ? "" : (String(composeTarget?.text ?? "").trim() || composeQuery),
-                sendTarget: sendQuery,
-                sendTargetCandidate
-              }
-            : {})
+          openTarget
         },
         metadata: {
           ...(args.detection.metadata ?? {}),
@@ -7777,29 +7328,40 @@ function createBossPack(): LivePack {
             summary,
             context,
             openTarget,
-            candidate: (args.detection.metadata?.openCandidate ?? null) as InteractionCandidate | Record<string, unknown> | null
+            candidate: null
           }),
-          ...(semanticFacts.speakerRole === "candidate"
+          ...(args.detection.metadata?.sender
             ? {
-                sender: semanticFacts.senderName ?? (deriveBossOpenTarget(summary) || summary),
-                direction: "inbound"
+                sender: args.detection.metadata.sender,
+                direction: "inbound" as const
               }
-            : {}),
-          semanticFacts,
-          ...(args.detection.metadata?.skillName ? { skillName: args.detection.metadata.skillName } : {})
+            : {})
         },
-        ...(replyWorkflow
-          ? {
-              taskSpec: {
-                preferredSurface: "browser",
-                skillName: null,
-                steps: buildBossReplySteps({
-                  includeOpenStep: !threadReadyForReply,
-                  composeReady: threadReadyForReply
-                })
+        taskSpec: {
+          preferredSurface: "browser",
+          executionMode: "planned",
+          inputs: {
+            browserInstruction
+          },
+          steps: [
+            {
+              label: "Open conversation and prefill reply",
+              surface: "browser",
+              action: "browserExecute",
+              params: {
+                instruction: "{{browserInstruction}}",
+                startUrl: "{{startUrl}}",
+                maxSteps: 6,
+                allowSameTabNavigation: true,
+                allowNewTabs: false,
+                allowCrossOriginNavigation: false
+              },
+              expect: {
+                textVisible: "{{typeTextSuffixPreview}}"
               }
             }
-          : {})
+          ]
+        }
       };
     },
     async draftReply({ rule, detection, controlPlane }) {

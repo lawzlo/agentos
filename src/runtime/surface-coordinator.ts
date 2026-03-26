@@ -9,14 +9,12 @@ import {
   type SurfacePriority,
   type SurfaceWaitPolicy
 } from "./surface-scheduler.js";
-import type { AgentOsConfig } from "../config.js";
 import type { SurfaceAdapter } from "./adapters/surface-adapter.js";
 
 interface SurfaceCoordinatorOptions {
   surfaceRegistry: SurfaceRegistry;
   surfaceScheduler: SurfaceScheduler;
   eventBus?: EventBus | null;
-  browserMode: AgentOsConfig["browserMode"];
 }
 
 interface SurfaceLeaseRequestLike {
@@ -57,13 +55,11 @@ export class SurfaceCoordinator {
   surfaceRegistry: SurfaceRegistry;
   surfaceScheduler: SurfaceScheduler;
   eventBus: EventBus | null;
-  browserMode: AgentOsConfig["browserMode"];
 
-  constructor({ surfaceRegistry, surfaceScheduler, eventBus = null, browserMode }: SurfaceCoordinatorOptions) {
+  constructor({ surfaceRegistry, surfaceScheduler, eventBus = null }: SurfaceCoordinatorOptions) {
     this.surfaceRegistry = surfaceRegistry;
     this.surfaceScheduler = surfaceScheduler;
     this.eventBus = eventBus;
-    this.browserMode = browserMode;
   }
 
   resolveSurfaceKey(surface: SurfaceName, workspaceKey: string | null | undefined = null): SurfaceKey {
@@ -71,7 +67,8 @@ export class SurfaceCoordinator {
       return "desktop-global";
     }
 
-    if (this.browserMode === "main_chrome" && process.platform === "darwin") {
+    const browserAdapter = this.surfaceRegistry.get<SurfaceAdapter & { usesSharedSession?: () => boolean }>("browser");
+    if (browserAdapter?.usesSharedSession?.()) {
       return "browser-main-session";
     }
 

@@ -53,12 +53,51 @@ export interface WorldState {
   workspaceId: string;
   appContext: Record<string, unknown> | null;
   capture: ArtifactReference | null;
-  ocrBlocks: OcrBlock[];
+  screenTextBlocks: ScreenTextBlock[];
   interactionCandidates: InteractionCandidate[];
   visibleText: string;
   recentActions: RecentAction[];
   summary: string | null;
   timestamp: string;
+}
+
+export interface BrowserNavigationPolicy {
+  allowSameTabNavigation?: boolean;
+  allowNewTabs?: boolean;
+  allowCrossOriginNavigation?: boolean;
+}
+
+export interface BrowserExecutionInput {
+  instruction: string;
+  startUrl?: string;
+  actions?: string[];
+  successCriteria?: string;
+  verificationSchema?: Record<string, unknown> | null;
+  maxSteps: number;
+  navigationPolicy?: BrowserNavigationPolicy;
+  timeoutMs?: number;
+  variables?: Record<string, unknown>;
+}
+
+export interface BrowserBlocker {
+  kind:
+    | "signin_required"
+    | "verification_required"
+    | "session_expired"
+    | "manual_intervention"
+    | "page_unavailable"
+    | "runtime_unavailable";
+  detail: string;
+  suggestedAction?: string | null;
+}
+
+export interface BrowserExecutionResult {
+  status: "completed" | "blocked" | "failed";
+  finalUrl: string;
+  blockers: BrowserBlocker[];
+  extractedResult?: unknown;
+  verification?: Record<string, unknown> | null;
+  observeResult?: unknown;
 }
 
 export interface ArtifactReference {
@@ -163,7 +202,7 @@ export interface WorkspaceProfile {
   updatedAt: string;
 }
 
-export interface OcrBlock {
+export interface ScreenTextBlock {
   id: string;
   text: string;
   confidence: number;

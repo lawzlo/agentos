@@ -103,7 +103,7 @@ export function hasBossThreadContent(worldState: WorldState | null): boolean {
   const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
   const threadSignals = candidates.filter((candidate) => {
     const source = String(((candidate.sourceHints ?? {}) as Record<string, unknown>).source ?? "").trim().toLowerCase();
-    if (!source.startsWith("ocr-boss-thread")) {
+    if (!source.startsWith("boss-thread")) {
       return false;
     }
     const summary = normalizeBossSummary(candidate.text || candidateHintText(candidate));
@@ -210,7 +210,7 @@ export function findBossListCandidateByTarget(
   const ranked = candidates
     .filter((candidate) => {
       const source = String(((candidate.sourceHints ?? {}) as Record<string, unknown>).source ?? "").trim().toLowerCase();
-      return source.startsWith("ocr-boss-list");
+      return source.startsWith("boss-list");
     })
     .map((candidate) => ({
       candidate,
@@ -237,7 +237,7 @@ export function isBossLikelyMidListCandidate(
     return false;
   }
   const source = String(((candidate.sourceHints ?? {}) as Record<string, unknown>).source ?? "").trim().toLowerCase();
-  if (!source.startsWith("ocr-boss-list")) {
+  if (!source.startsWith("boss-list")) {
     return false;
   }
   const centerY = Number(candidate.bounds?.centerY ?? Number.NaN);
@@ -285,7 +285,7 @@ export function pickBossThreadName(worldState: WorldState | null, fallback: stri
   const ranked = candidates
     .filter((candidate) => {
       const source = String(((candidate.sourceHints ?? {}) as Record<string, unknown>).source ?? "").trim().toLowerCase();
-      if (!source.startsWith("ocr-boss-thread")) {
+      if (!(source.startsWith("boss-thread-name") || source.startsWith("boss-thread"))) {
         return false;
       }
       const summary = normalizeBossSummary(candidate.text || candidateHintText(candidate));
@@ -358,13 +358,13 @@ export function scoreBossCandidate({
   }
   const confidence = Number(candidate.confidence ?? Number.NaN);
   const source = String(((candidate.sourceHints ?? {}) as Record<string, unknown>).source ?? "");
-  if (source.startsWith("ocr-boss-") && Number.isFinite(confidence) && confidence < 0.55) {
+  if (source.startsWith("boss-") && Number.isFinite(confidence) && confidence < 0.55) {
     score -= 18;
   }
-  if (source === "ocr-boss-list-names") {
+  if (source === "boss-list-unread") {
     score += 22;
   }
-  if (!source.startsWith("ocr-boss-list")) {
+  if (!source.startsWith("boss-list")) {
     score -= 12;
   }
 
@@ -373,13 +373,13 @@ export function scoreBossCandidate({
 
 function bossCandidateSourcePriority(candidate: InteractionCandidate): number {
   const source = String(((candidate.sourceHints ?? {}) as Record<string, unknown>).source ?? "").trim().toLowerCase();
-  if (source === "ocr-boss-list-names") {
+  if (source === "boss-list-unread") {
     return 0;
   }
-  if (source.startsWith("ocr-boss-list")) {
+  if (source.startsWith("boss-list")) {
     return 1;
   }
-  if (source.startsWith("ocr-boss-thread")) {
+  if (source.startsWith("boss-thread")) {
     return 3;
   }
   return 2;
@@ -466,6 +466,7 @@ export function findBossComposeCandidate(worldState: WorldState | null): Interac
       const hintText = candidateHintText(candidate);
       const summary = normalizeBossSummary(candidate.text || hintText);
       const tag = String(((candidate.sourceHints ?? {}) as Record<string, unknown>).tag ?? "").toLowerCase();
+      const source = String(((candidate.sourceHints ?? {}) as Record<string, unknown>).source ?? "").toLowerCase();
       const centerY = Number(candidate.bounds?.centerY ?? Number.NaN);
       const appBounds = ((worldState?.capture?.metadata ?? {}) as {
         windowBounds?: { y?: number; height?: number };
@@ -482,6 +483,9 @@ export function findBossComposeCandidate(worldState: WorldState | null): Interac
         (Number.isFinite(centerY) && Number.isFinite(upperChromeCutoff) && centerY <= upperChromeCutoff)
       ) {
         return false;
+      }
+      if (source.startsWith("boss-compose")) {
+        return true;
       }
       if (candidate.role === "textbox" || ["input", "textarea"].includes(tag)) {
         return true;
@@ -516,7 +520,8 @@ export function findBossSendCandidate(worldState: WorldState | null): Interactio
   return (
     candidates.find((candidate) => {
       const hintText = candidateHintText(candidate);
-      return candidate.role === "button" && (SEND_PATTERN.test(hintText) || SEND_PATTERN.test(candidate.text));
+      const source = String(((candidate.sourceHints ?? {}) as Record<string, unknown>).source ?? "").toLowerCase();
+      return (source.startsWith("boss-send") || candidate.role === "button") && (SEND_PATTERN.test(hintText) || SEND_PATTERN.test(candidate.text));
     }) ?? null
   );
 }

@@ -35,34 +35,6 @@ export interface SidecarBounds {
   centerY: number;
 }
 
-export interface SidecarOcrObservation {
-  text: string;
-  confidence: number;
-  box: SidecarBounds;
-}
-
-export interface SidecarNormalizedRegion {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
-
-export interface SidecarOcrOptions {
-  region?: SidecarNormalizedRegion | null;
-  scale?: number | null;
-}
-
-export interface SidecarOcrResult {
-  observations: SidecarOcrObservation[];
-}
-
-export interface SidecarFindTextResult {
-  found: boolean;
-  match?: SidecarOcrObservation;
-  count: number;
-}
-
 export interface SidecarPermissionsResult {
   accessibility: boolean;
   screenRecording: boolean;

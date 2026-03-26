@@ -7,15 +7,6 @@ export interface BoundsLike {
   centerY?: number;
 }
 
-export interface OcrBlockLike {
-  id?: string;
-  text?: string;
-  confidence?: number;
-  box?: BoundsLike;
-  bounds?: BoundsLike;
-  source?: string;
-}
-
 export interface InteractionCandidateLike {
   id?: string;
   kind?: string;
@@ -27,6 +18,15 @@ export interface InteractionCandidateLike {
   confidence?: number;
   sourceHints?: Record<string, unknown>;
   isInteractive?: boolean;
+}
+
+export interface ScreenTextBlockLike {
+  id?: string;
+  text?: string;
+  confidence?: number;
+  box?: BoundsLike;
+  bounds?: BoundsLike;
+  source?: string;
 }
 
 export interface RecentActionLike {
@@ -52,22 +52,6 @@ export function normalizeBounds(bounds: BoundsLike = {}) {
   };
 }
 
-export function normalizeOcrBlocks(
-  blocks: OcrBlockLike[] = [],
-  surface = "unknown"
-) {
-  return blocks
-    .filter((block) => block?.text)
-    .map((block, index) => ({
-      id: block.id ?? `${surface}-ocr-${index + 1}`,
-      text: String(block.text).trim(),
-      confidence: Number(block.confidence ?? 0),
-      bounds: normalizeBounds(block.box ?? block.bounds ?? {}),
-      source: block.source ?? "ocr"
-    }))
-    .filter((block) => block.text);
-}
-
 export function createInteractionCandidate(
   candidate: InteractionCandidateLike,
   index = 0,
@@ -86,12 +70,26 @@ export function createInteractionCandidate(
   };
 }
 
+export function createScreenTextBlock(
+  block: ScreenTextBlockLike,
+  index = 0,
+  surface = "unknown"
+) {
+  return {
+    id: block.id ?? `${surface}-text-${index + 1}`,
+    text: String(block.text ?? "").trim(),
+    confidence: Number(block.confidence ?? 0),
+    bounds: normalizeBounds(block.box ?? block.bounds ?? {}),
+    source: block.source ?? "screen"
+  };
+}
+
 export function createWorldState({
   surface,
   workspaceId,
   appContext,
   capture,
-  ocrBlocks = [],
+  screenTextBlocks = [],
   interactionCandidates = [],
   visibleText = "",
   recentActions = [],
@@ -101,7 +99,7 @@ export function createWorldState({
   workspaceId: string;
   appContext: Record<string, unknown> | null;
   capture: unknown;
-  ocrBlocks?: unknown[];
+  screenTextBlocks?: unknown[];
   interactionCandidates?: unknown[];
   visibleText?: string;
   recentActions?: RecentActionLike[];
@@ -113,7 +111,7 @@ export function createWorldState({
     workspaceId,
     appContext,
     capture,
-    ocrBlocks,
+    screenTextBlocks,
     interactionCandidates,
     visibleText,
     recentActions,

@@ -41,26 +41,6 @@ test("windows host bridge parses native desktop queries through PowerShell", asy
         };
       }
 
-      if (script.includes("Windows.Media.Ocr.OcrEngine")) {
-        return {
-          stdout: JSON.stringify({
-            observations: [
-              {
-                text: "Unread",
-                confidence: 0.7,
-                box: { x: 1, y: 2, width: 50, height: 20, centerX: 26, centerY: 12 }
-              },
-              {
-                text: "Send",
-                confidence: 0.95,
-                box: { x: 10, y: 20, width: 40, height: 20, centerX: 30, centerY: 30 }
-              }
-            ]
-          }),
-          stderr: ""
-        };
-      }
-
       return {
         stdout: JSON.stringify({ ok: true, echoed: true }),
         stderr: ""
@@ -74,17 +54,8 @@ test("windows host bridge parses native desktop queries through PowerShell", asy
   const windows = await bridge.listWindows();
   assert.equal(windows.windows[0].ownerName, "Slack");
 
-  const ocr = await bridge.ocrImage("screen.png");
-  assert.equal(ocr.observations[1].text, "Send");
-
-  const found = await bridge.findText("screen.png", "send") as Record<string, any>;
-  assert.equal(found.found, true);
-  assert.equal(found.match.text, "Send");
-
   const permissions = await bridge.getPermissionsStatus();
   assert.equal(permissions.accessibility, true);
-
-  assert.ok(scripts.some((script) => script.includes("Windows.Media.Ocr.OcrEngine")));
 });
 
 test("windows host bridge supports input primitives via PowerShell", async () => {

@@ -46,23 +46,15 @@ export function hasOutlookInboxRecoveryHint(lines: string[]) {
 
 export function findOutlookInboxRecoveryPoint(worldState: WorldState | null): { x: number; y: number } | null {
   const candidates = Array.isArray(worldState?.interactionCandidates) ? worldState.interactionCandidates : [];
-  const ocrBlocks = Array.isArray(worldState?.ocrBlocks) ? worldState.ocrBlocks : [];
   const windowBounds = findDesktopWindowBounds(worldState, "Microsoft Outlook");
   const maxSidebarX = windowBounds
     ? windowBounds.x + windowBounds.width * 0.38
     : Number.POSITIVE_INFINITY;
-  const ranked = [
-    ...candidates.map((candidate) => ({
+  const ranked = candidates.map((candidate) => ({
       text: String(candidate?.text ?? "").trim(),
       bounds: candidate?.bounds ?? null,
       score: (candidate?.isInteractive ? 10 : 0) + (candidate?.role === "button" ? 5 : 0)
-    })),
-    ...ocrBlocks.map((block) => ({
-      text: String(block?.text ?? "").trim(),
-      bounds: (block?.bounds ?? null) as InteractionCandidate["bounds"] | null,
-      score: 3
     }))
-  ]
     .filter((candidate) => {
       const text = String(candidate.text ?? "").trim();
       const bounds = candidate.bounds;

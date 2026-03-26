@@ -13,6 +13,8 @@ test("resolveConfig uses precedence between environment and explicit overrides",
   const previousValues = {
     AGENTOS_DATA_DIR: process.env.AGENTOS_DATA_DIR,
     AGENTOS_HEADLESS: process.env.AGENTOS_HEADLESS,
+    AGENTOS_BROWSER_MODE: process.env.AGENTOS_BROWSER_MODE,
+    AGENTOS_BROWSER_CDP_URL: process.env.AGENTOS_BROWSER_CDP_URL,
     AGENTOS_LEARNING_ENABLED: process.env.AGENTOS_LEARNING_ENABLED,
     MODEL_TIMEOUT_MS: process.env.MODEL_TIMEOUT_MS,
     AGENTOS_LICENSE_BASE_URL: process.env.AGENTOS_LICENSE_BASE_URL,
@@ -22,6 +24,8 @@ test("resolveConfig uses precedence between environment and explicit overrides",
 
   process.env.AGENTOS_DATA_DIR = path.join(dataRoot, "from-env");
   process.env.AGENTOS_HEADLESS = "false";
+  process.env.AGENTOS_BROWSER_MODE = "managed_profile";
+  process.env.AGENTOS_BROWSER_CDP_URL = "http://127.0.0.1:9222";
   process.env.AGENTOS_LEARNING_ENABLED = "false";
   process.env.MODEL_TIMEOUT_MS = "12000";
   process.env.AGENTOS_BROWSER_EXECUTABLE = browserBinary;
@@ -48,7 +52,9 @@ test("resolveConfig uses precedence between environment and explicit overrides",
     assert.equal(config.daemonDir, path.join(config.dataDir, "daemon"));
     assert.equal(config.port, 4100);
     assert.equal(config.headless, true);
+    assert.equal(config.browserMode, "managed_profile");
     assert.equal(config.browserExecutable, browserBinary);
+    assert.equal(config.browserCdpUrl, "http://127.0.0.1:9222");
     assert.equal(config.learning.enabled, true);
     assert.equal(config.learning.maxDepth, 9);
     assert.equal(config.model.baseUrl, "https://model.local");
@@ -70,6 +76,16 @@ test("resolveConfig uses precedence between environment and explicit overrides",
       delete process.env.AGENTOS_HEADLESS;
     } else {
       process.env.AGENTOS_HEADLESS = previousValues.AGENTOS_HEADLESS;
+    }
+    if (previousValues.AGENTOS_BROWSER_MODE === undefined) {
+      delete process.env.AGENTOS_BROWSER_MODE;
+    } else {
+      process.env.AGENTOS_BROWSER_MODE = previousValues.AGENTOS_BROWSER_MODE;
+    }
+    if (previousValues.AGENTOS_BROWSER_CDP_URL === undefined) {
+      delete process.env.AGENTOS_BROWSER_CDP_URL;
+    } else {
+      process.env.AGENTOS_BROWSER_CDP_URL = previousValues.AGENTOS_BROWSER_CDP_URL;
     }
     if (previousValues.AGENTOS_LEARNING_ENABLED === undefined) {
       delete process.env.AGENTOS_LEARNING_ENABLED;
@@ -139,6 +155,51 @@ test("defaultDataDir resolves under the user's home directory", () => {
       delete process.env.AGENTOS_DATA_DIR;
     } else {
       process.env.AGENTOS_DATA_DIR = previous;
+    }
+  }
+});
+
+test("resolveConfig defaults browser automation to headed unless explicitly enabled", () => {
+  const previous = process.env.AGENTOS_HEADLESS;
+  const previousMode = process.env.AGENTOS_BROWSER_MODE;
+  delete process.env.AGENTOS_HEADLESS;
+  delete process.env.AGENTOS_BROWSER_MODE;
+
+  try {
+    assert.equal(resolveConfig({ dataDir: os.tmpdir() }).headless, false);
+    assert.equal(resolveConfig({ dataDir: os.tmpdir() }).browserMode, "attach_existing");
+    process.env.AGENTOS_HEADLESS = "true";
+    assert.equal(resolveConfig({ dataDir: os.tmpdir() }).headless, true);
+  } finally {
+    if (previous === undefined) {
+      delete process.env.AGENTOS_HEADLESS;
+    } else {
+      process.env.AGENTOS_HEADLESS = previous;
+    }
+    if (previousMode === undefined) {
+      delete process.env.AGENTOS_BROWSER_MODE;
+    } else {
+      process.env.AGENTOS_BROWSER_MODE = previousMode;
+    }
+  }
+});
+
+test("resolveConfig normalizes browser CDP endpoint inputs", () => {
+  const previousPort = process.env.AGENTOS_BROWSER_REMOTE_DEBUGGING_PORT;
+  delete process.env.AGENTOS_BROWSER_CDP_URL;
+  process.env.AGENTOS_BROWSER_REMOTE_DEBUGGING_PORT = "9223";
+
+  try {
+    assert.equal(resolveConfig({ dataDir: os.tmpdir() }).browserCdpUrl, "http://127.0.0.1:9223");
+    assert.equal(
+      resolveConfig({ dataDir: os.tmpdir(), browserCdpUrl: "ws://127.0.0.1:9224/devtools/browser/test" }).browserCdpUrl,
+      "ws://127.0.0.1:9224/devtools/browser/test"
+    );
+  } finally {
+    if (previousPort === undefined) {
+      delete process.env.AGENTOS_BROWSER_REMOTE_DEBUGGING_PORT;
+    } else {
+      process.env.AGENTOS_BROWSER_REMOTE_DEBUGGING_PORT = previousPort;
     }
   }
 });

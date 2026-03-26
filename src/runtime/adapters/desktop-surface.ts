@@ -4,7 +4,7 @@ import path from "node:path";
 import { SurfaceAdapter } from "./surface-adapter.js";
 import { MacOSHostBridge } from "../host-bridges/macos-bridge.js";
 import { WindowsHostBridge } from "../host-bridges/windows-bridge.js";
-import { createInteractionCandidate, createWorldState, normalizeBounds, normalizeOcrBlocks, summarizeRecentActions } from "../world-state.js";
+import { createInteractionCandidate, createWorldState, normalizeBounds, summarizeRecentActions } from "../world-state.js";
 import type { BoundsLike } from "../world-state.js";
 import type { SidecarAccessibilityElementInfo, SidecarAccessibilitySnapshotResult } from "../../types/native-sidecar.js";
 import type { AgentModelClient } from "../model-client.js";
@@ -13,7 +13,6 @@ export interface DesktopSurfaceTimeoutConfig {
   focusMs: number;
   frontmostMs: number;
   captureMs: number;
-  ocrMs: number;
   windowsMs: number;
   permissionsMs: number;
   accessibilityMs: number;
@@ -23,7 +22,6 @@ const DEFAULT_DESKTOP_SURFACE_TIMEOUTS: DesktopSurfaceTimeoutConfig = {
   focusMs: 3200,
   frontmostMs: 1400,
   captureMs: 4500,
-  ocrMs: 3500,
   windowsMs: 1500,
   permissionsMs: 1500,
   accessibilityMs: 1800
@@ -309,81 +307,6 @@ function appMatchesTargetName(currentAppName: unknown, targetAppName: unknown) {
   );
 }
 
-function pointWithinBounds(x: number, y: number, bounds: { x: number; y: number; width: number; height: number }) {
-  return x >= bounds.x && x <= bounds.x + bounds.width && y >= bounds.y && y <= bounds.y + bounds.height;
-}
-
-function filterOcrBlocksToFrontmostWindows({
-  ocrBlocks,
-  frontmostApp,
-  windows,
-  captureWindowNumber = null
-}: {
-  ocrBlocks: Array<{ text?: string; bounds?: { centerX?: number; centerY?: number } }>;
-  frontmostApp: Record<string, unknown> | null;
-  windows: Array<Record<string, unknown>>;
-  captureWindowNumber?: number | null;
-}) {
-  const appKey = normalizeAppKey(frontmostApp?.appName);
-  if (!appKey) {
-    return ocrBlocks;
-  }
-
-  const matchingWindows = windows.filter((windowInfo) => {
-    const ownerName = normalizeAppKey(windowInfo.ownerName);
-    const windowName = normalizeAppKey(windowInfo.windowName);
-    return ownerName.includes(appKey) || windowName.includes(appKey);
-  });
-
-  if (!matchingWindows.length) {
-    return ocrBlocks;
-  }
-
-  const capturedWindow = Number.isFinite(Number(captureWindowNumber))
-    ? matchingWindows.find((windowInfo) => Number(windowInfo.windowNumber ?? NaN) === Number(captureWindowNumber))
-    : null;
-  if (capturedWindow) {
-    const bounds = capturedWindow.bounds as { width?: number; height?: number } | undefined;
-    const width = Number(bounds?.width ?? 0);
-    const height = Number(bounds?.height ?? 0);
-    if (width > 0 && height > 0) {
-      const locallyFiltered = ocrBlocks.filter((block) => {
-        const centerX = Number(block?.bounds?.centerX);
-        const centerY = Number(block?.bounds?.centerY);
-        return (
-          Number.isFinite(centerX) &&
-          Number.isFinite(centerY) &&
-          centerX >= 0 &&
-          centerX <= width &&
-          centerY >= 0 &&
-          centerY <= height
-        );
-      });
-      if (locallyFiltered.length) {
-        return locallyFiltered;
-      }
-    }
-  }
-
-  const filtered = ocrBlocks.filter((block) => {
-    const centerX = Number(block?.bounds?.centerX);
-    const centerY = Number(block?.bounds?.centerY);
-    if (!Number.isFinite(centerX) || !Number.isFinite(centerY)) {
-      return false;
-    }
-
-    return matchingWindows.some((windowInfo) => {
-      const bounds = windowInfo.bounds as { x: number; y: number; width: number; height: number } | undefined;
-      if (!bounds) {
-        return false;
-      }
-      return pointWithinBounds(centerX, centerY, bounds);
-    });
-  });
-
-  return filtered.length ? filtered : ocrBlocks;
-}
-
 function matchingDesktopWindowsForApp(windows: Array<Record<string, unknown>>, appName: unknown) {
   const aliases = desktopAppAliases(appName);
   if (!aliases.length) {
@@ -395,51 +318,6 @@ function matchingDesktopWindowsForApp(windows: Array<Record<string, unknown>>, a
     const windowName = normalizeAppKey(windowInfo.windowName);
     return aliases.some((alias) => ownerName.includes(alias) || windowName.includes(alias));
   });
-}
-
-function isWeChatDesktopApp(value: unknown) {
-  return appMatchesTargetName(value, "WeChat");
-}
-
-const WECHAT_SUPPLEMENTAL_OCR_REGIONS = [
-  {
-    source: "ocr-wechat-list",
-    region: { x: 0.1, y: 0.09, width: 0.34, height: 0.78 },
-    scale: 2.4
-  },
-  {
-    source: "ocr-wechat-compose",
-    region: { x: 0.34, y: 0.78, width: 0.6, height: 0.18 },
-    scale: 2.2
-  }
-] as const;
-
-function mergeOcrBlocks(blocks: Array<{ id?: string; text?: string; confidence?: number; bounds?: BoundsLike; source?: string }>) {
-  const seen = new Set<string>();
-  const merged: Array<{ id?: string; text?: string; confidence?: number; bounds?: BoundsLike; source?: string }> = [];
-  for (const block of blocks) {
-    const text = String(block?.text ?? "").trim();
-    if (!text) {
-      continue;
-    }
-    const bounds = normalizeBounds(block?.bounds ?? {});
-    const key = [
-      text.toLowerCase(),
-      Math.round(Number(bounds.centerX ?? 0)),
-      Math.round(Number(bounds.centerY ?? 0)),
-      String(block?.source ?? "ocr")
-    ].join("|");
-    if (seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-    merged.push({
-      ...block,
-      text,
-      bounds
-    });
-  }
-  return merged;
 }
 
 function pickPrimaryWindowNumber(windows: Array<Record<string, unknown>>, appName: unknown) {
@@ -587,76 +465,9 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
     return this.bridge;
   }
 
-  #createCandidates(ocrBlocks) {
-    return ocrBlocks.map((block, index) =>
-      createInteractionCandidate(
-        {
-          id: block.id ?? `desktop-candidate-${index + 1}`,
-          kind: "text",
-          text: block.text,
-          role: "text",
-          bounds: block.bounds,
-          confidence: block.confidence ?? 0.65,
-          sourceHints: { source: block.source ?? "ocr" },
-          isInteractive: true
-        },
-        index,
-        "desktop"
-      )
-    );
-  }
-
-  async #collectSupplementalOcr({
-    bridge,
-    capturePath,
-    frontmostAppName,
-    windowNumber
-  }: {
-    bridge: Record<string, unknown>;
-    capturePath: string;
-    frontmostAppName: unknown;
-    windowNumber: number | null;
-  }) {
-    if (!capturePath || !windowNumber || !isWeChatDesktopApp(frontmostAppName) || typeof bridge.ocrImage !== "function") {
-      return [];
-    }
-    const ocrImage = bridge.ocrImage as (
-      filePath: string,
-      options?: { region?: { x: number; y: number; width: number; height: number }; scale?: number }
-    ) => Promise<{ observations?: unknown[] }>;
-
-    const regionResults = await Promise.all(
-      WECHAT_SUPPLEMENTAL_OCR_REGIONS.map(async (entry) => {
-        const result = await this.#withTimeout(
-          ocrImage(capturePath, {
-            region: entry.region,
-            scale: entry.scale
-          })
-            .then((value) => ({
-              observations: Array.isArray(value?.observations) ? value.observations : []
-            }))
-            .catch(() => ({ observations: [] })),
-          this.timeouts.ocrMs,
-          () => ({ observations: [] })
-        );
-        return normalizeOcrBlocks(
-          result.observations.map((observation, index) => ({
-            ...observation,
-            id: `${entry.source}-${index + 1}`,
-            source: entry.source
-          })),
-          "desktop"
-        );
-      })
-    );
-
-    return mergeOcrBlocks(regionResults.flat());
-  }
-
-  #visibleText(accessibilityCandidates, ocrBlocks) {
+  #visibleText(accessibilityCandidates) {
     return uniqueStrings([
-      ...accessibilityCandidates.map((candidate) => candidate.text),
-      ...ocrBlocks.map((block) => block.text)
+      ...accessibilityCandidates.map((candidate) => candidate.text)
     ])
       .join("\n")
       .slice(0, 4000);
@@ -760,7 +571,7 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
       accessibility,
       accessibilityCandidateCount: accessibilityCandidates.length,
       interactionCandidates: accessibilityCandidates,
-      visibleText: this.#visibleText(accessibilityCandidates, [])
+      visibleText: this.#visibleText(accessibilityCandidates)
     };
   }
 
@@ -885,28 +696,6 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
       return null;
     });
     const actualCaptureWindowNumber = Number((capture?.metadata ?? null)?.windowNumber ?? NaN);
-    const ocrResult = capture?.path
-      ? await this.#withTimeout(
-          bridge
-            .ocrImage(capture.path)
-            .then((result) => ({
-              observations: Array.isArray(result?.observations) ? result.observations : [],
-              error: null
-            }))
-            .catch((error) => ({
-              observations: [],
-              error: errorMessage(error)
-            })),
-          this.timeouts.ocrMs,
-          () => ({
-            observations: [],
-            error: `ocr_image timed out after ${this.timeouts.ocrMs}ms`
-          })
-        )
-      : {
-          observations: [],
-          error: captureError ? `capture unavailable: ${captureError}` : "capture unavailable"
-        };
     const accessibility =
       typeof bridge.getAccessibilitySnapshot === "function" && effectiveCaptureAppName
         ? await this.#withTimeout(
@@ -915,30 +704,9 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
             () => null
           )
         : null;
-    const ocrError = typeof ocrResult?.error === "string" && ocrResult.error.trim() ? ocrResult.error.trim() : null;
-    const supplementalOcrBlocks = capture?.path
-      ? await this.#collectSupplementalOcr({
-          bridge,
-          capturePath: capture.path,
-          frontmostAppName: frontmostApp?.appName,
-          windowNumber: Number.isFinite(actualCaptureWindowNumber) && actualCaptureWindowNumber > 0 ? actualCaptureWindowNumber : null
-        })
-      : [];
-    const ocrBlocks = filterOcrBlocksToFrontmostWindows({
-      ocrBlocks: mergeOcrBlocks([
-        ...normalizeOcrBlocks(ocrResult.observations ?? [], "desktop"),
-        ...supplementalOcrBlocks
-      ]),
-      frontmostApp: { ...(frontmostApp ?? {}), appName: effectiveCaptureAppName } as Record<string, unknown>,
-      windows: windowsList,
-      captureWindowNumber: Number.isFinite(actualCaptureWindowNumber) && actualCaptureWindowNumber > 0 ? actualCaptureWindowNumber : null
-    });
     const accessibilityCandidates = createAccessibilityCandidates(accessibility, "desktop");
-    const interactionCandidates = dedupeInteractionCandidates([
-      ...accessibilityCandidates,
-      ...this.#createCandidates(ocrBlocks)
-    ]);
-    const visibleText = this.#visibleText(accessibilityCandidates, ocrBlocks);
+    const interactionCandidates = dedupeInteractionCandidates([...accessibilityCandidates]);
+    const visibleText = this.#visibleText(accessibilityCandidates);
 
     return createWorldState({
       surface: "desktop",
@@ -952,17 +720,13 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
         accessibilityCandidateCount: accessibilityCandidates.length,
         targetAppName: effectiveCaptureAppName || null,
         captureAvailable: Boolean(capture),
-        captureError,
-        supplementalOcrBlockCount: supplementalOcrBlocks.length,
-        ocrAvailable: !ocrError,
-        ocrError
+        captureError
       },
       capture,
-      ocrBlocks,
       interactionCandidates,
       visibleText,
       recentActions: summarizeRecentActions(recentActions),
-      summary: `${effectiveCaptureAppName || frontmostApp.appName} with ${accessibilityCandidates.length} accessibility candidates and ${ocrBlocks.length} OCR observations across ${(windows.windows ?? []).length} windows${ocrError ? ` (OCR unavailable: ${ocrError})` : ""}`
+      summary: `${effectiveCaptureAppName || frontmostApp.appName} with ${accessibilityCandidates.length} accessibility candidates across ${(windows.windows ?? []).length} windows`
     });
   }
 
@@ -1037,14 +801,12 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
     allowBoundsFallback?: boolean;
   }): Promise<
     | {
-        kind: "interaction" | "ocr" | "bounds";
+        kind: "interaction" | "bounds";
         point: { x: number; y: number };
         candidate?: Record<string, unknown> | null;
-        ocrResult?: Record<string, unknown> | null;
       }
     | null
   > {
-    const bridge = this.#requireBridge();
     const params = step.params ?? {};
     const target = params.target as Record<string, unknown> | undefined;
     const targetText = String(params.targetQuery ?? target?.text ?? "").trim();
@@ -1073,19 +835,6 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
           },
           candidate: interactionMatch
         };
-      }
-
-      const capturePath = String((observation as { capture?: { path?: string } } | null)?.capture?.path ?? "").trim();
-      if (capturePath) {
-        const result = await bridge.findText(capturePath, targetText).catch(() => ({ found: false }));
-        if (result.found && result.match?.box) {
-          const box = result.match.box;
-          return {
-            kind: "ocr",
-            point: { x: Number(box.centerX ?? 0), y: Number(box.centerY ?? 0) },
-            ocrResult: result
-          };
-        }
       }
     }
 
@@ -1176,29 +925,37 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
       case "scrollSurface":
         return bridge.scroll(params.dx ?? 0, params.dy ?? 0);
       case "clickText": {
-        const capture = await this.capture({ task, workspace, traceId, label: `ocr-${step.id}` });
-        const result = await bridge.findText(capture.path, params.text);
-        if (!result.found) {
+        const targetText = String(params.text ?? "").trim();
+        const observation = await this.observe({ task, workspace, traceId, label: `click-text-${step.id}` });
+        const candidate = findBestInteractionCandidateForQuery(
+          Array.isArray(observation?.interactionCandidates) ? observation.interactionCandidates as Array<Record<string, unknown>> : [],
+          targetText
+        );
+        if (!candidate?.bounds) {
           throw new Error(`Could not locate text "${params.text}" on screen.`);
         }
-        const box = result.match.box;
-        await bridge.clickAt(box.centerX, box.centerY);
-        return result;
-      }
-      case "ocrScreen": {
-        const capture = await this.capture({ task, workspace, traceId, label: `ocr-${step.id}` });
-        return bridge.ocrImage(capture.path);
+        const bounds = candidate.bounds as Record<string, unknown>;
+        await bridge.clickAt(Number(bounds.centerX ?? 0), Number(bounds.centerY ?? 0));
+        return { found: true, method: "interaction", match: candidate };
       }
       case "waitForText": {
         const timeoutMs = params.timeoutMs ?? 10000;
         const pollMs = params.pollMs ?? 500;
         const started = Date.now();
+        const targetText = String(params.text ?? "").trim();
 
         while (Date.now() - started < timeoutMs) {
-          const capture = await this.capture({ task, workspace, traceId, label: `wait-${step.id}` });
-          const result = await bridge.findText(capture.path, params.text);
-          if (result.found) {
-            return result;
+          const observation = await this.observe({ task, workspace, traceId, label: `wait-${step.id}` });
+          const interactionCandidates = Array.isArray(observation?.interactionCandidates)
+            ? observation.interactionCandidates as Array<Record<string, unknown>>
+            : [];
+          const foundCandidate = findBestInteractionCandidateForQuery(interactionCandidates, targetText);
+          if (foundCandidate || String(observation?.visibleText ?? "").includes(targetText)) {
+            return {
+              found: true,
+              method: foundCandidate ? "interaction" : "visibleText",
+              match: foundCandidate ?? { text: targetText }
+            };
           }
           await new Promise((resolve) => setTimeout(resolve, pollMs));
         }
@@ -1263,7 +1020,7 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
             allowBoundsFallback: false
           });
           if (resolved) {
-            return resolved.ocrResult ?? { found: true, method: resolved.kind, match: { text: targetText } };
+            return { found: true, method: resolved.kind, match: { text: targetText } };
           }
           await new Promise((resolve) => setTimeout(resolve, pollMs));
         }
@@ -1331,23 +1088,15 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
       | { text?: string; region?: { x?: number; y?: number; width?: number; height?: number }; scale?: number }
       | undefined;
     if (typeof regionTextVisible?.text === "string" && regionTextVisible.text.trim()) {
-      capture ??= await this.capture({ task, workspace, traceId, label: "verify-region-text" });
-      const region = regionTextVisible.region ?? null;
-      const scale = Number(regionTextVisible.scale ?? 0);
-      const result = await bridge.ocrImage(capture.path, {
-        ...(region ? { region } : {}),
-        ...(Number.isFinite(scale) && scale > 0 ? { scale } : {})
-      });
-      const observations = Array.isArray(result?.observations) ? result.observations : [];
-      const match = findRegionObservationMatch(observations, regionTextVisible.text);
+      const observation = await this.observe({ task, workspace, traceId, label: "verify-region-text" });
+      const visible = String(observation?.visibleText ?? "");
+      const match = visible.includes(regionTextVisible.text)
+        ? { text: regionTextVisible.text, source: "visibleText" }
+        : null;
       details.regionTextVisible = Boolean(match);
       details.regionTextQuery = regionTextVisible.text;
-      if (region) {
-        details.regionTextRegion = region;
-      }
       if (!match) {
-        details.regionTextPreview = uniqueStrings(observations.map((entry) => entry?.text)).slice(0, 8);
-        details.regionTextCombinedPreview = combinedObservationPreview(observations) || null;
+        details.regionTextPreview = visible.split("\n").slice(0, 8);
         return { ok: false, details };
       }
       details.regionTextMatch = match;
@@ -1361,7 +1110,8 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
         }>)
       : [];
     if (regionTextAnyVisible.length > 0) {
-      capture ??= await this.capture({ task, workspace, traceId, label: "verify-region-text-any" });
+      const observation = await this.observe({ task, workspace, traceId, label: "verify-region-text-any" });
+      const visible = String(observation?.visibleText ?? "");
       const attemptedChecks: Array<Record<string, unknown>> = [];
       let matchedCheck: Record<string, unknown> | null = null;
       for (const entry of regionTextAnyVisible) {
@@ -1369,28 +1119,16 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
         if (!text) {
           continue;
         }
-        const region = entry.region ?? null;
-        const scale = Number(entry.scale ?? 0);
-        const result = await bridge.ocrImage(capture.path, {
-          ...(region ? { region } : {}),
-          ...(Number.isFinite(scale) && scale > 0 ? { scale } : {})
-        });
-        const observations = Array.isArray(result?.observations) ? result.observations : [];
-        const match = findRegionObservationMatch(observations, text);
+        const match = visible.includes(text);
         attemptedChecks.push({
           text,
-          ...(region ? { region } : {}),
-          ...(Number.isFinite(scale) && scale > 0 ? { scale } : {}),
-          preview: uniqueStrings(observations.map((observation) => observation?.text)).slice(0, 8),
-          combinedPreview: combinedObservationPreview(observations) || null,
+          preview: visible.split("\n").slice(0, 8),
           matched: Boolean(match)
         });
         if (match) {
           matchedCheck = {
             text,
-            ...(region ? { region } : {}),
-            ...(Number.isFinite(scale) && scale > 0 ? { scale } : {}),
-            match
+            match: { text, source: "visibleText" }
           };
           break;
         }
@@ -1490,13 +1228,17 @@ export class DesktopSurfaceAdapter extends SurfaceAdapter {
 
     const targetText = check.textVisible ?? check.targetVisible?.text;
     if (targetText) {
-      capture ??= await this.capture({ task, workspace, traceId, label: "verify-text" });
-      const result = await bridge.findText(capture.path, targetText);
-      details.textVisible = result.found;
-      if (!result.found) {
+      const observation = await this.observe({ task, workspace, traceId, label: "verify-text" });
+      const interactionCandidates = Array.isArray(observation?.interactionCandidates)
+        ? observation.interactionCandidates as Array<Record<string, unknown>>
+        : [];
+      const foundCandidate = findBestInteractionCandidateForQuery(interactionCandidates, String(targetText));
+      const found = Boolean(foundCandidate) || String(observation?.visibleText ?? "").includes(String(targetText));
+      details.textVisible = found;
+      if (!found) {
         return { ok: false, details };
       }
-      details.textMatch = result.match;
+      details.textMatch = foundCandidate ?? { text: targetText, source: "visibleText" };
     }
 
     return { ok: true, details };

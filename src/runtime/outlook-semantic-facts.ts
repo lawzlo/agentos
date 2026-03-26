@@ -52,7 +52,7 @@ function collectVisibleLines(worldState: WorldState | null): string[] {
     }
   }
 
-  for (const block of Array.isArray(worldState?.ocrBlocks) ? worldState.ocrBlocks : []) {
+  for (const block of Array.isArray(worldState?.screenTextBlocks) ? worldState.screenTextBlocks : []) {
     const text = String((block as { text?: unknown } | null)?.text ?? "").trim();
     if (text) {
       lines.push(text);

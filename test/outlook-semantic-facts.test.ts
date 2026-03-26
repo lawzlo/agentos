@@ -17,7 +17,7 @@ test("outlook semantic facts prefer a visible latest snippet and stop before quo
         path: "/tmp/outlook-semantic-fallback.png",
         metadata: {}
       },
-      ocrBlocks: [],
+      screenTextBlocks: [],
       interactionCandidates: [
         {
           id: "thread-row",
@@ -87,7 +87,7 @@ test("outlook semantic facts can use a model-backed unlabeled thread", async () 
         path: "/tmp/outlook-semantic-model.png",
         metadata: {}
       },
-      ocrBlocks: [],
+      screenTextBlocks: [],
       interactionCandidates: [],
       visibleText: [
         "Microsoft Outlook",

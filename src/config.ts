@@ -51,8 +51,9 @@ export interface AgentOsConfig {
   masterKeyPath: string;
   inboxDir: string;
   headless: boolean;
-  browserMode: "managed_profile" | "main_chrome";
+  browserMode: BrowserMode;
   browserExecutable?: string;
+  browserCdpUrl?: string;
   livePacks: Record<string, LivePack> | null;
   model: AgentModelConfig;
   license: LicenseConfig;
@@ -60,12 +61,15 @@ export interface AgentOsConfig {
   jobs: JobsConfig;
 }
 
+export type BrowserMode = "attach_existing" | "managed_profile";
+
 export interface ConfigOverrides {
   port?: number | string;
   dataDir?: string;
   headless?: boolean;
-  browserMode?: "managed_profile" | "main_chrome";
+  browserMode?: BrowserMode;
   browserExecutable?: string;
+  browserCdpUrl?: string;
   livePacks?: Record<string, LivePack> | null;
   model?: Partial<AgentModelConfig>;
   license?: Partial<LicenseConfig>;
@@ -211,6 +215,53 @@ function providerEnvApiKey(provider: AgentModelProvider): string | null {
   return null;
 }
 
+function normalizeBrowserMode(value: unknown): BrowserMode | null {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+
+  if (
+    normalized === "attach_existing" ||
+    normalized === "attach-existing" ||
+    normalized === "attach" ||
+    normalized === "existing"
+  ) {
+    return "attach_existing";
+  }
+
+  if (
+    normalized === "managed_profile" ||
+    normalized === "managed-profile" ||
+    normalized === "managed"
+  ) {
+    return "managed_profile";
+  }
+
+  return null;
+}
+
+function normalizeBrowserCdpUrl(value: unknown): string | undefined {
+  const normalized = String(value ?? "").trim();
+  if (!normalized) {
+    return undefined;
+  }
+
+  if (/^\d+$/u.test(normalized)) {
+    return `http://127.0.0.1:${normalized}`;
+  }
+
+  if (/^https?:\/\//iu.test(normalized) || /^wss?:\/\//iu.test(normalized)) {
+    return normalized;
+  }
+
+  if (/^[^:/]+:\d+$/u.test(normalized)) {
+    return `http://${normalized}`;
+  }
+
+  return normalized;
+}
+
 function resolveModelProvider({
   overrideProvider,
   envProvider,
@@ -343,6 +394,14 @@ export function resolveConfig(overrides: ConfigOverrides = {}): AgentOsConfig {
     "free"
       ? "free"
       : "pro";
+  const resolvedBrowserMode =
+    normalizeBrowserMode(overrides.browserMode) ??
+    normalizeBrowserMode(process.env.AGENTOS_BROWSER_MODE) ??
+    "attach_existing";
+  const resolvedBrowserCdpUrl =
+    normalizeBrowserCdpUrl(overrides.browserCdpUrl) ??
+    normalizeBrowserCdpUrl(process.env.AGENTOS_BROWSER_CDP_URL) ??
+    normalizeBrowserCdpUrl(process.env.AGENTOS_BROWSER_REMOTE_DEBUGGING_PORT);
 
   return {
     port: Number(overrides.port ?? process.env.PORT ?? 3017),
@@ -351,11 +410,10 @@ export function resolveConfig(overrides: ConfigOverrides = {}): AgentOsConfig {
     dbPath: path.join(dataDir, "agentos.sqlite"),
     masterKeyPath: path.join(dataDir, "master.key"),
     inboxDir: path.join(dataDir, "inbox"),
-    headless: overrides.headless ?? process.env.AGENTOS_HEADLESS !== "false",
-    browserMode:
-      overrides.browserMode ??
-      (String(process.env.AGENTOS_BROWSER_MODE ?? "").trim().toLowerCase() === "managed_profile" ? "managed_profile" : "main_chrome"),
+    headless: overrides.headless ?? process.env.AGENTOS_HEADLESS === "true",
+    browserMode: resolvedBrowserMode,
     browserExecutable: overrides.browserExecutable ?? detectBrowserExecutable(),
+    browserCdpUrl: resolvedBrowserCdpUrl,
     livePacks: overrides.livePacks ?? null,
     model: {
       provider: resolvedModelProvider,

@@ -22,6 +22,9 @@ test("surface state probes run through daemon leases and surface snapshots expos
       "browser",
       {
         name: "browser",
+        usesSharedSession() {
+          return true;
+        },
         async act() {
           return { ok: true };
         },
@@ -38,7 +41,7 @@ test("surface state probes run through daemon leases and surface snapshots expos
               url: "https://app.slack.com/client"
             },
             capture: null,
-            ocrBlocks: [],
+            screenTextBlocks: [],
             interactionCandidates: [],
             visibleText: "Slack\nSign in to Slack\nContinue with Google",
             recentActions: [],
@@ -75,7 +78,7 @@ test("surface state probes run through daemon leases and surface snapshots expos
 
     const surfaces = await fetch(`${server.baseUrl}/surfaces`).then((response) => response.json());
     const activeSurface = (surfaces.surfaces as Array<Record<string, unknown>>).find(
-      (entry) => entry.surfaceKey === "browser-workspace:state-route-browser"
+      (entry) => entry.surfaceKey === "browser-main-session"
     ) as
       | ({
           activeHolder?: {
@@ -93,7 +96,7 @@ test("surface state probes run through daemon leases and surface snapshots expos
 
     const firstProbe = await firstProbePromise;
     assert.equal(firstProbe.report?.readinessState, "blocked_signin");
-    assert.equal(firstProbe.surfaceKey, "browser-workspace:state-route-browser");
+    assert.equal(firstProbe.surfaceKey, "browser-main-session");
   } finally {
     await server.close();
   }

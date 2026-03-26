@@ -239,6 +239,65 @@ test("buildTaskSpecFromWatchRule forces explicit reply plans into planned mode a
   assert.equal(String(taskSpec.inputs?.typeTextSuffixPreview).endsWith("verification."), true);
 });
 
+test("buildTaskSpecFromWatchRule materializes embedded browser instruction templates before step expansion", () => {
+  const service = createService();
+  const watchRule = {
+    ...createWatchRule(),
+    preferredSurface: "browser",
+    livePack: "boss-browser"
+  } satisfies WatchRule;
+
+  const taskSpec = service.buildTaskSpecFromWatchRule(
+    watchRule,
+    {
+      summary: "Lazaro Waters",
+      inputs: {
+        startUrl: "https://www.zhipin.com/web/geek/chat",
+        watchSummary: "Lazaro Waters",
+        watchContext: "Curious, are you using AWS or Google Cloud?"
+      },
+      taskSpec: {
+        preferredSurface: "browser",
+        inputs: {
+          browserInstruction:
+            "Open the active conversation for {{watchSummary}} in the current tab and prefill exactly this reply without sending it:\n{{typeText}}\nContext:\n{{watchContext}}"
+        },
+        steps: [
+          {
+            label: "Run browser automation",
+            surface: "browser",
+            action: "browserExecute",
+            params: {
+              instruction: "{{browserInstruction}}",
+              startUrl: "{{startUrl}}",
+              maxSteps: 6
+            },
+            expect: {
+              textVisible: "{{typeTextSuffixPreview}}"
+            }
+          }
+        ]
+      }
+    },
+    {
+      replyText: "Thanks for your message. I can chat on Wednesday afternoon."
+    }
+  );
+
+  assert.match(
+    String(taskSpec.inputs?.browserInstruction ?? ""),
+    /prefill exactly this reply without sending it:\nThanks for your message\./
+  );
+  assert.match(String(taskSpec.inputs?.browserInstruction ?? ""), /Lazaro Waters/);
+  assert.match(
+    String(taskSpec.steps?.[0]?.params?.instruction ?? ""),
+    /Wednesday afternoon\.\nContext:\nCurious, are you using AWS or Google Cloud\?/
+  );
+  assert.equal(taskSpec.steps?.[0]?.action, "browserExecute");
+  assert.equal(taskSpec.steps?.[0]?.params?.startUrl, "https://www.zhipin.com/web/geek/chat");
+  assert.equal(taskSpec.steps?.[0]?.expect?.textVisible, String(taskSpec.inputs?.typeTextSuffixPreview ?? ""));
+});
+
 test("buildTaskSpecFromWatchRule rejects unresolved typeText placeholders", () => {
   const service = createService();
   const watchRule = createWatchRule();
@@ -498,7 +557,7 @@ test("scan skips a watch trigger when extractContext cannot produce a stable rep
               workspaceId: "workspace-watch",
               appContext: { appName: "Slack" },
               capture: null,
-              ocrBlocks: [],
+              screenTextBlocks: [],
               interactionCandidates: [],
               visibleText: "Slack",
               recentActions: [],
@@ -615,7 +674,7 @@ test("scan records no-trigger details for wechat desktop scans", async () => {
               workspaceId: "workspace-watch",
               appContext: { appName: "WeChat" },
               capture: null,
-              ocrBlocks: [],
+              screenTextBlocks: [],
               interactionCandidates: [],
               visibleText: "WeChat",
               recentActions: [],
@@ -730,7 +789,7 @@ test("scan records stage details when a watch stage times out", async () => {
               workspaceId: "workspace-watch",
               appContext: { appName: "Slack" },
               capture: null,
-              ocrBlocks: [],
+              screenTextBlocks: [],
               interactionCandidates: [],
               visibleText: "Slack",
               recentActions: [],

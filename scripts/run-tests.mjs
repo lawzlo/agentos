@@ -27,7 +27,11 @@ if (!entries.length) {
 await new Promise((resolve, reject) => {
   const child = spawn(process.execPath, ["--test", ...defaultRunnerArgs, ...runnerArgs, ...entries], {
     cwd: rootDir,
-    stdio: "inherit"
+    stdio: "inherit",
+    env: {
+      ...process.env,
+      AGENTOS_STORAGE_GUARD_MAX_USED_PERCENT: process.env.AGENTOS_STORAGE_GUARD_MAX_USED_PERCENT ?? "100"
+    }
   });
 
   child.on("exit", (code) => {

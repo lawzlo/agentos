@@ -1,9 +1,5 @@
 import type { AgentModelClient } from "./model-client.js";
 import { inferReplyLanguage } from "./reply-language.js";
-import {
-  pickBossReplyTopic,
-  type BossSemanticFacts
-} from "./boss-semantic-facts.js";
 import type { OutlookSemanticFacts } from "./outlook-semantic-facts.js";
 import type { SlackSemanticFacts } from "./slack-semantic-facts.js";
 import type { WeChatSemanticFacts } from "./wechat-semantic-facts.js";
@@ -114,58 +110,6 @@ function learnedReplyStylePreferences({
   });
 }
 
-function draftBossHeuristicReply({
-  summary,
-  context,
-  semanticFacts = null,
-  stylePreferences,
-  modelError
-}: {
-  summary: string;
-  context: string[];
-  semanticFacts?: BossSemanticFacts | null;
-  stylePreferences: string[];
-  modelError: string | null;
-}): LivePackDraftResponse {
-  const semanticContext = uniqueStrings([
-    String(semanticFacts?.latestInboundMessage ?? "").trim(),
-    ...context
-  ]).filter(Boolean);
-  const replyLanguageHint = inferReplyLanguage({ summary, context: semanticContext });
-  const chinese =
-    replyLanguageHint === "zh"
-    || (replyLanguageHint === null && /[\u4e00-\u9fff]/u.test(`${summary} ${semanticContext.join(" ")} ${stylePreferences.join(" ")}`));
-  const wantsConcise = /(?:short|concise|brief|直接|简短|简洁)/iu.test(stylePreferences.join(" "));
-  const topic = pickBossReplyTopic(semanticContext, chinese ? "zh" : "en", semanticFacts?.latestInboundMessage ?? null);
-
-  const replyText = chinese
-    ? wantsConcise
-      ? topic
-        ? `你好，收到你的消息。关于${topic}，我会尽快跟进。`
-        : "你好，已看到你的信息，我会尽快跟进。"
-      : topic
-        ? `你好，收到你的消息。关于${topic}，我会先确认一下，并尽快和你沟通后续。`
-        : "你好，我已看到你的信息，会尽快查看并和你沟通后续。"
-    : wantsConcise
-      ? topic
-        ? `Thanks for your note. I'll follow up on ${topic} shortly.`
-        : "Thanks, I saw your message and will follow up soon."
-      : topic
-        ? `Thanks for your note. I saw ${topic} and will review it before following up shortly.`
-        : "Thanks for reaching out. I reviewed your profile and will follow up shortly.";
-
-  return {
-    replyText,
-    metadata: {
-      confidence: null,
-      rationale: modelError ? `heuristic recruiting follow-up after model failure: ${modelError}` : "heuristic recruiting follow-up",
-      source: "heuristic",
-      stylePreferences,
-      ...(modelError ? { modelError } : {})
-    }
-  };
-}
-
 export async function draftPackReply({
   controlPlane,
   livePack,
@@ -185,18 +129,11 @@ export async function draftPackReply({
   context: string[];
   metadata?: Record<string, unknown> | null;
 }): Promise<LivePackDraftResponse> {
-  const bossSemanticFacts = ((metadata ?? {}) as { semanticFacts?: BossSemanticFacts | null }).semanticFacts ?? null;
   const outlookSemanticFacts = ((metadata ?? {}) as { semanticFacts?: OutlookSemanticFacts | null }).semanticFacts ?? null;
   const slackSemanticFacts = ((metadata ?? {}) as { semanticFacts?: SlackSemanticFacts | null }).semanticFacts ?? null;
   const wechatSemanticFacts = ((metadata ?? {}) as { semanticFacts?: WeChatSemanticFacts | null }).semanticFacts ?? null;
   const effectiveContext =
-    livePack === "boss-browser" && bossSemanticFacts
-      ? uniqueStrings([
-          bossSemanticFacts.latestInboundMessage,
-          ...bossSemanticFacts.salientContext,
-          ...context
-        ]).filter(Boolean)
-      : livePack === "outlook-desktop" && outlookSemanticFacts
+    livePack === "outlook-desktop" && outlookSemanticFacts
         ? uniqueStrings([
             outlookSemanticFacts.latestInboundMessage,
             ...outlookSemanticFacts.salientContext,
@@ -243,16 +180,6 @@ export async function draftPackReply({
     } catch (error) {
       modelError = error instanceof Error ? error.message : String(error ?? "model draft failed");
     }
-  }
-
-  if (livePack === "boss-browser") {
-    return draftBossHeuristicReply({
-      summary,
-      context: effectiveContext,
-      semanticFacts: bossSemanticFacts,
-      stylePreferences,
-      modelError
-    });
   }
 
   const fallback = draftHeuristicReply({

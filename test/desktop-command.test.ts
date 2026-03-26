@@ -60,8 +60,6 @@ test("collectDesktopProbe summarizes a WeChat world state and vision pack analys
         elements: [{ id: "ax-1" }, { id: "ax-2" }, { id: "ax-3" }]
       },
       accessibilityCandidateCount: 3,
-      ocrAvailable: true,
-      ocrError: null
     },
     capture: {
       id: "artifact-1",
@@ -73,9 +71,9 @@ test("collectDesktopProbe summarizes a WeChat world state and vision pack analys
       metadata: {},
       createdAt: new Date().toISOString()
     },
-    ocrBlocks: [
+    screenTextBlocks: [
       {
-        id: "ocr-1",
+        id: "screen-1",
         text: "微信",
         confidence: 0.98,
         bounds: { x: 0, y: 0, width: 100, height: 20, centerX: 50, centerY: 10 }
@@ -201,12 +199,10 @@ test("collectDesktopProbe can inspect raw desktop state without a pack analysis"
     appContext: {
       appName: "Terminal",
       windows: [{ title: "Terminal" }],
-      accessibilityCandidateCount: 0,
-      ocrAvailable: false,
-      ocrError: "OCR unavailable"
+      accessibilityCandidateCount: 0
     },
     capture: null,
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [],
     visibleText: "Terminal\nnpm test",
     recentActions: [],
@@ -242,7 +238,6 @@ test("collectDesktopProbe can inspect raw desktop state without a pack analysis"
   assert.equal(report.readiness, null);
   assert.equal(report.packAnalysis, null);
   assert.equal(report.frontmostApp, "Terminal");
-  assert.equal(report.ocrAvailable, false);
   assert.equal(report.visibleTextPreview[0], "Terminal");
 });
 
@@ -262,9 +257,7 @@ test("collectDesktopProbe can use vision analysis to identify WeChat unread thre
           bounds: { x: 100, y: 40, width: 900, height: 700, centerX: 550, centerY: 390 }
         }
       ],
-      accessibilityCandidateCount: 0,
-      ocrAvailable: true,
-      ocrError: null
+      accessibilityCandidateCount: 0
     },
     capture: {
       id: "artifact-1",
@@ -276,7 +269,7 @@ test("collectDesktopProbe can use vision analysis to identify WeChat unread thre
       metadata: {},
       createdAt: new Date().toISOString()
     },
-    ocrBlocks: [],
+    screenTextBlocks: [],
     interactionCandidates: [
       {
         id: "thread-wechat-pay",
@@ -286,7 +279,7 @@ test("collectDesktopProbe can use vision analysis to identify WeChat unread thre
         role: "text",
         bounds: { x: 220, y: 400, width: 120, height: 24, centerX: 280, centerY: 412 },
         confidence: 0.9,
-        sourceHints: { source: "ocr-wechat-list" },
+        sourceHints: { source: "screen-wechat-list" },
         isInteractive: true
       }
     ],
@@ -376,9 +369,7 @@ test("collectDesktopProbe can analyze a target app even when the current frontmo
             appContext: {
               appName: "Terminal",
               windows: [{ title: "Terminal" }],
-              accessibilityCandidateCount: 0,
-              ocrAvailable: true,
-              ocrError: null
+              accessibilityCandidateCount: 0
             },
             capture: {
               id: "artifact-wechat-body",
@@ -390,7 +381,7 @@ test("collectDesktopProbe can analyze a target app even when the current frontmo
               metadata: {},
               createdAt: new Date().toISOString()
             },
-            ocrBlocks: [],
+            screenTextBlocks: [],
             interactionCandidates: [],
             visibleText: "Terminal\nagentos desktop probe",
             recentActions: [],
@@ -495,9 +486,7 @@ test("collectDesktopProbe does not fall back to OCR world state for WeChat when 
                   bounds: { x: 0, y: 0, width: 900, height: 700, centerX: 450, centerY: 350 }
                 }
               ],
-              accessibilityCandidateCount: 0,
-              ocrAvailable: true,
-              ocrError: null
+              accessibilityCandidateCount: 0
             },
             capture: {
               id: "artifact-wechat-body",
@@ -509,7 +498,7 @@ test("collectDesktopProbe does not fall back to OCR world state for WeChat when 
               metadata: {},
               createdAt: new Date().toISOString()
             },
-            ocrBlocks: [],
+            screenTextBlocks: [],
             interactionCandidates: [
               {
                 id: "wechat-badge",
@@ -519,18 +508,18 @@ test("collectDesktopProbe does not fall back to OCR world state for WeChat when 
                 role: "text",
                 bounds: { x: 90, y: 140, width: 18, height: 18, centerX: 99, centerY: 149 },
                 confidence: 0.93,
-                sourceHints: { source: "ocr" },
+                sourceHints: { source: "screen" },
                 isInteractive: true
               },
               {
-                id: "wechat-thread-ocr",
+                id: "wechat-thread-screen",
                 surface: "desktop",
                 kind: "text",
                 text: "Official Accounts",
                 role: "text",
                 bounds: { x: 120, y: 140, width: 180, height: 28, centerX: 210, centerY: 154 },
                 confidence: 0.97,
-                sourceHints: { source: "ocr" },
+                sourceHints: { source: "screen" },
                 isInteractive: true
               }
             ],
@@ -618,9 +607,7 @@ test("collectDesktopProbe uses vision for WeChat and does not infer a composer f
                 }
               ],
               captureWindowNumber: 11,
-              accessibilityCandidateCount: 0,
-              ocrAvailable: true,
-              ocrError: null
+              accessibilityCandidateCount: 0
             },
             capture: {
               id: "artifact-wechat-body",
@@ -632,7 +619,7 @@ test("collectDesktopProbe uses vision for WeChat and does not infer a composer f
               metadata: {},
               createdAt: new Date().toISOString()
             },
-            ocrBlocks: [],
+            screenTextBlocks: [],
             interactionCandidates: [
               {
                 id: "wechat-badge",
@@ -642,7 +629,7 @@ test("collectDesktopProbe uses vision for WeChat and does not infer a composer f
                 role: "text",
                 bounds: { x: 190, y: 170, width: 18, height: 18, centerX: 199, centerY: 179 },
                 confidence: 0.94,
-                sourceHints: { source: "ocr" },
+                sourceHints: { source: "screen" },
                 isInteractive: true
               },
               {
@@ -653,7 +640,7 @@ test("collectDesktopProbe uses vision for WeChat and does not infer a composer f
                 role: "text",
                 bounds: { x: 220, y: 170, width: 60, height: 24, centerX: 250, centerY: 182 },
                 confidence: 0.96,
-                sourceHints: { source: "ocr-wechat-list" },
+                sourceHints: { source: "screen-wechat-list" },
                 isInteractive: true
               },
               {
@@ -664,7 +651,7 @@ test("collectDesktopProbe uses vision for WeChat and does not infer a composer f
                 role: "text",
                 bounds: { x: 620, y: 150, width: 320, height: 28, centerX: 780, centerY: 164 },
                 confidence: 0.92,
-                sourceHints: { source: "ocr" },
+                sourceHints: { source: "screen" },
                 isInteractive: true
               }
             ],
@@ -735,12 +722,10 @@ test("collectDesktopProbe does not report a WeChat unread candidate without unre
                 }
               ],
               captureWindowNumber: 11,
-              accessibilityCandidateCount: 0,
-              ocrAvailable: true,
-              ocrError: null
+              accessibilityCandidateCount: 0
             },
             capture: null,
-            ocrBlocks: [],
+            screenTextBlocks: [],
             interactionCandidates: [
               {
                 id: "global-badge",
@@ -750,7 +735,7 @@ test("collectDesktopProbe does not report a WeChat unread candidate without unre
                 role: "text",
                 bounds: { x: 30, y: 90, width: 26, height: 20, centerX: 43, centerY: 100 },
                 confidence: 0.91,
-                sourceHints: { source: "ocr" },
+                sourceHints: { source: "screen" },
                 isInteractive: true
               },
               {
@@ -761,7 +746,7 @@ test("collectDesktopProbe does not report a WeChat unread candidate without unre
                 role: "text",
                 bounds: { x: 220, y: 160, width: 80, height: 24, centerX: 260, centerY: 172 },
                 confidence: 0.95,
-                sourceHints: { source: "ocr-wechat-list" },
+                sourceHints: { source: "screen-wechat-list" },
                 isInteractive: true
               }
             ],
