@@ -558,30 +558,6 @@ async function collectBrowserState(
   deps: SurfaceStateDeps = {}
 ): Promise<SurfaceStateReport> {
   const nowIso = deps.nowIso ?? (() => new Date().toISOString());
-  if (!deps.browserAdapter && !config.browserExecutable) {
-    return {
-      request,
-      surface: "browser",
-      ready: false,
-      readinessState: "browser_unavailable",
-      blockers: ["browser_unavailable"],
-      runnerType: "browser_native",
-      scene: "unknown",
-      selectedTarget: null,
-      skipReasons: ["browser_unavailable"],
-      recoverySuggested: "takeover",
-      frontmostApp: null,
-      activeWindow: null,
-      visibleTextPreview: [],
-      capturePath: null,
-      threadCandidates: [],
-      composeCandidate: null,
-      sendCandidate: null,
-      packAnalysis: null,
-      manualIntervention: null
-    };
-  }
-
   const adapter = deps.browserAdapter ?? createBrowserAdapter();
   const workspace = deps.workspace ?? (await createStateWorkspace(request, nowIso));
   const task = buildStateTask("browser", request.packName ?? request.url ?? "browser", nowIso);
@@ -670,7 +646,7 @@ async function collectBrowserState(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error ?? "browser state failed");
     const unavailable =
-      /No browser CDP endpoint configured|No attachable Chrome page is open|Stagehand runtime is unavailable/iu.test(message);
+      /No attachable Chrome session is available|Configured browser CDP endpoint .* cannot be bootstrapped|Browser CDP endpoint did not become ready|No attachable Chrome page is open|Stagehand runtime is unavailable/iu.test(message);
     return {
       request,
       surface: "browser",

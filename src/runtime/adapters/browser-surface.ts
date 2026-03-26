@@ -10,6 +10,7 @@ import { RecoverableError } from "../errors.js";
 import { createInteractionCandidate, createWorldState, summarizeRecentActions } from "../world-state.js";
 import { createStagehandRuntime, type StagehandRuntime } from "../stagehand-runtime.js";
 import { cloneChromeProfileToWorkspace, resolveChromeProfileSource } from "../chrome-profile-utils.js";
+import { ensureAttachableChromeSession } from "../chrome-session-bootstrap.js";
 import type { ArtifactStore } from "../artifact-store.js";
 import type { WorkspaceRecord } from "../../types/runtime-schema.js";
 import type { AgentModelConfig, BrowserMode } from "../../config.js";
@@ -193,41 +194,6 @@ async function waitForCdpUrl(port: number, timeoutMs = 30000): Promise<string> {
   throw new Error(`Chrome remote debugging did not become ready on port ${port}: ${String(lastError ?? "timeout")}`);
 }
 
-async function resolveBrowserCdpEndpoint(endpoint: string, timeoutMs = 10000): Promise<string> {
-  const normalized = String(endpoint ?? "").trim();
-  if (!normalized) {
-    throw new Error(
-      "No browser CDP endpoint configured. Start Chrome with --remote-debugging-port and set AGENTOS_BROWSER_CDP_URL."
-    );
-  }
-
-  if (/^wss?:\/\//iu.test(normalized)) {
-    return normalized;
-  }
-
-  const target = normalized.replace(/\/$/u, "");
-  const deadline = Date.now() + timeoutMs;
-  let lastError: unknown = null;
-  while (Date.now() < deadline) {
-    try {
-      const response = await fetch(`${target}/json/version`);
-      if (response.ok) {
-        const payload = (await response.json()) as { webSocketDebuggerUrl?: string };
-        if (typeof payload.webSocketDebuggerUrl === "string" && payload.webSocketDebuggerUrl) {
-          return payload.webSocketDebuggerUrl;
-        }
-      }
-    } catch (error) {
-      lastError = error;
-    }
-    await waitForMs(250);
-  }
-
-  throw new Error(
-    `Browser CDP endpoint did not become ready at ${target}: ${String(lastError ?? "timeout")}`
-  );
-}
-
 interface BrowserRuntimeSession {
   browser: Browser;
   context: BrowserContext;
@@ -317,7 +283,12 @@ export class BrowserSurfaceAdapter extends SurfaceAdapter {
     }
 
     if (this.browserMode === "attach_existing") {
-      const cdpUrl = await resolveBrowserCdpEndpoint(this.browserCdpUrl ?? "");
+      const attachSession = await ensureAttachableChromeSession({
+        browserExecutable: this.browserExecutable,
+        browserCdpUrl: this.browserCdpUrl,
+        timeoutMs: Math.max(30000, Number(this.modelConfig.timeoutMs ?? 0))
+      });
+      const cdpUrl = attachSession.cdpUrl;
       const browser = await chromium.connectOverCDP(cdpUrl);
       const context = browser.contexts()[0];
       if (!context) {
@@ -409,21 +380,25 @@ export class BrowserSurfaceAdapter extends SurfaceAdapter {
     }
 
     if (runtime.mode === "attach_existing") {
-      const existingPages = runtime.context
-        .pages()
-        .filter((page) => !page.isClosed())
-        .filter((page) => !/^chrome-extension:|^devtools:|^chrome:\/\//iu.test(page.url() || ""));
-      const preferredPage =
-        existingPages.find((page) => page.url() && page.url() !== "about:blank")
-        ?? existingPages.at(-1)
-        ?? null;
-      if (!preferredPage) {
-        throw new Error(
-          "No attachable Chrome page is open in the existing browser session. Open the target site in your main Chrome window and retry."
-        );
+      const deadline = Date.now() + 10000;
+      while (Date.now() < deadline) {
+        const existingPages = runtime.context
+          .pages()
+          .filter((page) => !page.isClosed())
+          .filter((page) => !/^chrome-extension:|^devtools:|^chrome:\/\//iu.test(page.url() || ""));
+        const preferredPage =
+          existingPages.find((page) => page.url() && page.url() !== "about:blank")
+          ?? existingPages.at(-1)
+          ?? null;
+        if (preferredPage) {
+          runtime.page = preferredPage;
+          return preferredPage;
+        }
+        await waitForMs(250);
       }
-      runtime.page = preferredPage;
-      return preferredPage;
+      throw new Error(
+        "No attachable Chrome page is open in the existing browser session. Open the target site in your main Chrome window and retry."
+      );
     }
 
     const page = await runtime.context.newPage();

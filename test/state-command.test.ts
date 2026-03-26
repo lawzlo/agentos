@@ -257,7 +257,7 @@ test("collectSurfaceState returns browser_unavailable when attach-existing brows
     browserAdapter: {
       async act() {
         throw new Error(
-          "No browser CDP endpoint configured. Start Chrome with --remote-debugging-port and set AGENTOS_BROWSER_CDP_URL."
+          "No attachable Chrome session is available at http://127.0.0.1:9222, and AgentOS could not bootstrap Chrome because no browser executable was detected."
         );
       },
       async observe() {
